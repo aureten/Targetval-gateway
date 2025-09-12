@@ -493,3 +493,80 @@ async def comp_freedom(query: str, x_api_key: Optional[str] = Header(default=Non
     return Evidence(status="NO_DATA", source="The Lens / Espacenet (API keys or scraping)",
                     fetched_n=0, data{"query": query},
                     citations["https://www.lens.org/","https://worldwide.espacenet.com/"], fetched_at=_now())
+from app.clients.sources import (
+    ot_genetics_l2g, expression_atlas_gene, string_map_and_network,
+    reactome_search, ctgov_studies_outcomes, ot_platform_known_drugs
+)
+from app.utils.evidence import Evidence
+
+@router.get("/report/run")
+async def report_run(gene: str, efo: str, symbol: str, condition: str, x_api_key: Optional[str] = Header(default=None)):
+    _require_key(x_api_key)
+
+    # fan out to 5 high-value modules (you can add more later)
+    tasks = [
+        ot_genetics_l2g(gene, efo),                         # genetics/l2g
+        expression_atlas_gene(symbol),                      # expr/baseline
+        string_map_and_network(symbol),                     # mech/ppi
+        reactome_search(symbol),                            # mech/pathways
+        ctgov_studies_outcomes(condition),                  # clin/endpoints
+    ]
+    kd_task = ot_platform_known_drugs(symbol)              # tract/drugs
+
+    res_l2g, res_expr, res_ppi, res_path, res_ct = await asyncio.gather(*tasks)
+    res_kd = await kd_task
+
+    # normalize into Evidence records (and ledger entries)
+    out: Dict[str, Evidence] = {}
+
+    # L2G
+    l2g = Evidence(status="OK", source="OpenTargets Genetics", fetched_n=len(res_l2g["coloc"]),
+                   data={"gene": gene, "efo": efo, "results": res_l2g["coloc"]},
+                   citations=res_l2g["citations"], fetched_at=time.time())
+    await ledger.add("genetics/l2g", l2g.status, l2g.fetched_n, l2g.source); out["genetics_l2g"] = l2g
+
+    # Expression baseline (summarize quickly)
+    expr_rows = []
+    for exp in (res_expr["raw"].get("experiments", []) if isinstance(res_expr.get("raw"), dict) else []):
+        for d in exp.get("data", []):
+            expr_rows.append({
+                "experimentAccession": exp.get("experimentAccession"),
+                "tissue": d.get("organismPart") or d.get("tissue"),
+                "value": (d.get("expressions", [{}])[0].get("value") if d.get("expressions") else None)
+            })
+    expr = Evidence(status="OK", source="Expression Atlas", fetched_n=len(expr_rows),
+                    data={"symbol": symbol, "baseline": expr_rows[:200]},
+                    citations=res_expr["citations"], fetched_at=time.time())
+    await ledger.add("expr/baseline", expr.status, expr.fetched_n, expr.source); out["expr_baseline"] = expr
+
+    # PPI
+    edges = res_ppi["edges"]
+    ppi = Evidence(status="OK", source="STRING REST", fetched_n=len(edges),
+                   data={"symbol": symbol, "edges": edges[:100]},
+                   citations=res_ppi["citations"], fetched_at=time.time())
+    await ledger.add("mech/ppi", ppi.status, ppi.fetched_n, ppi.source); out["mech_ppi"] = ppi
+
+    # Pathways
+    hits = [h for h in res_path["results"] if (h.get("stId","").startswith("R-HSA") or "Pathway" in h.get("type",""))]
+    path = Evidence(status="OK", source="Reactome ContentService", fetched_n=len(hits),
+                    data={"symbol": symbol, "pathways": hits[:100]},
+                    citations=res_path["citations"], fetched_at=time.time())
+    await ledger.add("mech/pathways", path.status, path.fetched_n, path.source); out["mech_pathways"] = path
+
+    # Clinical endpoints
+    studies = res_ct["studies"]
+    clin = Evidence(status="OK", source="ClinicalTrials.gov v2", fetched_n=len(studies),
+                    data={"condition": condition, "studies": studies[:50]},
+                    citations=res_ct["citations"], fetched_at=time.time())
+    await ledger.add("clin/endpoints", clin.status, clin.fetched_n, clin.source); out["clin_endpoints"] = clin
+
+    # Known drugs / pipeline
+    kd_rows = res_kd["knownDrugs"]
+    kd = Evidence(status="OK", source="OpenTargets Platform GraphQL", fetched_n=len(kd_rows),
+                  data={"symbol": symbol, "knownDrugs": kd_rows[:200], "count": res_kd.get("count")},
+                  citations=res_kd["citations"], fetched_at=time.time())
+    await ledger.add("tract/drugs", kd.status, kd.fetched_n, kd.source); out["tract_drugs"] = kd
+
+    # Tiny roll-up so you can plug into TargetVal scorecard later
+    summary = {k: {"status": v.status, "n": v.fetched_n} for k, v in out.items()}
+    return {"summary": summary, "modules": {k: v.dict() for k,v in out.items()}}
