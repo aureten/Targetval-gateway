@@ -1,3 +1,8 @@
+from fastapi import FastAPI
+
+app = FastAPI()
+app.include_router(router)
+
 import os, time, urllib.parse, asyncio
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
