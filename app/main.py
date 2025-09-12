@@ -219,3 +219,5 @@ async def immunogenicity_labels(symbol: str, x_api_key: Optional[str] = Header(d
         citations=[],
         fetched_at=_now(),
     )
+from app.routers.targetval_router import router as tv_router
+app.include_router(tv_router, prefix="/v1")
