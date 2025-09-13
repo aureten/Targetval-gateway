@@ -3,17 +3,18 @@ import os, time, urllib.parse, asyncio
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 import httpx
+from typing import Optional, List, Dict
 
 API_KEY = os.getenv("API_KEY")
 
-app = FastAPI(title="TARGETVAL Gateway", version="0.1.0")
+app = FastAPI(title="TARGETVAL Gateway", version="0.1.1")
 
 class Evidence(BaseModel):
     status: str
     source: str
     fetched_n: int
     data: dict
-    citations: list[str]
+    citations: List[str]
     fetched_at: float
 
 def require_key(x_api_key: str | None):
@@ -22,10 +23,12 @@ def require_key(x_api_key: str | None):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Bad or missing x-api-key")
 
-@app.get("/health")
+# ---------- Health endpoint (PUBLIC) ----------
+@app.get("/v1/health")
 def health():
     return {"ok": True, "time": time.time()}
 
+# ---------- 0) ClinicalTrials.gov ----------
 @app.get("/clinical/ctgov", response_model=Evidence)
 async def ctgov(condition: str, x_api_key: str | None = Header(default=None)):
     require_key(x_api_key)
@@ -48,8 +51,6 @@ async def ctgov(condition: str, x_api_key: str | None = Header(default=None)):
             except Exception:
                 await asyncio.sleep(wait)
     raise HTTPException(status_code=500, detail="Failed to fetch studies")
-# --- ADD BELOW your existing imports ---
-from typing import Optional, List, Dict
 
 # ---------- Helpers ----------
 async def _get_json(client, url, max_tries=3):
@@ -71,11 +72,7 @@ def _now():
 @app.get("/genetics/l2g", response_model=Evidence)
 async def genetics_l2g(gene: str, efo: str, x_api_key: Optional[str] = Header(default=None)):
     require_key(x_api_key)
-    # Open Targets Genetics GraphQL endpoint works best with POST, but we’ll
-    # use the public REST "study-locus2gene" proxy for a quick summary where possible.
-    # If not available, we return a stub with a citation to the GraphQL endpoint.
     base_gql = "https://genetics.opentargets.org/graphql"
-    # Minimal payload (returned in data for transparency)
     query = {
         "query": """
         query Q($geneId:String!, $efoId:String!){
@@ -110,12 +107,9 @@ async def genetics_l2g(gene: str, efo: str, x_api_key: Optional[str] = Header(de
 @app.get("/expression/baseline", response_model=Evidence)
 async def expression_baseline(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     require_key(x_api_key)
-    # Expression Atlas JSON baseline endpoint (public) uses gene symbols.
-    # It returns tissues and TPM-ish measures depending on dataset.
     base = f"https://www.ebi.ac.uk/gxa/genes/{symbol}.json"
     async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=4.0)) as client:
         body = await _get_json(client, base)
-        # Summarize into (tissue, level) pairs if present
         results = []
         try:
             experiments = body.get("experiments", [])
@@ -140,8 +134,6 @@ async def expression_baseline(symbol: str, x_api_key: Optional[str] = Header(def
 @app.get("/ppi/string", response_model=Evidence)
 async def ppi_string(symbol: str, cutoff: float = 0.9, limit: int = 50, x_api_key: Optional[str] = Header(default=None)):
     require_key(x_api_key)
-    # STRING alias to protein mapping (human)
-    # 9606 = Homo sapiens
     map_url = f"https://string-db.org/api/json/get_string_ids?identifiers={symbol}&species=9606"
     network_url_tpl = "https://string-db.org/api/json/network?identifiers={id}&species=9606"
     async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=4.0)) as client:
@@ -152,7 +144,6 @@ async def ppi_string(symbol: str, cutoff: float = 0.9, limit: int = 50, x_api_ke
                             citations=[map_url], fetched_at=_now())
         string_id = ids[0].get("stringId")
         net = await _get_json(client, network_url_tpl.format(id=string_id))
-        # filter by combined_score
         neighbors = []
         for edge in net:
             score = edge.get("score") or edge.get("combined_score")
@@ -176,14 +167,11 @@ async def ppi_string(symbol: str, cutoff: float = 0.9, limit: int = 50, x_api_ke
 @app.get("/pathways/reactome", response_model=Evidence)
 async def pathways_reactome(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     require_key(x_api_key)
-    # Reactome: map UniProt or gene symbol to pathways (using ContentService)
-    #  Human default
     search = f"https://reactome.org/ContentService/search/query?query={symbol}&species=Homo%20sapiens"
     details_tpl = "https://reactome.org/ContentService/data/pathways/low/diagram/{stableId}"
     async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=4.0)) as client:
         s = await _get_json(client, search)
         hits = s.get("results", []) if isinstance(s, dict) else []
-        # Keep pathway-like hits
         pathways = []
         for h in hits:
             if "Pathway" in h.get("species", "") or h.get("stId", "").startswith("R-HSA"):
@@ -205,8 +193,6 @@ async def pathways_reactome(symbol: str, x_api_key: Optional[str] = Header(defau
 @app.get("/immunogenicity/labels", response_model=Evidence)
 async def immunogenicity_labels(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     require_key(x_api_key)
-    # Stub: returns known high-level ADA mentions for monoclonals by simple key match
-    # (We can replace with openFDA + EMA EPAR parsing later.)
     ada_table = {
         "ADALIMUMAB": {"ada_incidence": "highly variable across indications (10–30%+)", "notes": "Human mAb; concomitant MTX reduces ADA"},
         "INFLIXIMAB": {"ada_incidence": "common without concomitant immunosuppression", "notes": "Chimeric mAb; infusion reactions correlate with ADA"},
@@ -220,5 +206,7 @@ async def immunogenicity_labels(symbol: str, x_api_key: Optional[str] = Header(d
         citations=[],
         fetched_at=_now(),
     )
+
+# ---------- Include router if present ----------
 from app.routers.targetval_router import router as tv_router
 app.include_router(tv_router, prefix="/v1")
