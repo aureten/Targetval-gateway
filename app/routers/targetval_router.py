@@ -116,12 +116,14 @@ def checklist_stub():
     return {"ok": True, "note": "Ledger optional—skipped in this build."}
 
 # =============================================================================
-# BUCKET 1 — Human Genetics & Causality (8)
+# BUCKET 1 — Human Genetics & Causality
 # =============================================================================
 
-# 1) Locus2Gene — Open Targets Genetics GraphQL
 @router.get("/genetics/l2g", response_model=Evidence)
 async def genetics_l2g(gene: str, efo: str, x_api_key: Optional[str] = Header(default=None)):
+    """
+    Locus2Gene colocalisation: try Open Targets; fallback to GWAS Catalog REST.
+    """
     _require_key(x_api_key)
     gql = "https://genetics.opentargets.org/graphql"
     payload = {
@@ -135,15 +137,60 @@ async def genetics_l2g(gene: str, efo: str, x_api_key: Optional[str] = Header(de
         }""",
         "variables": {"geneId": gene, "efoId": efo}
     }
-    body = await _post_json(gql, payload)
-    coloc = body.get("data", {}).get("colocalisationByGeneAndDisease", []) or []
-    return Evidence(status="OK", source="OpenTargets Genetics GraphQL", fetched_n=len(coloc),
-                    data={"gene": gene, "efo": efo, "results": coloc},
-                    citations=[gql], fetched_at=_now())
+    try:
+        body = await _post_json(gql, payload)
+        coloc = body.get("data", {}).get("colocalisationByGeneAndDisease", []) or []
+        return Evidence(
+            status="OK",
+            source="OpenTargets Genetics GraphQL",
+            fetched_n=len(coloc),
+            data={"gene": gene, "efo": efo, "results": coloc},
+            citations=[gql],
+            fetched_at=_now(),
+        )
+    except Exception:
+        pass
 
-# 2) Rare variation & constraint — gnomAD GraphQL
+    # fallback: GWAS Catalog gene associations filtered by EFO
+    gwas_url = f"https://www.ebi.ac.uk/gwas/rest/api/associations?geneName={urllib.parse.quote(gene)}"
+    try:
+        js = await _get_json(gwas_url)
+        hits = []
+        if isinstance(js, dict):
+            hits = js.get("_embedded", {}).get("associations", [])
+        elif isinstance(js, list):
+            hits = js
+        filtered = []
+        for assoc in hits:
+            traits = assoc.get("efoTraits") or []
+            for trait in traits:
+                trait_id = trait.get("shortForm") if isinstance(trait, dict) else trait
+                if trait_id and trait_id.upper() == efo.upper():
+                    filtered.append(assoc)
+                    break
+        return Evidence(
+            status="OK" if filtered else "NO_DATA",
+            source="GWAS Catalog REST (fallback)",
+            fetched_n=len(filtered),
+            data={"gene": gene, "efo": efo, "associations": filtered[:100]},
+            citations=[gwas_url],
+            fetched_at=_now(),
+        )
+    except Exception as e:
+        return Evidence(
+            status="ERROR",
+            source=f"OpenTargets & GWAS Catalog failed: {e}",
+            fetched_n=0,
+            data={"gene": gene, "efo": efo},
+            citations=[gql, gwas_url],
+            fetched_at=_now(),
+        )
+
 @router.get("/genetics/rare", response_model=Evidence)
 async def genetics_rare(symbol: str, x_api_key: Optional[str] = Header(default=None)):
+    """
+    Rare variation & constraint: try gnomAD GraphQL; fallback to PanelApp gene panels.
+    """
     _require_key(x_api_key)
     gql = "https://gnomad.broadinstitute.org/api"
     q = {
@@ -156,28 +203,90 @@ async def genetics_rare(symbol: str, x_api_key: Optional[str] = Header(default=N
         }""",
         "variables": {"symbol": symbol}
     }
-    body = await _post_json(gql, q)
-    g = (body.get("data", {}) or {}).get("gene")
-    return Evidence(status="OK" if g else "NO_DATA", source="gnomAD GraphQL",
-                    fetched_n=1 if g else 0, data={"symbol": symbol, "constraint": g or {}},
-                    citations=[gql], fetched_at=_now())
+    try:
+        body = await _post_json(gql, q)
+        g = (body.get("data", {}) or {}).get("gene")
+        return Evidence(
+            status="OK" if g else "NO_DATA",
+            source="gnomAD GraphQL",
+            fetched_n=1 if g else 0,
+            data={"symbol": symbol, "constraint": g or {}},
+            citations=[gql],
+            fetched_at=_now(),
+        )
+    except Exception:
+        pass
 
-# 3) Mendelian overlap — Monarch
+    panelapp_url = f"https://panelapp.genomicsengland.co.uk/api/v1/genes/{urllib.parse.quote(symbol)}"
+    try:
+        js = await _get_json(panelapp_url)
+        panels = []
+        if isinstance(js, dict) and "results" in js:
+            panels = js["results"]
+        elif isinstance(js, list):
+            panels = js
+        return Evidence(
+            status="OK" if panels else "NO_DATA",
+            source="PanelApp API (fallback)",
+            fetched_n=len(panels),
+            data={"symbol": symbol, "panels": panels[:50]},
+            citations=[panelapp_url],
+            fetched_at=_now(),
+        )
+    except Exception as e:
+        return Evidence(
+            status="ERROR",
+            source=f"gnomAD + PanelApp failed: {e}",
+            fetched_n=0,
+            data={"symbol": symbol},
+            citations=[gql, panelapp_url],
+            fetched_at=_now(),
+        )
+
 @router.get("/genetics/mendelian", response_model=Evidence)
 async def genetics_mendelian(symbol_or_entrez: str, x_api_key: Optional[str] = Header(default=None)):
+    """
+    Mendelian overlap & phenotype match: try Monarch; fallback to HPO (JAX) gene–disease API.
+    """
     _require_key(x_api_key)
-    url = f"https://api.monarchinitiative.org/api/bioentity/gene/NCBIGene:{urllib.parse.quote(symbol_or_entrez)}/diseases"
+    identifier = symbol_or_entrez.strip()
+    monarch_url = f"https://api.monarchinitiative.org/api/bioentity/gene/NCBIGene:{urllib.parse.quote(identifier)}/diseases"
     try:
-        body = await _get_json(url)
+        body = await _get_json(monarch_url)
         items = body.get("associations", []) if isinstance(body, dict) else []
-        return Evidence(status="OK", source="Monarch", fetched_n=len(items),
-                        data={"gene": symbol_or_entrez, "associations": items[:100]},
-                        citations=[url], fetched_at=_now())
+        return Evidence(
+            status="OK",
+            source="Monarch",
+            fetched_n=len(items),
+            data={"gene": identifier, "associations": items[:100]},
+            citations=[monarch_url],
+            fetched_at=_now(),
+        )
     except Exception:
-        return Evidence(status="NO_DATA", source="Monarch", fetched_n=0,
-                        data={"gene": symbol_or_entrez}, citations=[url], fetched_at=_now())
+        pass
 
-# 4) Causal inference (MR) — stub with citation
+    hpo_url = f"https://hpo.jax.org/api/hpo/gene/{urllib.parse.quote(identifier)}/disease"
+    try:
+        js = await _get_json(hpo_url)
+        diseases = js.get("diseaseAssociations", []) if isinstance(js, dict) else []
+        return Evidence(
+            status="OK" if diseases else "NO_DATA",
+            source="HPO JAX API (fallback)",
+            fetched_n=len(diseases),
+            data={"gene": identifier, "diseases": diseases[:100]},
+            citations=[hpo_url],
+            fetched_at=_now(),
+        )
+    except Exception as e:
+        return Evidence(
+            status="ERROR",
+            source=f"Monarch + HPO failed: {e}",
+            fetched_n=0,
+            data={"gene": identifier},
+            citations=[monarch_url, hpo_url],
+            fetched_at=_now(),
+        )
+
 @router.get("/genetics/mr", response_model=Evidence)
 async def genetics_mr(exposure_id: str, outcome_id: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -185,7 +294,6 @@ async def genetics_mr(exposure_id: str, outcome_id: str, x_api_key: Optional[str
                     fetched_n=0, data={"exposure_id": exposure_id, "outcome_id": outcome_id},
                     citations=["https://gwas.mrcieu.ac.uk/"], fetched_at=_now())
 
-# 5) lncRNA/circRNA — stub with citations
 @router.get("/genetics/lncrna", response_model=Evidence)
 async def genetics_lncrna(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -194,7 +302,6 @@ async def genetics_lncrna(symbol: str, x_api_key: Optional[str] = Header(default
                     citations=["http://www.noncode.org/","https://bigd.big.ac.cn/lncbook/","http://www.circbase.org/"],
                     fetched_at=_now())
 
-# 6) microRNAs — stub with citations
 @router.get("/genetics/mirna", response_model=Evidence)
 async def genetics_mirna(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -203,7 +310,6 @@ async def genetics_mirna(symbol: str, x_api_key: Optional[str] = Header(default=
                     citations=["https://mirtarbase.cuhk.edu.cn/","https://www.targetscan.org/"],
                     fetched_at=_now())
 
-# 7) Splicing/eQTL — eQTL Catalogue
 @router.get("/genetics/sqtl", response_model=Evidence)
 async def genetics_sqtl(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -214,23 +320,39 @@ async def genetics_sqtl(symbol: str, x_api_key: Optional[str] = Header(default=N
                     data={"symbol": symbol, "results": results[:100]},
                     citations=[url], fetched_at=_now())
 
-# 8) Epigenetics — ENCODE metadata
 @router.get("/genetics/epigenetics", response_model=Evidence)
 async def genetics_epigenetics(symbol: str, x_api_key: Optional[str] = Header(default=None)):
+    """
+    Epigenetics: query ENCODE; fallback to Cistrome DB.
+    """
     _require_key(x_api_key)
     q = urllib.parse.quote(f"search/?type=Experiment&assay_slims=ChIP-seq&searchTerm={symbol}")
     url = f"https://www.encodeproject.org/{q}&format=json"
-    body = await _get_json(url)
-    hits = body.get("@graph", []) if isinstance(body, dict) else []
-    return Evidence(status="OK", source="ENCODE", fetched_n=len(hits),
-                    data={"symbol": symbol, "experiments": hits[:50]},
-                    citations=[url], fetched_at=_now())
+    try:
+        body = await _get_json(url)
+        hits = body.get("@graph", []) if isinstance(body, dict) else []
+        return Evidence(status="OK", source="ENCODE", fetched_n=len(hits),
+                        data={"symbol": symbol, "experiments": hits[:50]},
+                        citations=[url], fetched_at=_now())
+    except Exception:
+        pass
+
+    cistrome_url = f"http://cistrome.org/api/data?gene_name={urllib.parse.quote(symbol)}"
+    try:
+        js = await _get_json(cistrome_url)
+        exp = js.get("data", []) if isinstance(js, dict) else js
+        return Evidence(status="OK" if exp else "NO_DATA", source="Cistrome DB (fallback)",
+                        fetched_n=len(exp), data={"symbol": symbol, "experiments": exp[:50]},
+                        citations=[cistrome_url], fetched_at=_now())
+    except Exception as e:
+        return Evidence(status="ERROR", source=f"ENCODE + Cistrome failed: {e}",
+                        fetched_n=0, data={"symbol": symbol},
+                        citations=[url, cistrome_url], fetched_at=_now())
 
 # =============================================================================
-# BUCKET 2 — Disease Association & Perturbation (4)
+# BUCKET 2 — Disease Association & Perturbation
 # =============================================================================
 
-# 9) Bulk RNA-seq — Expression Atlas experiments by condition
 @router.get("/assoc/bulk-rna", response_model=Evidence)
 async def assoc_bulk_rna(condition: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -241,7 +363,6 @@ async def assoc_bulk_rna(condition: str, x_api_key: Optional[str] = Header(defau
                     data={"condition": condition, "experiments": exps[:50]},
                     citations=[url], fetched_at=_now())
 
-# 10) Bulk proteomics — PRIDE
 @router.get("/assoc/bulk-prot", response_model=Evidence)
 async def assoc_bulk_prot(condition: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -252,7 +373,6 @@ async def assoc_bulk_prot(condition: str, x_api_key: Optional[str] = Header(defa
                     data={"condition": condition, "projects": projects[:50]},
                     citations=[url], fetched_at=_now())
 
-# 11) Single-cell & spatial — stub
 @router.get("/assoc/sc", response_model=Evidence)
 async def assoc_sc(condition: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -261,7 +381,6 @@ async def assoc_sc(condition: str, x_api_key: Optional[str] = Header(default=Non
                     citations=["https://cellxgene.cziscience.com/","https://data.humancellatlas.org/"],
                     fetched_at=_now())
 
-# 12) Perturbation screens — stub
 @router.get("/assoc/perturb", response_model=Evidence)
 async def assoc_perturb(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -271,29 +390,55 @@ async def assoc_perturb(symbol: str, x_api_key: Optional[str] = Header(default=N
                     fetched_at=_now())
 
 # =============================================================================
-# BUCKET 3 — Expression, Specificity & Localization (3)
+# BUCKET 3 — Expression, Specificity & Localization
 # =============================================================================
 
-# 13) Baseline expression — Expression Atlas
 @router.get("/expr/baseline", response_model=Evidence)
 async def expr_baseline(symbol: str, x_api_key: Optional[str] = Header(default=None)):
+    """
+    Baseline expression & tissue specificity: try Expression Atlas; fallback to UniProt tissue-specific comments.
+    """
     _require_key(x_api_key)
     base = f"https://www.ebi.ac.uk/gxa/genes/{urllib.parse.quote(symbol)}.json"
-    body = await _get_json(base)
-    experiments = body.get("experiments", []) if isinstance(body, dict) else []
-    rows: List[Dict[str, Any]] = []
-    for exp in experiments:
-        for d in exp.get("data", []):
-            rows.append({
-                "experimentAccession": exp.get("experimentAccession"),
-                "tissue": d.get("organismPart") or d.get("tissue"),
-                "value": (d.get("expressions", [{}])[0].get("value") if d.get("expressions") else None)
-            })
-    return Evidence(status="OK", source="Expression Atlas", fetched_n=len(rows),
-                    data={"symbol": symbol, "baseline": rows[:200]},
-                    citations=[base], fetched_at=_now())
+    try:
+        body = await _get_json(base)
+        experiments = body.get("experiments", []) if isinstance(body, dict) else []
+        rows: List[Dict[str, Any]] = []
+        for exp in experiments:
+            for d in exp.get("data", []):
+                rows.append({
+                    "experimentAccession": exp.get("experimentAccession"),
+                    "tissue": d.get("organismPart") or d.get("tissue"),
+                    "value": (d.get("expressions", [{}])[0].get("value") if d.get("expressions") else None)
+                })
+        return Evidence(status="OK", source="Expression Atlas", fetched_n=len(rows),
+                        data={"symbol": symbol, "baseline": rows[:200]},
+                        citations=[base], fetched_at=_now())
+    except Exception:
+        pass
 
-# 14) Protein localization — UniProt
+    q = urllib.parse.quote(f"gene_exact:{symbol}+AND+organism_id:9606")
+    uni_url = f"https://rest.uniprot.org/uniprotkb/search?query={q}&fields=accession,genes,cc_tissue_specificity&format=json&size=1"
+    try:
+        body = await _get_json(uni_url)
+        entries = body.get("results", []) if isinstance(body, dict) else []
+        baseline = []
+        if entries:
+            entry = entries[0]
+            ts = entry.get("comments", []) or []
+            for c in ts:
+                if c.get("commentType") == "TISSUE SPECIFICITY":
+                    baseline.append({"tissue": "; ".join(c.get("tissue", [])), "value": None})
+        return Evidence(status="OK" if baseline else "NO_DATA",
+                        source="UniProt REST (fallback)",
+                        fetched_n=len(baseline),
+                        data={"symbol": symbol, "baseline": baseline},
+                        citations=[uni_url], fetched_at=_now())
+    except Exception as e:
+        return Evidence(status="ERROR", source=f"Expression Atlas + UniProt failed: {e}",
+                        fetched_n=0, data={"symbol": symbol},
+                        citations=[base, uni_url], fetched_at=_now())
+
 @router.get("/expr/localization", response_model=Evidence)
 async def expr_localization(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -305,7 +450,6 @@ async def expr_localization(symbol: str, x_api_key: Optional[str] = Header(defau
                     fetched_n=len(entries), data={"symbol": symbol, "entries": entries},
                     citations=[url], fetched_at=_now())
 
-# 15) Inducibility / temporal regulation — stub
 @router.get("/expr/inducibility", response_model=Evidence)
 async def expr_inducibility(symbol: str, stimulus: Optional[str] = None, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -314,10 +458,9 @@ async def expr_inducibility(symbol: str, stimulus: Optional[str] = None, x_api_k
                     citations=["https://www.ncbi.nlm.nih.gov/geo/"], fetched_at=_now())
 
 # =============================================================================
-# BUCKET 4 — Mechanistic Wiring & Networks (3)
+# BUCKET 4 — Mechanistic Wiring & Networks
 # =============================================================================
 
-# 16) Pathways — Reactome
 @router.get("/mech/pathways", response_model=Evidence)
 async def mech_pathways(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -329,7 +472,6 @@ async def mech_pathways(symbol: str, x_api_key: Optional[str] = Header(default=N
                     data={"symbol": symbol, "pathways": pathways[:100]},
                     citations=[search], fetched_at=_now())
 
-# 17) PPI — STRING
 @router.get("/mech/ppi", response_model=Evidence)
 async def mech_ppi(symbol: str, cutoff: float = 0.9, limit: int = 50, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -351,7 +493,6 @@ async def mech_ppi(symbol: str, cutoff: float = 0.9, limit: int = 50, x_api_key:
                     data={"symbol": symbol, "edges": edges[:limit]},
                     citations=[map_url, net_url], fetched_at=_now())
 
-# 18) Ligand–receptor — OmniPath
 @router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -363,10 +504,9 @@ async def mech_ligrec(symbol: str, x_api_key: Optional[str] = Header(default=Non
                     citations=[url], fetched_at=_now())
 
 # =============================================================================
-# BUCKET 5 — Tractability & Modality (6)
+# BUCKET 5 — Tractability & Modality
 # =============================================================================
 
-# 19) Druggability/pipeline — Open Targets Platform GraphQL knownDrugs
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -389,7 +529,6 @@ async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=Non
                     fetched_n=len(rows), data={"symbol": symbol, "knownDrugs": rows[:200], "count": kd.get("count")},
                     citations=[gql], fetched_at=_now())
 
-# 20) Small-molecule ligandability — PDB search
 @router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -403,7 +542,6 @@ async def tract_ligandability_sm(symbol: str, x_api_key: Optional[str] = Header(
                     data={"symbol": symbol, "pdb_hits": hits[:100]},
                     citations=["https://www.rcsb.org/"], fetched_at=_now())
 
-# 21) Antibody ligandability — UniProt topology
 @router.get("/tract/ligandability-ab", response_model=Evidence)
 async def tract_ligandability_ab(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -415,7 +553,6 @@ async def tract_ligandability_ab(symbol: str, x_api_key: Optional[str] = Header(
                     fetched_n=len(entries), data={"symbol": symbol, "entries": entries},
                     citations=[url], fetched_at=_now())
 
-# 22) Oligonucleotide ligandability — stub
 @router.get("/tract/ligandability-oligo", response_model=Evidence)
 async def tract_ligandability_oligo(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -423,14 +560,12 @@ async def tract_ligandability_oligo(symbol: str, x_api_key: Optional[str] = Head
                     fetched_n=0, data={"symbol": symbol},
                     citations=["https://rnacentral.org/","https://www.targetscan.org/"], fetched_at=_now())
 
-# 23) Modality feasibility — stub
 @router.get("/tract/modality", response_model=Evidence)
 async def tract_modality(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
     return Evidence(status="NO_DATA", source="UniProt + SURFY/CSPA rules (later)",
                     fetched_n=0, data={"symbol": symbol}, citations=["https://rest.uniprot.org/"], fetched_at=_now())
 
-# 24) Immunogenicity — stub
 @router.get("/tract/immunogenicity", response_model=Evidence)
 async def tract_immunogenicity(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -439,10 +574,9 @@ async def tract_immunogenicity(symbol: str, x_api_key: Optional[str] = Header(de
                     citations=["https://www.iedb.org/"], fetched_at=_now())
 
 # =============================================================================
-# BUCKET 6 — Clinical Translation & Safety (4)
+# BUCKET 6 — Clinical Translation & Safety
 # =============================================================================
 
-# 25) Clinical endpoints — ClinicalTrials.gov v2
 @router.get("/clin/endpoints", response_model=Evidence)
 async def clin_endpoints(condition: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -453,7 +587,6 @@ async def clin_endpoints(condition: str, x_api_key: Optional[str] = Header(defau
                     fetched_n=len(studies), data={"condition": condition, "studies": studies[:50]},
                     citations=[url], fetched_at=_now())
 
-# 26) RWE — stub
 @router.get("/clin/rwe", response_model=Evidence)
 async def clin_rwe(condition: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -462,7 +595,6 @@ async def clin_rwe(condition: str, x_api_key: Optional[str] = Header(default=Non
                     citations=["https://www.sentinelinitiative.org/","https://covid.cd2h.org/N3C","https://seer.cancer.gov/"],
                     fetched_at=_now())
 
-# 27) Safety / class AEs — openFDA FAERS
 @router.get("/clin/safety", response_model=Evidence)
 async def clin_safety(drug: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -477,16 +609,14 @@ async def clin_safety(drug: str, x_api_key: Optional[str] = Header(default=None)
         return Evidence(status="NO_DATA", source="openFDA FAERS", fetched_n=0,
                         data={"drug": drug}, citations=[url], fetched_at=_now())
 
-# 28) Clinical evidence / pipeline — alias to knownDrugs
 @router.get("/clin/pipeline", response_model=Evidence)
 async def clin_pipeline(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     return await tract_drugs(symbol, x_api_key)
 
 # =============================================================================
-# BUCKET 7 — Competition & IP (2)
+# BUCKET 7 — Competition & IP
 # =============================================================================
 
-# 29) Competition intensity — OT knownDrugs count + CT.gov total
 @router.get("/comp/intensity", response_model=Evidence)
 async def comp_intensity(symbol: str, condition: Optional[str] = None, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -503,7 +633,6 @@ async def comp_intensity(symbol: str, condition: Optional[str] = None, x_api_key
                                        "trialCount": total_trials, "condition": condition},
                     citations=[gql, ct], fetched_at=_now())
 
-# 30) Freedom-to-operate — stub with citations
 @router.get("/comp/freedom", response_model=Evidence)
 async def comp_freedom(query: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
@@ -521,7 +650,6 @@ async def report_run(gene: str, efo: str, symbol: str, condition: str,
                      x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
 
-    # fan-out to representative modules, wrapping each call in _safe_call
     l2g_task      = _safe_call(genetics_l2g(gene, efo, x_api_key))
     expr_task     = _safe_call(expr_baseline(symbol, x_api_key))
     ppi_task      = _safe_call(mech_ppi(symbol, 0.9, 50, x_api_key))
@@ -553,3 +681,42 @@ async def report_run(gene: str, efo: str, symbol: str, condition: str,
             "tract_drugs": kd.dict(),
         }
     }
+
+# =============================================================================
+# Alias routes to match diagnostic paths (mapping to existing handlers)
+# =============================================================================
+
+# genetics aliases
+router.add_api_route("/genetics/splicing", genetics_sqtl, response_model=Evidence)
+router.add_api_route("/genetics/sqtl", genetics_sqtl, response_model=Evidence)  # original name remains
+
+# expression aliases
+router.add_api_route("/expression/baseline", expr_baseline, response_model=Evidence)
+router.add_api_route("/expression/localization", expr_localization, response_model=Evidence)
+router.add_api_route("/expression/inducibility", expr_inducibility, response_model=Evidence)
+
+# association aliases
+router.add_api_route("/assoc/rna_bulk", assoc_bulk_rna, response_model=Evidence)
+router.add_api_route("/assoc/proteomics", assoc_bulk_prot, response_model=Evidence)
+router.add_api_route("/assoc/sc_spatial", assoc_sc, response_model=Evidence)
+
+# network aliases
+router.add_api_route("/pathways/reactome", mech_pathways, response_model=Evidence)
+router.add_api_route("/ppi/string", mech_ppi, response_model=Evidence)
+router.add_api_route("/networks/ligand_receptor", mech_ligrec, response_model=Evidence)
+
+# tractability aliases
+router.add_api_route("/tractability/druggability", tract_drugs, response_model=Evidence)
+router.add_api_route("/tractability/ligandability_sm", tract_ligandability_sm, response_model=Evidence)
+router.add_api_route("/tractability/ligandability_ab", tract_ligandability_ab, response_model=Evidence)
+router.add_api_route("/tractability/ligandability_oligo", tract_ligandability_oligo, response_model=Evidence)
+router.add_api_route("/tractability/modality_feasibility", tract_modality, response_model=Evidence)
+
+# clinical aliases
+router.add_api_route("/clinical/endpoints", clin_endpoints, response_model=Evidence)
+router.add_api_route("/rwe/summary", clin_rwe, response_model=Evidence)
+router.add_api_route("/safety/on_target", clin_safety, response_model=Evidence)
+
+# competition/IP aliases
+router.add_api_route("/competition/intensity", comp_intensity, response_model=Evidence)
+router.add_api_route("/ip/landscape", comp_freedom, response_model=Evidence)
