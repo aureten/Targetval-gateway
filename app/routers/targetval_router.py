@@ -122,7 +122,7 @@ def checklist_stub():
 @router.get("/genetics/l2g", response_model=Evidence)
 async def genetics_l2g(gene: str, efo: str, x_api_key: Optional[str] = Header(default=None)):
     """
-    Locus2Gene colocalisation: try Open Targets; fallback to GWAS Catalog REST.
+    Locus2Gene colocalisation: try Open Targets Genetics GraphQL; fallback to GWAS Catalog REST.
     """
     _require_key(x_api_key)
     gql = "https://genetics.opentargets.org/graphql"
@@ -189,7 +189,7 @@ async def genetics_l2g(gene: str, efo: str, x_api_key: Optional[str] = Header(de
 @router.get("/genetics/rare", response_model=Evidence)
 async def genetics_rare(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     """
-    Rare variation & constraint: try gnomAD GraphQL; fallback to PanelApp gene panels.
+    Rare variation & constraint: try gnomAD GraphQL; fallback to PanelApp.
     """
     _require_key(x_api_key)
     gql = "https://gnomad.broadinstitute.org/api"
@@ -246,7 +246,7 @@ async def genetics_rare(symbol: str, x_api_key: Optional[str] = Header(default=N
 @router.get("/genetics/mendelian", response_model=Evidence)
 async def genetics_mendelian(symbol_or_entrez: str, x_api_key: Optional[str] = Header(default=None)):
     """
-    Mendelian overlap & phenotype match: try Monarch; fallback to HPO (JAX) gene–disease API.
+    Mendelian overlap & phenotype match: try Monarch API; fallback to HPO JAX API.
     """
     _require_key(x_api_key)
     identifier = symbol_or_entrez.strip()
@@ -396,7 +396,7 @@ async def assoc_perturb(symbol: str, x_api_key: Optional[str] = Header(default=N
 @router.get("/expr/baseline", response_model=Evidence)
 async def expr_baseline(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     """
-    Baseline expression & tissue specificity: try Expression Atlas; fallback to UniProt tissue-specific comments.
+    Baseline expression & tissue specificity: try Expression Atlas; fallback to UniProt tissue‑specific comments.
     """
     _require_key(x_api_key)
     base = f"https://www.ebi.ac.uk/gxa/genes/{urllib.parse.quote(symbol)}.json"
@@ -509,6 +509,9 @@ async def mech_ligrec(symbol: str, x_api_key: Optional[str] = Header(default=Non
 
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=None)):
+    """
+    Druggability / pipeline: try OpenTargets knownDrugs; fallback to DGIdb interactions.
+    """
     _require_key(x_api_key)
     gql = "https://api.platform.opentargets.org/api/v4/graphql"
     q = {
@@ -521,13 +524,36 @@ async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=Non
         }""",
         "variables": {"sym": symbol}
     }
-    body = await _post_json(gql, q)
-    target = (body.get("data", {}) or {}).get("target") or {}
-    kd = (target.get("knownDrugs") or {})
-    rows = kd.get("rows", []) or []
-    return Evidence(status="OK", source="OpenTargets Platform GraphQL",
-                    fetched_n=len(rows), data={"symbol": symbol, "knownDrugs": rows[:200], "count": kd.get("count")},
-                    citations=[gql], fetched_at=_now())
+    try:
+        body = await _post_json(gql, q)
+        target = (body.get("data", {}) or {}).get("target") or {}
+        kd = (target.get("knownDrugs") or {})
+        rows = kd.get("rows", []) or []
+        return Evidence(status="OK", source="OpenTargets Platform GraphQL",
+                        fetched_n=len(rows), data={"symbol": symbol, "knownDrugs": rows[:200], "count": kd.get("count")},
+                        citations=[gql], fetched_at=_now())
+    except Exception:
+        pass
+
+    dgidb_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(symbol)}"
+    try:
+        js = await _get_json(dgidb_url)
+        interactions = js.get("matchedTerms", []) if isinstance(js, dict) else []
+        rows = []
+        for term in interactions:
+            rows.extend(term.get("interactions", []))
+        return Evidence(status="OK" if rows else "NO_DATA",
+                        source="DGIdb API (fallback)",
+                        fetched_n=len(rows),
+                        data={"symbol": symbol, "interactions": rows[:200]},
+                        citations=[dgidb_url], fetched_at=_now())
+    except Exception as e:
+        return Evidence(status="ERROR",
+                        source=f"OpenTargets + DGIdb failed: {e}",
+                        fetched_n=0,
+                        data={"symbol": symbol},
+                        citations=[gql, dgidb_url],
+                        fetched_at=_now())
 
 @router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(symbol: str, x_api_key: Optional[str] = Header(default=None)):
@@ -619,19 +645,39 @@ async def clin_pipeline(symbol: str, x_api_key: Optional[str] = Header(default=N
 
 @router.get("/comp/intensity", response_model=Evidence)
 async def comp_intensity(symbol: str, condition: Optional[str] = None, x_api_key: Optional[str] = Header(default=None)):
+    """
+    Competition intensity: try OpenTargets + ClinicalTrials.gov; fallback to counts from tract_drugs and clin_endpoints.
+    """
     _require_key(x_api_key)
     gql = "https://api.platform.opentargets.org/api/v4/graphql"
     q = {"query": "query Q($sym:String!){ target(approvedSymbol:$sym){ knownDrugs{ count } } }",
          "variables": {"sym": symbol}}
     ct = f"https://clinicaltrials.gov/api/v2/studies?query.cond={urllib.parse.quote(condition or '')}&countTotal=true"
-    ot = await _post_json(gql, q)
-    trials = await _get_json(ct) if condition else {"totalStudies": None}
-    count_kd = (((ot.get("data",{}) or {}).get("target") or {}).get("knownDrugs") or {}).get("count")
-    total_trials = trials.get("totalStudies")
-    return Evidence(status="OK", source="OpenTargets Platform + ClinicalTrials.gov",
-                    fetched_n=1, data={"symbol": symbol, "knownDrugsCount": count_kd,
-                                       "trialCount": total_trials, "condition": condition},
-                    citations=[gql, ct], fetched_at=_now())
+    try:
+        ot = await _post_json(gql, q)
+        trials = await _get_json(ct) if condition else {"totalStudies": None}
+        count_kd = (((ot.get("data",{}) or {}).get("target") or {}).get("knownDrugs") or {}).get("count")
+        total_trials = trials.get("totalStudies")
+        return Evidence(status="OK", source="OpenTargets Platform + ClinicalTrials.gov",
+                        fetched_n=1, data={"symbol": symbol, "knownDrugsCount": count_kd,
+                                           "trialCount": total_trials, "condition": condition},
+                        citations=[gql, ct], fetched_at=_now())
+    except Exception:
+        pass
+
+    # fallback: use existing endpoints for counts
+    kd_ev = await _safe_call(tract_drugs(symbol, x_api_key))
+    clin_ev = await _safe_call(clin_endpoints(condition, x_api_key)) if condition else None
+    kd_count = kd_ev.data.get("count") if kd_ev.status == "OK" else None
+    trial_count = clin_ev.fetched_n if clin_ev and clin_ev.status == "OK" else None
+    return Evidence(status="OK" if (kd_count is not None or trial_count is not None) else "NO_DATA",
+                    source="Fallback (tract_drugs + clin_endpoints)",
+                    fetched_n=1,
+                    data={"symbol": symbol,
+                          "knownDrugsCount": kd_count,
+                          "trialCount": trial_count,
+                          "condition": condition},
+                    citations=["fallback"], fetched_at=_now())
 
 @router.get("/comp/freedom", response_model=Evidence)
 async def comp_freedom(query: str, x_api_key: Optional[str] = Header(default=None)):
@@ -688,7 +734,7 @@ async def report_run(gene: str, efo: str, symbol: str, condition: str,
 
 # genetics aliases
 router.add_api_route("/genetics/splicing", genetics_sqtl, response_model=Evidence)
-router.add_api_route("/genetics/sqtl", genetics_sqtl, response_model=Evidence)  # original name remains
+router.add_api_route("/genetics/sqtl", genetics_sqtl, response_model=Evidence)  # keep original
 
 # expression aliases
 router.add_api_route("/expression/baseline", expr_baseline, response_model=Evidence)
