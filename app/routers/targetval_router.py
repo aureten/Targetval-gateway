@@ -58,6 +58,31 @@ async def _post_json(url: str, payload: Dict[str, Any], tries: int = 3) -> Any:
                 await asyncio.sleep(0.8)
     raise HTTPException(status_code=502, detail=f"POST failed for {url}: {err}")
 
+async def _safe_call(coro):
+    """
+    Helper to catch exceptions from module calls and return an ERROR Evidence instead of raising.
+    """
+    try:
+        return await coro
+    except HTTPException as e:
+        return Evidence(
+            status="ERROR",
+            source=str(e.detail),
+            fetched_n=0,
+            data={},
+            citations=[],
+            fetched_at=_now(),
+        )
+    except Exception as e:
+        return Evidence(
+            status="ERROR",
+            source=str(e),
+            fetched_n=0,
+            data={},
+            citations=[],
+            fetched_at=_now(),
+        )
+
 # =============================================================================
 # Utility endpoints
 # =============================================================================
@@ -446,7 +471,7 @@ async def clin_safety(drug: str, x_api_key: Optional[str] = Header(default=None)
                         citations=[url], fetched_at=_now())
     except Exception:
         return Evidence(status="NO_DATA", source="openFDA FAERS", fetched_n=0,
-                        data={"drug": drug}, citations=[url], fetched_at=_now())
+                        data{"drug": drug}, citations=[url], fetched_at=_now())
 
 # 28) Clinical evidence / pipeline — alias to knownDrugs
 @router.get("/clin/pipeline", response_model=Evidence)
@@ -492,13 +517,13 @@ async def report_run(gene: str, efo: str, symbol: str, condition: str,
                      x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
 
-    # fan-out to representative modules
-    l2g_task      = genetics_l2g(gene, efo, x_api_key)
-    expr_task     = expr_baseline(symbol, x_api_key)
-    ppi_task      = mech_ppi(symbol, 0.9, 50, x_api_key)
-    path_task     = mech_pathways(symbol, x_api_key)
-    clin_task     = clin_endpoints(condition, x_api_key)
-    kd_task       = tract_drugs(symbol, x_api_key)
+    # fan-out to representative modules, wrapping each call in _safe_call
+    l2g_task      = _safe_call(genetics_l2g(gene, efo, x_api_key))
+    expr_task     = _safe_call(expr_baseline(symbol, x_api_key))
+    ppi_task      = _safe_call(mech_ppi(symbol, 0.9, 50, x_api_key))
+    path_task     = _safe_call(mech_pathways(symbol, x_api_key))
+    clin_task     = _safe_call(clin_endpoints(condition, x_api_key))
+    kd_task       = _safe_call(tract_drugs(symbol, x_api_key))
 
     l2g, expr, ppi, pathw, clin, kd = await asyncio.gather(
         l2g_task, expr_task, ppi_task, path_task, clin_task, kd_task
