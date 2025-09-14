@@ -1,5 +1,9 @@
 from __future__ import annotations
-import os, time, asyncio, urllib.parse, json
+import os
+import time
+import asyncio
+import urllib.parse
+import json
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
@@ -471,7 +475,7 @@ async def clin_safety(drug: str, x_api_key: Optional[str] = Header(default=None)
                         citations=[url], fetched_at=_now())
     except Exception:
         return Evidence(status="NO_DATA", source="openFDA FAERS", fetched_n=0,
-                        data{"drug": drug}, citations=[url], fetched_at=_now())
+                        data={"drug": drug}, citations=[url], fetched_at=_now())
 
 # 28) Clinical evidence / pipeline — alias to knownDrugs
 @router.get("/clin/pipeline", response_model=Evidence)
