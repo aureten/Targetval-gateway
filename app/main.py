@@ -39,6 +39,7 @@ from app.routers.targetval_router import (
     comp_freedom,
 )
 
+# We still read API_KEY but do not enforce it
 API_KEY = os.getenv("API_KEY")
 
 app = FastAPI(title="TARGETVAL Gateway", version="0.1.1")
@@ -54,10 +55,9 @@ class Evidence(BaseModel):
 
 
 def require_key(x_api_key: str | None):
-    """Enforce API key only if API_KEY is set in the environment."""
-    env_key = os.getenv("API_KEY")
-    if env_key and x_api_key != env_key:
-        raise HTTPException(status_code=401, detail="Bad or missing x-api-key")
+    """
+    API key enforcement disabled; all requests are allowed.
+    """
     return
 
 
@@ -112,7 +112,9 @@ def _now():
 
 # ---------- Safe call wrapper ----------
 async def safe_call(coro):
-    """Call a module coroutine and return an Evidence object, catching exceptions."""
+    """
+    Call a module coroutine and return an Evidence object, catching exceptions.
+    """
     try:
         return await coro
     except HTTPException as e:
@@ -430,9 +432,3 @@ async def targetval(
         "context": {"condition": condition, "efo_id": efo_id},
         "evidence": evidence_list,
     }
-
-
-# ---------- Include router if present ----------
-from app.routers.targetval_router import router as tv_router
-
-app.include_router(tv_router, prefix="/v1")
