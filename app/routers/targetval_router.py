@@ -26,8 +26,10 @@ class Evidence(BaseModel):
 API_KEY = os.getenv("API_KEY")
 
 def _require_key(x_api_key: Optional[str]):
-    """API key enforcement disabled; all requests are allowed."""
-    return
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="Server missing API_KEY env")
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Bad or missing x-api-key")
 
 def _now() -> float:
     return time.time()
@@ -108,10 +110,10 @@ def status():
 
 @router.get("/checklist")
 def checklist_stub():
-    return {"ok": True, "note": "Ledger optional—skipped in this build."}
+    return {"ok": True, "note": "Ledger optionalâskipped in this build."}
 
 # ------------------------------------------------------------------------------
-# BUCKET 1 — Human Genetics & Causality
+# BUCKET 1 â Human Genetics & Causality
 # ------------------------------------------------------------------------------
 
 @router.get("/genetics/l2g", response_model=Evidence)
@@ -407,7 +409,7 @@ async def genetics_epigenetics(symbol: str, x_api_key: Optional[str] = Header(de
         )
 
 # ------------------------------------------------------------------------------
-# BUCKET 2 — Disease Association & Perturbation
+# BUCKET 2 â Disease Association & Perturbation
 # ------------------------------------------------------------------------------
 
 @router.get("/assoc/bulk-rna", response_model=Evidence)
@@ -475,13 +477,13 @@ async def assoc_perturb(symbol: str, x_api_key: Optional[str] = Header(default=N
     )
 
 # ------------------------------------------------------------------------------
-# BUCKET 3 — Expression, Specificity & Localization
+# BUCKET 3 â Expression, Specificity & Localization
 # ------------------------------------------------------------------------------
 
 @router.get("/expr/baseline", response_model=Evidence)
 async def expr_baseline(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     """
-    Baseline expression & tissue specificity: try Expression Atlas; fallback to UniProt tissue‑specific comments.
+    Baseline expression & tissue specificity: try Expression Atlas; fallback to UniProt tissueâspecific comments.
     """
     _require_key(x_api_key)
     validate_symbol(symbol)
@@ -578,7 +580,7 @@ async def expr_inducibility(symbol: str, stimulus: Optional[str] = None, x_api_k
     )
 
 # ------------------------------------------------------------------------------
-# BUCKET 4 — Mechanistic Wiring & Networks
+# BUCKET 4 â Mechanistic Wiring & Networks
 # ------------------------------------------------------------------------------
 
 @router.get("/mech/pathways", response_model=Evidence)
@@ -655,7 +657,7 @@ async def mech_ligrec(symbol: str, x_api_key: Optional[str] = Header(default=Non
     )
 
 # ------------------------------------------------------------------------------
-# BUCKET 5 — Tractability & Modality
+# BUCKET 5 â Tractability & Modality
 # ------------------------------------------------------------------------------
 
 @router.get("/tract/drugs", response_model=Evidence)
@@ -774,11 +776,11 @@ async def tract_modality(symbol: str, x_api_key: Optional[str] = Header(default=
     _require_key(x_api_key)
     validate_symbol(symbol)
     raise HTTPException(
-        status code=501,
+        status_code=501,
         detail="Endpoint 'tract/modality' is not implemented (experimental).",
     )
 
-@router.get("/tract/immunogenicity", response model=Evidence, deprecated=True)
+@router.get("/tract/immunogenicity", response_model=Evidence, deprecated=True)
 async def tract_immunogenicity(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     """
     Immunogenicity: not yet implemented (experimental).
@@ -786,15 +788,15 @@ async def tract_immunogenicity(symbol: str, x_api_key: Optional[str] = Header(de
     _require_key(x_api_key)
     validate_symbol(symbol)
     raise HTTPException(
-        status code=501,
+        status_code=501,
         detail="Endpoint 'tract/immunogenicity' is not implemented (experimental).",
     )
 
 # ------------------------------------------------------------------------------
-# BUCKET 6 — Clinical Translation & Safety
+# BUCKET 6 â Clinical Translation & Safety
 # ------------------------------------------------------------------------------
 
-@router.get("/clin/endpoints", response model=Evidence)
+@router.get("/clin/endpoints", response_model=Evidence)
 async def clin_endpoints(condition: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
     validate_condition(condition)
@@ -810,7 +812,7 @@ async def clin_endpoints(condition: str, x_api_key: Optional[str] = Header(defau
         fetched_at=_now(),
     )
 
-@router.get("/clin/rwe", response model=Evidence, deprecated=True)
+@router.get("/clin/rwe", response_model=Evidence, deprecated=True)
 async def clin_rwe(condition: str, x_api_key: Optional[str] = Header(default=None)):
     """
     Real-world evidence (RWE): not yet implemented due to access controls.
@@ -818,11 +820,11 @@ async def clin_rwe(condition: str, x_api_key: Optional[str] = Header(default=Non
     _require_key(x_api_key)
     validate_condition(condition)
     raise HTTPException(
-        status code=501,
+        status_code=501,
         detail="Endpoint 'clin/rwe' is not implemented due to access-controlled data (experimental).",
     )
 
-@router.get("/clin/safety", response model=Evidence)
+@router.get("/clin/safety", response_model=Evidence)
 async def clin_safety(drug: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
     validate_symbol(drug, field_name="drug")
@@ -848,7 +850,7 @@ async def clin_safety(drug: str, x_api_key: Optional[str] = Header(default=None)
             fetched_at=_now(),
         )
 
-@router.get("/clin/pipeline", response model=Evidence)
+@router.get("/clin/pipeline", response_model=Evidence)
 async def clin_pipeline(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     """
     Pipeline: delegate to tract_drugs for known-drug pipeline information.
@@ -856,10 +858,10 @@ async def clin_pipeline(symbol: str, x_api_key: Optional[str] = Header(default=N
     return await tract_drugs(symbol, x_api_key)
 
 # ------------------------------------------------------------------------------
-# BUCKET 7 — Competition & IP
+# BUCKET 7 â Competition & IP
 # ------------------------------------------------------------------------------
 
-@router.get("/comp/intensity", response model=Evidence)
+@router.get("/comp/intensity", response_model=Evidence)
 async def comp_intensity(symbol: str, condition: Optional[str] = None, x_api_key: Optional[str] = Header(default=None)):
     """
     Competition intensity: try OpenTargets + ClinicalTrials.gov; fallback to counts from tract_drugs and clin_endpoints.
@@ -901,7 +903,7 @@ async def comp_intensity(symbol: str, condition: Optional[str] = None, x_api_key
         fetched_at=_now(),
     )
 
-@router.get("/comp/freedom", response model=Evidence, deprecated=True)
+@router.get("/comp/freedom", response_model=Evidence, deprecated=True)
 async def comp_freedom(query: str, x_api_key: Optional[str] = Header(default=None)):
     """
     Freedom-to-operate (FTO): not yet implemented; patent data requires licensing.
@@ -909,7 +911,7 @@ async def comp_freedom(query: str, x_api_key: Optional[str] = Header(default=Non
     _require_key(x_api_key)
     validate_condition(query)
     raise HTTPException(
-        status code=501,
+        status_code=501,
         detail="Endpoint 'comp/freedom' is not implemented (experimental); patent data requires licensing.",
     )
 
@@ -978,21 +980,21 @@ router.add_api_route("/assoc/sc_spatial", assoc_sc, response_model=Evidence)
 
 # network aliases
 router.add_api_route("/pathways/reactome", mech_pathways, response_model=Evidence)
-router.add_api_route("/ppi/string", mech_ppi, response model=Evidence)
-router.add_api_route("/networks/ligand_receptor", mech_ligrec, response model=Evidence)
+router.add_api_route("/ppi/string", mech_ppi, response_model=Evidence)
+router.add_api_route("/networks/ligand_receptor", mech_ligrec, response_model=Evidence)
 
 # tractability aliases
-router.add_api_route("/tractability/druggability", tract_drugs, response model=Evidence)
-router.add_api_route("/tractability/ligandability_sm", tract_ligandability_sm, response model=Evidence)
-router.add_api_route("/tractability/ligandability_ab", tract_ligandability_ab, response model=Evidence)
-router.add_api_route("/tractability/ligandability_oligo", tract_ligandability_oligo, response model=Evidence)
-router.add_api_route("/tractability/modality_feasibility", tract_modality, response model=Evidence)
+router.add_api_route("/tractability/druggability", tract_drugs, response_model=Evidence)
+router.add_api_route("/tractability/ligandability_sm", tract_ligandability_sm, response_model=Evidence)
+router.add_api_route("/tractability/ligandability_ab", tract_ligandability_ab, response_model=Evidence)
+router.add_api_route("/tractability/ligandability_oligo", tract_ligandability_oligo, response_model=Evidence)
+router.add_api_route("/tractability/modality_feasibility", tract_modality, response_model=Evidence)
 
 # clinical aliases
-router.add_api_route("/clinical/endpoints", clin_endpoints, response model=Evidence)
-router.add_api_route("/rwe/summary", clin_rwe, response model=Evidence)
-router.add_api_route("/safety/on_target", clin_safety, response model=Evidence)
+router.add_api_route("/clinical/endpoints", clin_endpoints, response_model=Evidence)
+router.add_api_route("/rwe/summary", clin_rwe, response_model=Evidence)
+router.add_api_route("/safety/on_target", clin_safety, response_model=Evidence)
 
 # competition/IP aliases
-router.add_api_route("/competition/intensity", comp_intensity, response model=Evidence)
-router add_api_route("/ip/landscape", comp_freedom, response model=Evidence)
+router.add_api_route("/competition/intensity", comp_intensity, response_model=Evidence)
+router.add_api_route("/ip/landscape", comp_freedom, response_model=Evidence)
