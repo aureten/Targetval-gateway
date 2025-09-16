@@ -39,7 +39,6 @@ from app.routers.targetval_router import (
     comp_freedom,
 )
 
-# We still read API_KEY but do not enforce it
 API_KEY = os.getenv("API_KEY")
 
 app = FastAPI(title="TARGETVAL Gateway", version="0.1.1")
@@ -55,9 +54,7 @@ class Evidence(BaseModel):
 
 
 def require_key(x_api_key: str | None):
-    """
-    API key enforcement disabled; all requests are allowed.
-    """
+    """API key enforcement disabled; all requests are allowed."""
     return
 
 
@@ -112,9 +109,7 @@ def _now():
 
 # ---------- Safe call wrapper ----------
 async def safe_call(coro):
-    """
-    Call a module coroutine and return an Evidence object, catching exceptions.
-    """
+    """Call a module coroutine and return an Evidence object, catching exceptions."""
     try:
         return await coro
     except HTTPException as e:
