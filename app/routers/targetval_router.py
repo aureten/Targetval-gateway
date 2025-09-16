@@ -26,10 +26,16 @@ class Evidence(BaseModel):
 API_KEY = os.getenv("API_KEY")
 
 def _require_key(x_api_key: Optional[str]):
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="Server missing API_KEY env")
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Bad or missing x-api-key")
+    """
+    API key enforcement disabled; all requests are allowed.
+
+    Previously this function ensured that an `API_KEY` environment variable was
+    present and matched the `x-api-key` request header. Without a configured
+    key or on mismatch it would raise a 500 or 401 HTTP error. This behaviour
+    has been removed to support public operation; the function now immediately
+    returns.
+    """
+    return
 
 def _now() -> float:
     return time.time()
