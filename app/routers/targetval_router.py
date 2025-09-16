@@ -23,13 +23,10 @@ class Evidence(BaseModel):
     citations: List[str]
     fetched_at: float
 
-# We still read API_KEY but do not enforce it
 API_KEY = os.getenv("API_KEY")
 
 def _require_key(x_api_key: Optional[str]):
-    """
-    API key enforcement disabled; all requests are allowed.
-    """
+    """API key enforcement disabled; all requests are allowed."""
     return
 
 def _now() -> float:
@@ -260,7 +257,7 @@ async def genetics_mendelian(symbol_or_entrez: str, x_api_key: Optional[str] = H
             status="OK",
             source="Monarch",
             fetched_n=len(items),
-            data{"gene": identifier, "associations": items[:100]},
+            data={"gene": identifier, "associations": items[:100]},
             citations=[monarch_url],
             fetched_at=_now(),
         )
@@ -275,7 +272,7 @@ async def genetics_mendelian(symbol_or_entrez: str, x_api_key: Optional[str] = H
             status="OK" if diseases else "NO_DATA",
             source="HPO JAX API (fallback)",
             fetched_n=len(diseases),
-            data{"gene": identifier, "diseases": diseases[:100]},
+            data={"gene": identifier, "diseases": diseases[:100]},
             citations=[hpo_url],
             fetched_at=_now(),
         )
@@ -284,7 +281,7 @@ async def genetics_mendelian(symbol_or_entrez: str, x_api_key: Optional[str] = H
             status="ERROR",
             source=f"Monarch + HPO failed: {e}",
             fetched_n=0,
-            data{"gene": identifier},
+            data={"gene": identifier},
             citations=[monarch_url, hpo_url],
             fetched_at=_now(),
         )
@@ -301,7 +298,7 @@ async def genetics_mr(exposure_id: str, outcome_id: str, x_api_key: Optional[str
         status="NO_DATA",
         source="IEU OpenGWAS (MR compute not executed here)",
         fetched_n=0,
-        data{"exposure_id": exposure_id, "outcome_id": outcome_id},
+        data={"exposure_id": exposure_id, "outcome_id": outcome_id},
         citations=["https://gwas.mrcieu.ac.uk/"],
         fetched_at=_now(),
     )
@@ -317,7 +314,7 @@ async def genetics_lncrna(symbol: str, x_api_key: Optional[str] = Header(default
         status="NO_DATA",
         source="NONCODE/LncBook/circBase",
         fetched_n=0,
-        data{"symbol": symbol},
+        data={"symbol": symbol},
         citations=[
             "http://www.noncode.org/",
             "https://bigd.big.ac.cn/lncbook/",
@@ -337,7 +334,7 @@ async def genetics_mirna(symbol: str, x_api_key: Optional[str] = Header(default=
         status="NO_DATA",
         source="miRTarBase/TargetScan",
         fetched_n=0,
-        data{"symbol": symbol},
+        data={"symbol": symbol},
         citations=[
             "https://mirtarbase.cuhk.edu.cn/",
             "https://www.targetscan.org/",
@@ -359,7 +356,7 @@ async def genetics_sqtl(symbol: str, x_api_key: Optional[str] = Header(default=N
         status="OK",
         source="eQTL Catalogue",
         fetched_n=len(results),
-        data{"symbol": symbol, "results": results[:100]},
+        data={"symbol": symbol, "results": results[:100]},
         citations=[url],
         fetched_at=_now(),
     )
@@ -380,7 +377,7 @@ async def genetics_epigenetics(symbol: str, x_api_key: Optional[str] = Header(de
             status="OK",
             source="ENCODE",
             fetched_n=len(hits),
-            data{"symbol": symbol, "experiments": hits[:50]},
+            data={"symbol": symbol, "experiments": hits[:50]},
             citations=[url],
             fetched_at=_now(),
         )
@@ -395,7 +392,7 @@ async def genetics_epigenetics(symbol: str, x_api_key: Optional[str] = Header(de
             status="OK" if exp else "NO_DATA",
             source="Cistrome DB (fallback)",
             fetched_n=len(exp),
-            data{"symbol": symbol, "experiments": exp[:50]},
+            data={"symbol": symbol, "experiments": exp[:50]},
             citations=[cistrome_url],
             fetched_at=_now(),
         )
@@ -404,7 +401,7 @@ async def genetics_epigenetics(symbol: str, x_api_key: Optional[str] = Header(de
             status="ERROR",
             source=f"ENCODE + Cistrome failed: {e}",
             fetched_n=0,
-            data{"symbol": symbol},
+            data={"symbol": symbol},
             citations=[url, cistrome_url],
             fetched_at=_now(),
         )
@@ -424,7 +421,7 @@ async def assoc_bulk_rna(condition: str, x_api_key: Optional[str] = Header(defau
         status="OK",
         source="Expression Atlas",
         fetched_n=len(exps),
-        data{"condition": condition, "experiments": exps[:50]},
+        data={"condition": condition, "experiments": exps[:50]},
         citations=[url],
         fetched_at=_now(),
     )
@@ -440,7 +437,7 @@ async def assoc_bulk_prot(condition: str, x_api_key: Optional[str] = Header(defa
         status="OK",
         source="PRIDE",
         fetched_n=len(projects),
-        data{"condition": condition, "projects": projects[:50]},
+        data={"condition": condition, "projects": projects[:50]},
         citations=[url],
         fetched_at=_now(),
     )
@@ -453,7 +450,7 @@ async def assoc_sc(condition: str, x_api_key: Optional[str] = Header(default=Non
         status="NO_DATA",
         source="cellxgene/HCA portals",
         fetched_n=0,
-        data{"condition": condition},
+        data={"condition": condition},
         citations=[
             "https://cellxgene.cziscience.com/",
             "https://data.humancellatlas.org/",
@@ -469,7 +466,7 @@ async def assoc_perturb(symbol: str, x_api_key: Optional[str] = Header(default=N
         status="NO_DATA",
         source="BioGRID-ORCS/DepMap (UI-first)",
         fetched_n=0,
-        data{"symbol": symbol},
+        data={"symbol": symbol},
         citations=[
             "https://orcs.thebiogrid.org/",
             "https://depmap.org/portal/",
@@ -508,7 +505,7 @@ async def expr_baseline(symbol: str, x_api_key: Optional[str] = Header(default=N
             status="OK",
             source="Expression Atlas",
             fetched_n=len(rows),
-            data{"symbol": symbol, "baseline": rows[:200]},
+            data={"symbol": symbol, "baseline": rows[:200]},
             citations=[base],
             fetched_at=_now(),
         )
@@ -534,7 +531,7 @@ async def expr_baseline(symbol: str, x_api_key: Optional[str] = Header(default=N
             status="OK" if baseline else "NO_DATA",
             source="UniProt REST (fallback)",
             fetched_n=len(baseline),
-            data{"symbol": symbol, "baseline": baseline},
+            data={"symbol": symbol, "baseline": baseline},
             citations=[uni_url],
             fetched_at=_now(),
         )
@@ -543,7 +540,7 @@ async def expr_baseline(symbol: str, x_api_key: Optional[str] = Header(default=N
             status="ERROR",
             source=f"Expression Atlas + UniProt failed: {e}",
             fetched_n=0,
-            data{"symbol": symbol},
+            data={"symbol": symbol},
             citations=[base, uni_url],
             fetched_at=_now(),
         )
@@ -560,12 +557,12 @@ async def expr_localization(symbol: str, x_api_key: Optional[str] = Header(defau
         status="OK" if entries else "NO_DATA",
         source="UniProt REST",
         fetched_n=len(entries),
-        data{"symbol": symbol, "entries": entries},
+        data={"symbol": symbol, "entries": entries},
         citations=[url],
         fetched_at=_now(),
     )
 
-@router.get("/expr/inducibility", response model=Evidence)
+@router.get("/expr/inducibility", response_model=Evidence)
 async def expr_inducibility(symbol: str, stimulus: Optional[str] = None, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
     validate_symbol(symbol)
@@ -575,7 +572,7 @@ async def expr_inducibility(symbol: str, stimulus: Optional[str] = None, x_api_k
         status="NO_DATA",
         source="GEO time-courses (download-first)",
         fetched_n=0,
-        data{"symbol": symbol, "stimulus": stimulus},
+        data={"symbol": symbol, "stimulus": stimulus},
         citations=["https://www.ncbi.nlm.nih.gov/geo/"],
         fetched_at=_now(),
     )
@@ -584,7 +581,7 @@ async def expr_inducibility(symbol: str, stimulus: Optional[str] = None, x_api_k
 # BUCKET 4 — Mechanistic Wiring & Networks
 # ------------------------------------------------------------------------------
 
-@router.get("/mech/pathways", response model=Evidence)
+@router.get("/mech/pathways", response_model=Evidence)
 async def mech_pathways(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
     validate_symbol(symbol)
@@ -596,7 +593,7 @@ async def mech_pathways(symbol: str, x_api_key: Optional[str] = Header(default=N
         status="OK",
         source="Reactome ContentService",
         fetched_n=len(pathways),
-        data{"symbol": symbol, "pathways": pathways[:100]},
+        data={"symbol": symbol, "pathways": pathways[:100]},
         citations=[search],
         fetched_at=_now(),
     )
@@ -616,7 +613,7 @@ async def mech_ppi(symbol: str, cutoff: float = 0.9, limit: int = 50, x_api_key:
             status="OK",
             source="STRING",
             fetched_n=0,
-            data{"symbol": symbol, "edges": []},
+            data={"symbol": symbol, "edges": []},
             citations=[map_url],
             fetched_at=_now(),
         )
@@ -636,12 +633,12 @@ async def mech_ppi(symbol: str, cutoff: float = 0.9, limit: int = 50, x_api_key:
         status="OK",
         source="STRING REST",
         fetched_n=len(edges),
-        data{"symbol": symbol, "edges": edges[:limit]},
+        data={"symbol": symbol, "edges": edges[:limit]},
         citations=[map_url, net_url],
         fetched_at=_now(),
     )
 
-@router.get("/mech/ligrec", response model=Evidence)
+@router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
     validate_symbol(symbol)
@@ -652,7 +649,7 @@ async def mech_ligrec(symbol: str, x_api_key: Optional[str] = Header(default=Non
         status="OK",
         source="OmniPath",
         fetched_n=len(rows),
-        data{"symbol": symbol, "ligrec": rows[:100]},
+        data={"symbol": symbol, "ligrec": rows[:100]},
         citations=[url],
         fetched_at=_now(),
     )
@@ -661,7 +658,7 @@ async def mech_ligrec(symbol: str, x_api_key: Optional[str] = Header(default=Non
 # BUCKET 5 — Tractability & Modality
 # ------------------------------------------------------------------------------
 
-@router.get("/tract/drugs", response model=Evidence)
+@router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     """
     Druggability / pipeline: try OpenTargets knownDrugs; fallback to DGIdb interactions.
@@ -688,7 +685,7 @@ async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=Non
             status="OK",
             source="OpenTargets Platform GraphQL",
             fetched_n=len(rows),
-            data{"symbol": symbol, "knownDrugs": rows[:200], "count": kd.get("count")},
+            data={"symbol": symbol, "knownDrugs": rows[:200], "count": kd.get("count")},
             citations=[gql],
             fetched_at=_now(),
         )
@@ -706,7 +703,7 @@ async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=Non
             status="OK" if rows else "NO_DATA",
             source="DGIdb API (fallback)",
             fetched_n=len(rows),
-            data{"symbol": symbol, "interactions": rows[:200]},
+            data={"symbol": symbol, "interactions": rows[:200]},
             citations=[dgidb_url],
             fetched_at=_now(),
         )
@@ -715,12 +712,12 @@ async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=Non
             status="ERROR",
             source=f"OpenTargets + DGIdb failed: {e}",
             fetched_n=0,
-            data{"symbol": symbol},
+            data={"symbol": symbol},
             citations=[gql, dgidb_url],
             fetched_at=_now(),
         )
 
-@router.get("/tract/ligandability-sm", response model=Evidence)
+@router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
     validate_symbol(symbol)
@@ -735,12 +732,12 @@ async def tract_ligandability_sm(symbol: str, x_api_key: Optional[str] = Header(
         status="OK",
         source="RCSB PDB (search)",
         fetched_n=len(hits),
-        data{"symbol": symbol, "pdb_hits": hits[:100]},
+        data={"symbol": symbol, "pdb_hits": hits[:100]},
         citations=["https://www.rcsb.org/"],
         fetched_at=_now(),
     )
 
-@router.get("/tract/ligandability-ab", response model=Evidence)
+@router.get("/tract/ligandability-ab", response_model=Evidence)
 async def tract_ligandability_ab(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     _require_key(x_api_key)
     validate_symbol(symbol)
@@ -752,12 +749,12 @@ async def tract_ligandability_ab(symbol: str, x_api_key: Optional[str] = Header(
         status="OK" if entries else "NO_DATA",
         source="UniProt REST",
         fetched_n=len(entries),
-        data{"symbol": symbol, "entries": entries},
+        data={"symbol": symbol, "entries": entries},
         citations=[url],
         fetched_at=_now(),
     )
 
-@router.get("/tract/ligandability-oligo", response model=Evidence, deprecated=True)
+@router.get("/tract/ligandability-oligo", response_model=Evidence, deprecated=True)
 async def tract_ligandability_oligo(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     """
     Oligonucleotide ligandability: not yet implemented (experimental).
@@ -769,7 +766,7 @@ async def tract_ligandability_oligo(symbol: str, x_api_key: Optional[str] = Head
         detail="Endpoint 'tract/ligandability-oligo' is not implemented (experimental).",
     )
 
-@router.get("/tract/modality", response model=Evidence, deprecated=True)
+@router.get("/tract/modality", response_model=Evidence, deprecated=True)
 async def tract_modality(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     """
     Modalities: not yet implemented (experimental).
@@ -777,7 +774,7 @@ async def tract_modality(symbol: str, x_api_key: Optional[str] = Header(default=
     _require_key(x_api_key)
     validate_symbol(symbol)
     raise HTTPException(
-        status_code=501,
+        status code=501,
         detail="Endpoint 'tract/modality' is not implemented (experimental).",
     )
 
@@ -789,7 +786,7 @@ async def tract_immunogenicity(symbol: str, x_api_key: Optional[str] = Header(de
     _require_key(x_api_key)
     validate_symbol(symbol)
     raise HTTPException(
-        status_code=501,
+        status code=501,
         detail="Endpoint 'tract/immunogenicity' is not implemented (experimental).",
     )
 
@@ -808,7 +805,7 @@ async def clin_endpoints(condition: str, x_api_key: Optional[str] = Header(defau
         status="OK",
         source="ClinicalTrials.gov v2",
         fetched_n=len(studies),
-        data{"condition": condition, "studies": studies[:50]},
+        data={"condition": condition, "studies": studies[:50]},
         citations=[url],
         fetched_at=_now(),
     )
@@ -821,7 +818,7 @@ async def clin_rwe(condition: str, x_api_key: Optional[str] = Header(default=Non
     _require_key(x_api_key)
     validate_condition(condition)
     raise HTTPException(
-        status_code=501,
+        status code=501,
         detail="Endpoint 'clin/rwe' is not implemented due to access-controlled data (experimental).",
     )
 
@@ -837,7 +834,7 @@ async def clin_safety(drug: str, x_api_key: Optional[str] = Header(default=None)
             status="OK",
             source="openFDA FAERS",
             fetched_n=len(results),
-            data{"drug": drug, "reactions": results[:100]},
+            data={"drug": drug, "reactions": results[:100]},
             citations=[url],
             fetched_at=_now(),
         )
@@ -846,7 +843,7 @@ async def clin_safety(drug: str, x_api_key: Optional[str] = Header(default=None)
             status="NO_DATA",
             source="openFDA FAERS",
             fetched_n=0,
-            data{"drug": drug},
+            data={"drug": drug},
             citations=[url],
             fetched_at=_now(),
         )
@@ -883,7 +880,7 @@ async def comp_intensity(symbol: str, condition: Optional[str] = None, x_api_key
             status="OK",
             source="OpenTargets Platform + ClinicalTrials.gov",
             fetched_n=1,
-            data{"symbol": symbol, "knownDrugsCount": count_kd, "trialCount": total_trials, "condition": condition},
+            data={"symbol": symbol, "knownDrugsCount": count_kd, "trialCount": total_trials, "condition": condition},
             citations=[gql, ct],
             fetched_at=_now(),
         )
@@ -899,7 +896,7 @@ async def comp_intensity(symbol: str, condition: Optional[str] = None, x_api_key
         status="OK" if (kd_count is not None or trial_count is not None) else "NO_DATA",
         source="Fallback (tract_drugs + clin_endpoints)",
         fetched_n=1,
-        data{"symbol": symbol, "knownDrugsCount": kd_count, "trialCount": trial_count, "condition": condition},
+        data={"symbol": symbol, "knownDrugsCount": kd_count, "trialCount": trial_count, "condition": condition},
         citations=["fallback"],
         fetched_at=_now(),
     )
@@ -912,7 +909,7 @@ async def comp_freedom(query: str, x_api_key: Optional[str] = Header(default=Non
     _require_key(x_api_key)
     validate_condition(query)
     raise HTTPException(
-        status_code=501,
+        status code=501,
         detail="Endpoint 'comp/freedom' is not implemented (experimental); patent data requires licensing.",
     )
 
@@ -971,16 +968,16 @@ router.add_api_route("/genetics/sqtl", genetics_sqtl, response_model=Evidence)
 
 # expression aliases
 router.add_api_route("/expression/baseline", expr_baseline, response_model=Evidence)
-router.add_api_route("/expression/localization", expr_localization, response model=Evidence)
+router.add_api_route("/expression/localization", expr_localization, response_model=Evidence)
 router.add_api_route("/expression/inducibility", expr_inducibility, response_model=Evidence)
 
 # association aliases
-router.add_api_route("/assoc/rna_bulk", assoc_bulk_rna, response model=Evidence)
-router.add_api_route("/assoc/proteomics", assoc_bulk_prot, response model=Evidence)
-router.add_api_route("/assoc/sc_spatial", assoc_sc, response model=Evidence)
+router.add_api_route("/assoc/rna_bulk", assoc_bulk_rna, response_model=Evidence)
+router.add_api_route("/assoc/proteomics", assoc_bulk_prot, response_model=Evidence)
+router.add_api_route("/assoc/sc_spatial", assoc_sc, response_model=Evidence)
 
 # network aliases
-router.add_api_route("/pathways/reactome", mech_pathways, response model=Evidence)
+router.add_api_route("/pathways/reactome", mech_pathways, response_model=Evidence)
 router.add_api_route("/ppi/string", mech_ppi, response model=Evidence)
 router.add_api_route("/networks/ligand_receptor", mech_ligrec, response model=Evidence)
 
@@ -998,4 +995,4 @@ router.add_api_route("/safety/on_target", clin_safety, response model=Evidence)
 
 # competition/IP aliases
 router.add_api_route("/competition/intensity", comp_intensity, response model=Evidence)
-router.add_api_route("/ip/landscape", comp_freedom, response model=Evidence)
+router add_api_route("/ip/landscape", comp_freedom, response model=Evidence)
