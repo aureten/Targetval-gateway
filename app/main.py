@@ -7,6 +7,19 @@ from pydantic import BaseModel
 import httpx
 from typing import Optional, List, Dict
 
+# Import additional module functions from the targetval_router
+from app.routers.targetval_router import (
+    genetics_rare, genetics_mendelian, genetics_mr, genetics_lncrna,
+    genetics_mirna, genetics_sqtl, genetics_epigenetics,
+    assoc_bulk_rna, assoc_bulk_prot, assoc_sc, assoc_perturb,
+    expr_localization, expr_inducibility,
+    mech_pathways, mech_ppi, mech_ligrec,
+    tract_drugs, tract_ligandability_sm, tract_ligandability_ab,
+    tract_ligandability_oligo, tract_modality, tract_immunogenicity,
+    clin_endpoints, clin_rwe, clin_safety, clin_pipeline,
+    comp_intensity, comp_freedom
+)
+
 API_KEY = os.getenv("API_KEY")
 
 app = FastAPI(title="TARGETVAL Gateway", version="0.1.1")
@@ -69,6 +82,63 @@ async def _get_json(client, url, max_tries=3):
 
 def _now():
     return time.time()
+
+# Define a helper to safely call modules and return Evidence on error
+async def safe_call(coro):
+    try:
+        return await coro
+    except HTTPException as e:
+        return Evidence(
+            status="ERROR",
+            source=str(e.detail),
+            fetched_n=0,
+            data={},
+            citations=[],
+            fetched_at=_now(),
+        )
+    except Exception as e:
+        return Evidence(
+            status="ERROR",
+            source=str(e),
+            fetched_n=0,
+            data={},
+            citations=[],
+            fetched_at=_now(),
+        )
+
+# Map modules to buckets for output
+MODULE_BUCKET_MAP = {
+    "genetics_l2g": "Human Genetics & Causality",
+    "genetics_rare": "Human Genetics & Causality",
+    "genetics_mendelian": "Human Genetics & Causality",
+    "genetics_mr": "Human Genetics & Causality",
+    "genetics_lncrna": "Human Genetics & Causality",
+    "genetics_mirna": "Human Genetics & Causality",
+    "genetics_sqtl": "Human Genetics & Causality",
+    "genetics_epigenetics": "Human Genetics & Causality",
+    "assoc_bulk_rna": "Disease Association & Perturbation",
+    "assoc_bulk_prot": "Disease Association & Perturbation",
+    "assoc_sc": "Disease Association & Perturbation",
+    "assoc_perturb": "Disease Association & Perturbation",
+    "expression_baseline": "Expression, Specificity & Localization",
+    "expr_localization": "Expression, Specificity & Localization",
+    "expr_inducibility": "Expression, Specificity & Localization",
+    "mech_pathways": "Mechanistic Wiring & Networks",
+    "mech_ppi": "Mechanistic Wiring & Networks",
+    "mech_ligrec": "Mechanistic Wiring & Networks",
+    "tract_drugs": "Tractability & Modality",
+    "tract_ligandability_sm": "Tractability & Modality",
+    "tract_ligandability_ab": "Tractability & Modality",
+    "tract_ligandability_oligo": "Tractability & Modality",
+    "tract_modality": "Tractability & Modality",
+    "tract_immunogenicity": "Tractability & Modality",
+    "clin_endpoints": "Clinical Translation & Safety",
+    "clin_rwe": "Clinical Translation & Safety",
+    "clin_safety": "Clinical Translation & Safety",
+    "clin_pipeline": "Clinical Translation & Safety",
+    "comp_intensity": "Competition & IP",
+    "comp_freedom": "Competition & IP",
+}
 
 # ---------- 1) Open Targets Genetics: L2G ----------
 @app.get("/genetics/l2g", response_model=Evidence)
@@ -185,7 +255,6 @@ async def ppi_string(
 async def pathways_reactome(symbol: str, x_api_key: Optional[str] = Header(default=None)):
     require_key(x_api_key)
     search = f"https://reactome.org/ContentService/search/query?query={symbol}&species=Homo%20sapiens"
-    details_tpl = "https://reactome.org/ContentService/data/pathways/low/diagram/{stableId}"
     async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=4.0)) as client:
         s = await _get_json(client, search)
         hits = s.get("results", []) if isinstance(s, dict) else []
@@ -229,6 +298,80 @@ async def immunogenicity_labels(symbol: str, x_api_key: Optional[str] = Header(d
         citations=[],
         fetched_at=_now(),
     )
+
+# ---------- Aggregated endpoint: /v1/targetval ----------
+@app.get("/v1/targetval")
+async def targetval(
+    symbol: Optional[str] = None,
+    ensembl_id: Optional[str] = None,
+    condition: Optional[str] = None,
+    efo_id: Optional[str] = None,
+    x_api_key: Optional[str] = Header(default=None),
+):
+    """
+    Aggregate evidence across all modules.
+    Provide either symbol or ensembl_id (gene identifier), and either condition or efo_id (disease identifier).
+    """
+    require_key(x_api_key)
+    gene = ensembl_id or symbol
+    efo  = efo_id or condition
+    if gene is None or efo is None:
+        raise HTTPException(status_code=400, detail="Must supply gene (symbol or ensembl_id) and condition (efo_id or condition).")
+
+    # Dispatch module calls concurrently
+    tasks = {
+        "genetics_l2g": safe_call(genetics_l2g(gene, efo, x_api_key)),
+        "genetics_rare": safe_call(genetics_rare(gene, x_api_key)),
+        "genetics_mendelian": safe_call(genetics_mendelian(gene, efo, x_api_key)),
+        "genetics_mr": safe_call(genetics_mr(gene, efo, x_api_key)),
+        "genetics_lncrna": safe_call(genetics_lncrna(gene, x_api_key)),
+        "genetics_mirna": safe_call(genetics_mirna(gene, x_api_key)),
+        "genetics_sqtl": safe_call(genetics_sqtl(gene, efo, x_api_key)),
+        "genetics_epigenetics": safe_call(genetics_epigenetics(gene, efo, x_api_key)),
+        "assoc_bulk_rna": safe_call(assoc_bulk_rna(condition, x_api_key)),
+        "assoc_bulk_prot": safe_call(assoc_bulk_prot(condition, x_api_key)),
+        "assoc_sc": safe_call(assoc_sc(condition, x_api_key)),
+        "assoc_perturb": safe_call(assoc_perturb(condition, x_api_key)),
+        "expression_baseline": safe_call(expression_baseline(symbol, x_api_key)),
+        "expr_localization": safe_call(expr_localization(symbol, x_api_key)),
+        "expr_inducibility": safe_call(expr_inducibility(symbol, x_api_key)),
+        "mech_pathways": safe_call(mech_pathways(symbol, x_api_key)),
+        "mech_ppi": safe_call(mech_ppi(symbol, 0.9, 50, x_api_key)),
+        "mech_ligrec": safe_call(mech_ligrec(symbol, x_api_key)),
+        "tract_drugs": safe_call(tract_drugs(symbol, x_api_key)),
+        "tract_ligandability_sm": safe_call(tract_ligandability_sm(symbol, x_api_key)),
+        "tract_ligandability_ab": safe_call(tract_ligandability_ab(symbol, x_api_key)),
+        "tract_ligandability_oligo": safe_call(tract_ligandability_oligo(symbol, x_api_key)),
+        "tract_modality": safe_call(tract_modality(symbol, x_api_key)),
+        "tract_immunogenicity": safe_call(tract_immunogenicity(symbol, x_api_key)),
+        "clin_endpoints": safe_call(clin_endpoints(condition, x_api_key)),
+        "clin_rwe": safe_call(clin_rwe(condition, x_api_key)),
+        "clin_safety": safe_call(clin_safety(symbol, x_api_key)),
+        "clin_pipeline": safe_call(clin_pipeline(symbol, x_api_key)),
+        "comp_intensity": safe_call(comp_intensity(symbol, condition, x_api_key)),
+        "comp_freedom": safe_call(comp_freedom(symbol, x_api_key)),
+    }
+
+    results = await asyncio.gather(*tasks.values())
+
+    # Assemble response
+    evidence_list = []
+    for name, evidence in zip(tasks.keys(), results):
+        evidence_list.append({
+            "module": name,
+            "bucket": MODULE_BUCKET_MAP.get(name, "Unknown"),
+            "status": evidence.status,
+            "fetched_n": evidence.fetched_n,
+            "data": evidence.data,
+            "citations": evidence.citations,
+            "fetched_at": evidence.fetched_at,
+        })
+
+    return {
+        "target": {"symbol": symbol, "ensembl_id": ensembl_id},
+        "context": {"condition": condition, "efo_id": efo_id},
+        "evidence": evidence_list,
+    }
 
 # ---------- Include router if present ----------
 from app.routers.targetval_router import router as tv_router
