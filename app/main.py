@@ -1,14 +1,30 @@
+"""
+Entry point for the TARGETVAL gateway.
+
+This FastAPI application exposes high‑level endpoints that aggregate
+evidence across the module functions defined in
+:mod:`app.routers.targetval_router`.  It mirrors the original
+structure of the gateway while updating the data sources used by
+individual modules to more reliable public APIs.  A convenience
+endpoint ``/v1/targetval`` orchestrates concurrent calls across the
+modules and collates the results into a single response.
+"""
+
+import asyncio
 import os
 import time
 import urllib.parse
-import asyncio
+from typing import Dict, List, Optional
+
+import httpx
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
-import httpx
-from typing import Optional, List, Dict
 
-# Import other module functions from the targetval router
+# Import module functions from the router.  These endpoints wrap
+# external APIs and return :class:`app.routers.targetval_router.Evidence`
 from app.routers.targetval_router import (
+    Evidence as RouterEvidence,
+    genetics_l2g,
     genetics_rare,
     genetics_mendelian,
     genetics_mr,
@@ -20,6 +36,7 @@ from app.routers.targetval_router import (
     assoc_bulk_prot,
     assoc_sc,
     assoc_perturb,
+    expression_baseline,
     expr_localization,
     expr_inducibility,
     mech_pathways,
@@ -39,12 +56,15 @@ from app.routers.targetval_router import (
     comp_freedom,
 )
 
+
 API_KEY = os.getenv("API_KEY")
 
-app = FastAPI(title="TARGETVAL Gateway", version="0.1.1")
+app = FastAPI(title="TARGETVAL Gateway", version="0.2.0")
 
 
 class Evidence(BaseModel):
+    """Mirror of :class:`app.routers.targetval_router.Evidence` for responses."""
+
     status: str
     source: str
     fetched_n: int
@@ -53,28 +73,26 @@ class Evidence(BaseModel):
     fetched_at: float
 
 
-def require_key(x_api_key: str | None):
-    """
-    API key enforcement disabled; all requests are allowed.
-
-    In the original implementation, this helper checked for the presence of an
-    `API_KEY` environment variable and compared it against the incoming
-    `x-api-key` header, raising `HTTPException` on mismatch or absence. To
-    support fully public access, this function now simply returns without
-    performing any checks.
-    """
+def require_key(x_api_key: Optional[str]) -> None:
+    """API key check.  Disabled for public operation."""
     return
 
 
-# ---------- Health endpoint (PUBLIC) ----------
 @app.get("/v1/health")
-def health():
+def health() -> Dict[str, float]:
+    """Health endpoint returning current time."""
     return {"ok": True, "time": time.time()}
 
 
-# ---------- 0) ClinicalTrials.gov ----------
 @app.get("/clinical/ctgov", response_model=Evidence)
-async def ctgov(condition: str, x_api_key: str | None = Header(default=None)):
+async def ctgov(
+    condition: str, x_api_key: Optional[str] = Header(default=None)
+) -> Evidence:
+    """Proxy to ClinicalTrials.gov for a given condition.
+
+    Returns the first three studies retrieved from the v2 API.  Retries
+    the request a few times on failure before raising an error.
+    """
     require_key(x_api_key)
     base = "https://clinicaltrials.gov/api/v2/studies"
     q = f"{base}?query.cond={urllib.parse.quote(condition)}&pageSize=3"
@@ -97,50 +115,31 @@ async def ctgov(condition: str, x_api_key: str | None = Header(default=None)):
     raise HTTPException(status_code=500, detail="Failed to fetch studies")
 
 
-# ---------- Helpers ----------
-async def _get_json(client, url, max_tries=3):
-    last = None
-    for _ in range(max_tries):
-        try:
-            r = await client.get(url)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last = e
-            await asyncio.sleep(0.8)
-    raise last
-
-
-def _now():
-    return time.time()
-
-
-# ---------- Safe call wrapper ----------
-async def safe_call(coro):
-    """Call a module coroutine and return an Evidence object, catching exceptions."""
+async def safe_call(coro) -> RouterEvidence:
+    """Wrap a module coroutine call to return an Evidence object on error."""
     try:
         return await coro
     except HTTPException as e:
-        return Evidence(
+        return RouterEvidence(
             status="ERROR",
             source=str(e.detail),
             fetched_n=0,
             data={},
             citations=[],
-            fetched_at=_now(),
+            fetched_at=time.time(),
         )
     except Exception as e:
-        return Evidence(
+        return RouterEvidence(
             status="ERROR",
             source=str(e),
             fetched_n=0,
             data={},
             citations=[],
-            fetched_at=_now(),
+            fetched_at=time.time(),
         )
 
 
-# ---------- Bucket map ----------
+# Mapping from module name to bucket for aggregated responses.
 MODULE_BUCKET_MAP: Dict[str, str] = {
     "genetics_l2g": "Human Genetics & Causality",
     "genetics_rare": "Human Genetics & Causality",
@@ -175,189 +174,6 @@ MODULE_BUCKET_MAP: Dict[str, str] = {
 }
 
 
-# ---------- 1) Open Targets Genetics: L2G ----------
-@app.get("/genetics/l2g", response_model=Evidence)
-async def genetics_l2g(
-    gene: str, efo: str, x_api_key: Optional[str] = Header(default=None)
-):
-    require_key(x_api_key)
-    base_gql = "https://genetics.opentargets.org/graphql"
-    query = {
-        "query": """
-        query Q($geneId:String!, $efoId:String!){
-          target(ensemblId:$geneId){ id approvedSymbol }
-          disease(efoId:$efoId){ id name }
-          colocalisationByGeneAndDisease(geneId:$geneId, efoId:$efoId){
-            studyId phenotypeId geneId diseaseId yProbaModel yProbaCc
-            hasColoc hasColocConsensus
-          }
-        }""",
-        "variables": {"geneId": gene, "efoId": efo},
-    }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=4.0)) as client:
-        try:
-            r = await client.post(base_gql, json=query)
-            r.raise_for_status()
-            body = r.json()
-            coloc = (
-                body.get("data", {}).get("colocalisationByGeneAndDisease", []) or []
-            )
-            return Evidence(
-                status="OK",
-                source="OpenTargets Genetics GraphQL",
-                fetched_n=len(coloc),
-                data={"gene": gene, "efo": efo, "results": coloc},
-                citations=[base_gql],
-                fetched_at=_now(),
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=502, detail=f"OpenTargets Genetics failed: {e}"
-            )
-
-
-# ---------- 2) Expression Atlas: baseline ----------
-@app.get("/expression/baseline", response_model=Evidence)
-async def expression_baseline(
-    symbol: str, x_api_key: Optional[str] = Header(default=None)
-):
-    require_key(x_api_key)
-    base = f"https://www.ebi.ac.uk/gxa/genes/{symbol}.json"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=4.0)) as client:
-        body = await _get_json(client, base)
-        results: List[Dict] = []
-        try:
-            experiments = body.get("experiments", [])
-            for exp in experiments:
-                for d in exp.get("data", []):
-                    results.append(
-                        {
-                            "tissue": d.get("organismPart")
-                            or d.get("tissue")
-                            or "NA",
-                            "level": d.get("expressions", [{}])[0].get("value"),
-                        }
-                    )
-        except Exception:
-            results = []
-        return Evidence(
-            status="OK",
-            source="Expression Atlas (baseline)",
-            fetched_n=len(results),
-            data={"symbol": symbol, "baseline": results[:100]},
-            citations=[base],
-            fetched_at=_now(),
-        )
-
-
-# ---------- 3) STRING: PPI neighbors ----------
-@app.get("/ppi/string", response_model=Evidence)
-async def ppi_string(
-    symbol: str,
-    cutoff: float = 0.9,
-    limit: int = 50,
-    x_api_key: Optional[str] = Header(default=None),
-):
-    require_key(x_api_key)
-    map_url = f"https://string-db.org/api/json/get_string_ids?identifiers={symbol}&species=9606"
-    network_url_tpl = (
-        "https://string-db.org/api/json/network?identifiers={id}&species=9606"
-    )
-    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=4.0)) as client:
-        ids = await _get_json(client, map_url)
-        if not ids:
-            return Evidence(
-                status="OK",
-                source="STRING",
-                fetched_n=0,
-                data={"symbol": symbol, "neighbors": []},
-                citations=[map_url],
-                fetched_at=_now(),
-            )
-        string_id = ids[0].get("stringId")
-        net = await _get_json(client, network_url_tpl.format(id=string_id))
-        neighbors: List[Dict] = []
-        for edge in net:
-            score = edge.get("score") or edge.get("combined_score")
-            if score and float(score) >= cutoff:
-                neighbors.append(
-                    {
-                        "preferredName_A": edge.get("preferredName_A"),
-                        "preferredName_B": edge.get("preferredName_B"),
-                        "score": float(score),
-                    }
-                )
-        neighbors = neighbors[:limit]
-        return Evidence(
-            status="OK",
-            source="STRING REST",
-            fetched_n=len(neighbors),
-            data={"symbol": symbol, "neighbors": neighbors},
-            citations=[map_url, network_url_tpl.format(id=string_id)],
-            fetched_at=_now(),
-        )
-
-
-# ---------- 4) Reactome pathways ----------
-@app.get("/pathways/reactome", response_model=Evidence)
-async def pathways_reactome(
-    symbol: str, x_api_key: Optional[str] = Header(default=None)
-):
-    require_key(x_api_key)
-    search = f"https://reactome.org/ContentService/search/query?query={symbol}&species=Homo%20sapiens"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=4.0)) as client:
-        s = await _get_json(client, search)
-        hits = s.get("results", []) if isinstance(s, dict) else []
-        pathways: List[Dict] = []
-        for h in hits:
-            if "Pathway" in h.get("species", "") or h.get("stId", "").startswith(
-                "R-HSA"
-            ):
-                pathways.append(
-                    {
-                        "name": h.get("name"),
-                        "stId": h.get("stId"),
-                        "score": h.get("score"),
-                    }
-                )
-        return Evidence(
-            status="OK",
-            source="Reactome ContentService",
-            fetched_n=len(pathways),
-            data={"symbol": symbol, "pathways": pathways[:50]},
-            citations=[search],
-            fetched_at=_now(),
-        )
-
-
-# ---------- 5) Immunogenicity (labels stub) ----------
-@app.get("/immunogenicity/labels", response_model=Evidence)
-async def immunogenicity_labels(
-    symbol: str, x_api_key: Optional[str] = Header(default=None)
-):
-    require_key(x_api_key)
-    ada_table = {
-        "ADALIMUMAB": {
-            "ada_incidence": "highly variable across indications (10â30%+)",
-            "notes": "Human mAb; concomitant MTX reduces ADA",
-        },
-        "INFLIXIMAB": {
-            "ada_incidence": "common without concomitant immunosuppression",
-            "notes": "Chimeric mAb; infusion reactions correlate with ADA",
-        },
-    }
-    item = ada_table.get(symbol.upper())
-    return Evidence(
-        status="OK",
-        source="Label summaries (stub)",
-        fetched_n=1 if item else 0,
-        data={"symbol": symbol, "label": item},
-        citations=[],
-        fetched_at=_now(),
-    )
-
-
-# ---------- Aggregated endpoint: /v1/targetval ----------
 @app.get("/v1/targetval")
 async def targetval(
     symbol: Optional[str] = None,
@@ -365,10 +181,14 @@ async def targetval(
     condition: Optional[str] = None,
     efo_id: Optional[str] = None,
     x_api_key: Optional[str] = Header(default=None),
-):
-    """
-    Aggregate evidence across all modules.
-    Provide either symbol or ensembl_id (gene identifier), and either condition or efo_id (disease identifier).
+) -> Dict[str, Any]:
+    """Aggregate evidence across all modules.
+
+    Clients provide a gene identifier (symbol or Ensembl ID) and a
+    condition (condition name or EFO ID).  The aggregator dispatches
+    asynchronous calls to each module defined in the router and
+    collates the results into a list.  Errors within any module are
+    captured and reported as part of the result.
     """
     require_key(x_api_key)
     gene = ensembl_id or symbol
@@ -378,9 +198,9 @@ async def targetval(
             status_code=400,
             detail="Must supply gene (symbol or ensembl_id) and condition (efo_id or condition).",
         )
-
-    # Dispatch module calls concurrently
-    tasks = {
+    # Dispatch module calls concurrently.  Each entry is a coroutine
+    # wrapped with safe_call to ensure errors are captured.
+    tasks: Dict[str, asyncio.Future] = {
         "genetics_l2g": safe_call(genetics_l2g(gene, efo, x_api_key)),
         "genetics_rare": safe_call(genetics_rare(gene, x_api_key)),
         "genetics_mendelian": safe_call(genetics_mendelian(gene, efo, x_api_key)),
@@ -412,11 +232,9 @@ async def targetval(
         "comp_intensity": safe_call(comp_intensity(symbol, condition, x_api_key)),
         "comp_freedom": safe_call(comp_freedom(symbol, x_api_key)),
     }
-
     results = await asyncio.gather(*tasks.values())
-
-    # Assemble response
-    evidence_list: List[Dict] = []
+    # Assemble response evidence list.
+    evidence_list: List[Dict[str, Any]] = []
     for name, evidence in zip(tasks.keys(), results):
         evidence_list.append(
             {
@@ -429,15 +247,8 @@ async def targetval(
                 "fetched_at": evidence.fetched_at,
             }
         )
-
     return {
         "target": {"symbol": symbol, "ensembl_id": ensembl_id},
         "context": {"condition": condition, "efo_id": efo_id},
         "evidence": evidence_list,
     }
-
-
-# ---------- Include router if present ----------
-from app.routers.targetval_router import router as tv_router
-
-app.include_router(tv_router, prefix="/v1")
