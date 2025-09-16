@@ -54,7 +54,15 @@ class Evidence(BaseModel):
 
 
 def require_key(x_api_key: str | None):
-    """API key enforcement disabled; all requests are allowed."""
+    """
+    API key enforcement disabled; all requests are allowed.
+
+    In the original implementation, this helper checked for the presence of an
+    `API_KEY` environment variable and compared it against the incoming
+    `x-api-key` header, raising `HTTPException` on mismatch or absence. To
+    support fully public access, this function now simply returns without
+    performing any checks.
+    """
     return
 
 
@@ -330,7 +338,7 @@ async def immunogenicity_labels(
     require_key(x_api_key)
     ada_table = {
         "ADALIMUMAB": {
-            "ada_incidence": "highly variable across indications (10–30%+)",
+            "ada_incidence": "highly variable across indications (10â30%+)",
             "notes": "Human mAb; concomitant MTX reduces ADA",
         },
         "INFLIXIMAB": {
@@ -427,3 +435,9 @@ async def targetval(
         "context": {"condition": condition, "efo_id": efo_id},
         "evidence": evidence_list,
     }
+
+
+# ---------- Include router if present ----------
+from app.routers.targetval_router import router as tv_router
+
+app.include_router(tv_router, prefix="/v1")
