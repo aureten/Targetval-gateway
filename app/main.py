@@ -34,6 +34,8 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
+import logging
+
 # Import module functions from the router.  These endpoints wrap
 # external APIs and return :class:`app.routers.targetval_router.Evidence`.
 from app.routers.targetval_router import (
@@ -72,6 +74,12 @@ from app.routers.targetval_router import (
 
 API_KEY = os.getenv("API_KEY")
 
+# Configure a basic logger for observability.  You can adjust the
+# logging level via the LOG_LEVEL environment variable (e.g., DEBUG,
+# INFO, WARNING).  Logs are printed to stderr by default.
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("targetval-gateway")
+
 # FastAPI application instance.  Note that the version number has
 # incremented to reflect breaking changes.
 app = FastAPI(title="TARGETVAL Gateway", version="0.3.0")
@@ -103,6 +111,94 @@ def require_key(x_api_key: Optional[str]) -> None:
     return
 
 
+async def _normalize_gene(identifier: str) -> str:
+    """Normalize a gene symbol or Ensembl identifier.
+
+    This helper attempts to map the provided gene identifier to a canonical
+    HGNC symbol using the MyGene.info service.  If the lookup fails, the
+    input is returned unchanged.  Normalising symbols helps reduce cases
+    where synonyms or case differences cause upstream APIs to return no
+    results.
+
+    Parameters
+    ----------
+    identifier : str
+        The gene symbol or Ensembl identifier provided by the client.
+
+    Returns
+    -------
+    str
+        A canonical HGNC symbol if found, otherwise the original input.
+    """
+    if not identifier:
+        return identifier
+    url = (
+        "https://mygene.info/v3/query?" +
+        f"q={urllib.parse.quote(identifier)}&species=human&fields=symbol"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            js = resp.json()
+            hits = js.get("hits", []) if isinstance(js, dict) else []
+            if hits:
+                # Use the first returned symbol as the canonical name
+                canonical = hits[0].get("symbol")
+                if isinstance(canonical, str) and canonical:
+                    return canonical
+    except Exception as e:
+        # Log normalisation failures at debug level; return original
+        logger.debug(f"Gene normalisation failed for {identifier}: {e}")
+    return identifier
+
+
+async def _normalize_condition(cond: str) -> str:
+    """Normalize a condition or disease name to an EFO term.
+
+    Attempts to map the provided condition string to a short EFO identifier
+    using the EMBL‑EBI Ontology Lookup Service (OLS).  If no match is
+    found or the service fails, the input is returned unchanged.  This
+    normalisation helps align disease names across disparate data sources.
+
+    Parameters
+    ----------
+    cond : str
+        The condition or disease name supplied by the client.
+
+    Returns
+    -------
+    str
+        An EFO short form (e.g., "EFO_0000305") if found, otherwise the
+        original input string.
+    """
+    if not cond:
+        return cond
+    # Query the OLS search endpoint limited to the EFO ontology
+    url = (
+        "https://www.ebi.ac.uk/ols/api/search?" +
+        f"q={urllib.parse.quote(cond)}&ontology=efo&type=class&rows=1"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            js = resp.json()
+            # The OLS search response places results under response.docs
+            response = js.get("response", {})
+            docs = response.get("docs", []) if isinstance(response, dict) else []
+            if docs:
+                short_form = docs[0].get("short_form")
+                if short_form:
+                    # EFO identifiers may be returned without underscore; normalise to EFO_<id>
+                    if not short_form.startswith("EFO"):  # Some terms may include prefix
+                        return short_form
+                    return short_form
+    except Exception as e:
+        logger.debug(f"Condition normalisation failed for {cond}: {e}")
+    return cond
+
+
 @app.get("/v1/health")
 def health() -> Dict[str, float]:
     """Liveness endpoint returning current time in seconds since the epoch."""
@@ -111,35 +207,32 @@ def health() -> Dict[str, float]:
 
 @app.get("/clinical/ctgov", response_model=Evidence)
 async def ctgov(
-    condition: str, x_api_key: Optional[str] = Header(default=None)
+    condition: str,
+    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """Proxy to ClinicalTrials.gov for a given condition.
 
-    Returns the first three studies retrieved from the v2 API.  The
-    request is retried up to three times with increasing delays on
-    failure.  Errors propagate to the caller with a 500 status code.
+    This implementation delegates to the router's ``clin_endpoints`` function
+    to retrieve studies matching the supplied condition.  By reusing the
+    router logic, we gain the benefits of caching, concurrency control and
+    consistent error handling.  If the underlying call fails, the error
+    is captured and returned within an ``Evidence`` object rather than
+    propagating a 500 status code.
     """
-
     require_key(x_api_key)
-    base = "https://clinicaltrials.gov/api/v2/studies"
-    q = f"{base}?query.cond={urllib.parse.quote(condition)}&pageSize=3"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=3.0)) as client:
-        for wait in (0.5, 1.0, 2.0):
-            try:
-                r = await client.get(q)
-                r.raise_for_status()
-                studies = r.json().get("studies", [])
-                return Evidence(
-                    status="OK",
-                    source="ClinicalTrials.gov v2",
-                    fetched_n=len(studies),
-                    data={"studies": studies},
-                    citations=[q],
-                    fetched_at=time.time(),
-                )
-            except Exception:
-                await asyncio.sleep(wait)
-    raise HTTPException(status_code=500, detail="Failed to fetch studies")
+    # Normalise the condition to an EFO term if possible
+    normalized = await _normalize_condition(condition)
+    # Call the router's clin_endpoints with the normalised condition
+    evidence = await call_with_semaphore(clin_endpoints(normalized, x_api_key))  # type: ignore
+    # Convert the router's Evidence into the local response model
+    return Evidence(
+        status=evidence.status,
+        source=evidence.source,
+        fetched_n=evidence.fetched_n,
+        data=evidence.data,
+        citations=evidence.citations,
+        fetched_at=evidence.fetched_at,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -313,13 +406,27 @@ async def targetval(
     """
 
     require_key(x_api_key)
-    gene = ensembl_id or symbol
-    efo = efo_id or condition
-    if gene is None or efo is None:
+    gene_input = ensembl_id or symbol
+    efo_input = efo_id or condition
+    if gene_input is None or efo_input is None:
         raise HTTPException(
             status_code=400,
             detail="Must supply gene (symbol or ensembl_id) and condition (efo_id or condition).",
         )
+    # Normalise inputs.  Gene and condition normalisation may require
+    # asynchronous HTTP calls.  If normalisation fails, the original
+    # values are used.  These helpers map synonyms to canonical
+    # identifiers to improve hit rates in downstream APIs.
+    # For Ensembl identifiers we still attempt normalisation since MyGene
+    # can return the corresponding symbol.  For EFO IDs we attempt to
+    # normalise the condition; if an EFO ID is supplied we assume it is
+    # already canonical.
+    gene = await _normalize_gene(gene_input)
+    # If an explicit EFO ID was supplied, bypass normalisation; else normalise
+    if efo_id:
+        efo = efo_input
+    else:
+        efo = await _normalize_condition(efo_input)
 
     # Determine which modules to invoke based on the ``modules`` query parameter.
     selected_modules = _parse_module_list(modules)
