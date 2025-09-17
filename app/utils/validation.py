@@ -1,37 +1,63 @@
-import re
+"""Validation helpers for TARGETVAL inputs.
+
+These functions perform simple sanity checks on incoming request
+parameters, raising HTTP exceptions when values are missing or
+ill-formed.  The goal is to provide clear error messages early in
+request processing.
+
+As the gateway evolves, additional checks (e.g. regex matching for
+gene symbols, length limits) can be implemented here.  The current
+validators simply ensure that values are non-empty strings.  See
+``app/main.py`` for normalisation routines that map synonyms to
+canonical identifiers.
+"""
+
+from typing import Optional
+
 from fastapi import HTTPException
 
 
-def validate_symbol(symbol: str, field_name: str = "symbol") -> str:
-    """Validate a gene or target symbol.
+def validate_symbol(symbol: Optional[str], field_name: str = "symbol") -> None:
+    """Validate that a gene symbol or identifier is present and non-empty.
 
-    Ensures the symbol is a non‑empty string consisting only of
-    alphanumeric characters, underscores, hyphens or dots.  Raises an
-    HTTPException with status 422 if the symbol is invalid.
+    Parameters
+    ----------
+    symbol : Optional[str]
+        The gene symbol, Ensembl ID or other identifier to validate.
+    field_name : str, optional
+        The name of the field in the incoming request.  Used for error
+        messages.
+
+    Raises
+    ------
+    HTTPException
+        If the symbol is None or an empty/whitespace-only string.
     """
-    if not isinstance(symbol, str) or not symbol:
+    if symbol is None or not isinstance(symbol, str) or not symbol.strip():
         raise HTTPException(
-            status_code=422, detail=f"{field_name} must be a non‑empty string"
+            status_code=400,
+            detail=f"Invalid {field_name}: value must be a non-empty string",
         )
-    if not re.match(r"^[A-Za-z0-9._-]{1,50}$", symbol):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"{field_name} must contain only letters, numbers, dots, underscores or hyphens"
-            ),
-        )
-    return symbol
 
 
-def validate_condition(condition: str) -> str:
-    """Validate a condition or disease identifier.
+def validate_condition(condition: Optional[str], field_name: str = "condition") -> None:
+    """Validate that a condition or disease name is present and non-empty.
 
-    Conditions should be non‑empty strings no longer than 100 characters.  Raises
-    an HTTPException with status 422 if the value is invalid.
+    Parameters
+    ----------
+    condition : Optional[str]
+        The condition name, EFO ID or other disease identifier to validate.
+    field_name : str, optional
+        The name of the field in the incoming request.  Used for error
+        messages.
+
+    Raises
+    ------
+    HTTPException
+        If the condition is None or an empty/whitespace-only string.
     """
-    if not isinstance(condition, str) or not condition:
+    if condition is None or not isinstance(condition, str) or not condition.strip():
         raise HTTPException(
-            status_code=422, detail="condition must be a non‑empty string"
+            status_code=400,
+            detail=f"Invalid {field_name}: value must be a non-empty string",
         )
-    if len(condition) > 100:
-        raise HTTPException(status_code=422, detail="condition is too long")
