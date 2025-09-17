@@ -102,10 +102,6 @@ def status() -> Dict[str, Any]:
         ],
     }
 
-# --------------------------------------------------------------------------
-# Genetics Modules
-# --------------------------------------------------------------------------
-
 @router.get("/genetics/l2g", response_model=Evidence)
 async def genetics_l2g(gene: str, efo: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
     _require_key(x_api_key)
@@ -199,38 +195,18 @@ async def genetics_mendelian(gene: str, efo: Optional[str] = None, x_api_key: Op
         )
 
 @router.get("/genetics/mr", response_model=Evidence)
-async def genetics_mr(gene: str, efo: Optional[str] = None, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Approximate Mendelian randomisation by returning GWAS Catalog associations for the gene.
-    This is a proxy and does not perform causal inference on summary statistics.
-    """
+async def genetics_mr(gene: str, efo: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
-    base = "https://www.ebi.ac.uk/gwas/rest/api/associations"
-    params = f"?gene_name={urllib.parse.quote(gene)}&size=200"
-    url = f"{base}{params}"
-    try:
-        js = await _get_json(url)
-        associations: List[Dict[str, Any]] = []
-        if isinstance(js, dict):
-            associations = js.get("_embedded", {}).get("associations", [])
-        return Evidence(
-            status="OK",
-            source="GWAS Catalog associations",
-            fetched_n=len(associations),
-            data={"gene": gene, "associations": associations[:100]},
-            citations=[url],
-            fetched_at=_now(),
-        )
-    except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"gene": gene, "associations": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+    validate_symbol(efo, field_name="efo")
+    return Evidence(
+        status="NO_DATA",
+        source="OpenGWAS API (MR not implemented)",
+        fetched_n=0,
+        data={},
+        citations=["https://gwas-api.opencagedata.com"],
+        fetched_at=_now(),
+    )
 
 @router.get("/genetics/lncrna", response_model=Evidence)
 async def genetics_lncrna(gene: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
@@ -260,10 +236,6 @@ async def genetics_lncrna(gene: str, x_api_key: Optional[str] = Header(default=N
 
 @router.get("/genetics/mirna", response_model=Evidence)
 async def genetics_mirna(gene: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Placeholder for miRNA–gene interactions.  Returns NO_DATA because TarBase/miRTarBase
-    require authentication and no public API is available.
-    """
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     return Evidence(
@@ -330,10 +302,6 @@ async def genetics_epigenetics(gene: str, efo: Optional[str] = None, x_api_key: 
             fetched_at=_now(),
         )
 
-# --------------------------------------------------------------------------
-# Association & Perturbation Modules
-# --------------------------------------------------------------------------
-
 @router.get("/assoc/bulk-rna", response_model=Evidence)
 async def assoc_bulk_rna(condition: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
     _require_key(x_api_key)
@@ -395,10 +363,6 @@ async def assoc_bulk_prot(condition: str, x_api_key: Optional[str] = Header(defa
 
 @router.get("/assoc/sc", response_model=Evidence)
 async def assoc_sc(condition: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Placeholder for single-cell expression evidence.  The cellxgene-census
-    API is not integrated, so this returns NO_DATA.
-    """
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     return Evidence(
@@ -412,10 +376,6 @@ async def assoc_sc(condition: str, x_api_key: Optional[str] = Header(default=Non
 
 @router.get("/assoc/perturb", response_model=Evidence)
 async def assoc_perturb(condition: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Placeholder for CRISPR perturbation evidence.  BioGRID ORCS requires
-    keys and complex queries, so this returns NO_DATA.
-    """
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     return Evidence(
@@ -426,10 +386,6 @@ async def assoc_perturb(condition: str, x_api_key: Optional[str] = Header(defaul
         citations=["https://orcs.thebiogrid.org"],
         fetched_at=_now(),
     )
-
-# --------------------------------------------------------------------------
-# Expression Modules
-# --------------------------------------------------------------------------
 
 @router.get("/expr/baseline", response_model=Evidence)
 async def expression_baseline(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
@@ -541,10 +497,6 @@ async def expr_inducibility(symbol: str, x_api_key: Optional[str] = Header(defau
             fetched_at=_now(),
         )
 
-# --------------------------------------------------------------------------
-# Mechanistic Modules
-# --------------------------------------------------------------------------
-
 @router.get("/mech/pathways", response_model=Evidence)
 async def mech_pathways(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
     _require_key(x_api_key)
@@ -638,10 +590,6 @@ async def mech_ppi(
 
 @router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Return ligand–receptor interactions from OmniPath.  Filters interactions where
-    the supplied gene is either source or target.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = "https://omnipathdb.org/interactions?format=json&genes={gene}&substrate_only=false"
@@ -670,15 +618,8 @@ async def mech_ligrec(symbol: str, x_api_key: Optional[str] = Header(default=Non
             fetched_at=_now(),
         )
 
-# --------------------------------------------------------------------------
-# Tractability & Modality Modules
-# --------------------------------------------------------------------------
-
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Find drug–gene interactions.  Uses DGIdb and falls back to OpenTargets.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(symbol)}"
@@ -747,9 +688,6 @@ async def tract_drugs(symbol: str, x_api_key: Optional[str] = Header(default=Non
 
 @router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Retrieve ligandability data for small-molecule drugs via ChEMBL.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(symbol)}&format=json"
@@ -776,9 +714,6 @@ async def tract_ligandability_sm(symbol: str, x_api_key: Optional[str] = Header(
 
 @router.get("/tract/ligandability-ab", response_model=Evidence)
 async def tract_ligandability_ab(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Retrieve structural information for potential antibody targets via PDBe.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(symbol)}"
@@ -809,9 +744,6 @@ async def tract_ligandability_ab(symbol: str, x_api_key: Optional[str] = Header(
 
 @router.get("/tract/ligandability-oligo", response_model=Evidence)
 async def tract_ligandability_oligo(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Placeholder for oligonucleotide ligandability.  No public RiboAPT API available.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     return Evidence(
@@ -825,11 +757,6 @@ async def tract_ligandability_oligo(symbol: str, x_api_key: Optional[str] = Head
 
 @router.get("/tract/modality", response_model=Evidence)
 async def tract_modality(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Simple rule-based modality classifier.  Certain cytokines and surface markers are flagged
-    for antibody therapy; non-coding RNAs and mitochondrial genes are flagged as 'Other';
-    everything else defaults to small-molecule.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     s = symbol.upper()
@@ -850,9 +777,6 @@ async def tract_modality(symbol: str, x_api_key: Optional[str] = Header(default=
 
 @router.get("/tract/immunogenicity", response_model=Evidence)
 async def tract_immunogenicity(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Placeholder for immunogenicity evidence (IEDB IQ-API not implemented).
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     return Evidence(
@@ -864,15 +788,8 @@ async def tract_immunogenicity(symbol: str, x_api_key: Optional[str] = Header(de
         fetched_at=_now(),
     )
 
-# --------------------------------------------------------------------------
-# Clinical Modules
-# --------------------------------------------------------------------------
-
 @router.get("/clin/endpoints", response_model=Evidence)
 async def clin_endpoints(condition: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Fetch clinical trials (first three studies) for a given condition from ClinicalTrials.gov v2.
-    """
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     base = "https://clinicaltrials.gov/api/v2/studies"
@@ -900,9 +817,6 @@ async def clin_endpoints(condition: str, x_api_key: Optional[str] = Header(defau
 
 @router.get("/clin/rwe", response_model=Evidence)
 async def clin_rwe(condition: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Placeholder for real-world evidence.  Returns NO_DATA because such data are often proprietary.
-    """
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     return Evidence(
@@ -916,9 +830,6 @@ async def clin_rwe(condition: str, x_api_key: Optional[str] = Header(default=Non
 
 @router.get("/clin/safety", response_model=Evidence)
 async def clin_safety(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Query FDA Adverse Event Reporting (openFDA FAERS) for a target's drug reports.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = f"https://api.fda.gov/drug/event.json?search=patient.drug.openfda.generic_name:{urllib.parse.quote(symbol)}&limit=50"
@@ -945,9 +856,6 @@ async def clin_safety(symbol: str, x_api_key: Optional[str] = Header(default=Non
 
 @router.get("/clin/pipeline", response_model=Evidence)
 async def clin_pipeline(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Query Inxight Drugs for pipeline entries.  Falls back to tractability data.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     inx_url = f"https://drugs.ncats.io/api/v1/drugs?name={urllib.parse.quote(symbol)}"
@@ -965,7 +873,6 @@ async def clin_pipeline(symbol: str, x_api_key: Optional[str] = Header(default=N
             )
     except Exception:
         pass
-    # Fallback: reuse tract_drugs to get known drug interactions
     result = await _safe_call(tract_drugs(symbol))
     return Evidence(
         status=result.status,
@@ -976,19 +883,12 @@ async def clin_pipeline(symbol: str, x_api_key: Optional[str] = Header(default=N
         fetched_at=result.fetched_at,
     )
 
-# --------------------------------------------------------------------------
-# Competition & IP Modules
-# --------------------------------------------------------------------------
-
 @router.get("/comp/intensity", response_model=Evidence)
 async def comp_intensity(
     symbol: str,
     condition: Optional[str] = None,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
-    """
-    Count competition intensity via patents.  Fallback counts drugs plus trials.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     cond = condition if condition else ""
@@ -1029,9 +929,6 @@ async def comp_intensity(
 
 @router.get("/comp/freedom", response_model=Evidence)
 async def comp_freedom(symbol: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    """
-    Simple freedom-to-operate check via PatentsView.
-    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     query = {"_or": [{"patent_title": {"_text_any": symbol}}, {"patent_abstract": {"_text_any": symbol}}]}
@@ -1057,10 +954,6 @@ async def comp_freedom(symbol: str, x_api_key: Optional[str] = Header(default=No
             citations=[url],
             fetched_at=_now(),
         )
-
-# --------------------------------------------------------------------------
-# Module/Bucket Mapping
-# --------------------------------------------------------------------------
 
 MODULE_BUCKET_MAP: Dict[str, str] = {
     "genetics_l2g": "Human Genetics & Causality",
