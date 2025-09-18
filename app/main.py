@@ -314,3 +314,76 @@ async def targetval(
         "context": {"condition": condition, "efo_id": efo_id},
         "evidence": evidence_list,
     }
+
+# --- GitHub Live Data Endpoints ---
+
+import httpx
+
+GITHUB_API = "https://api.github.com"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # set in Render env vars
+
+@app.get("/v1/github/commits")
+async def github_commits(owner: str, repo: str):
+    """Fetch latest commits from a GitHub repo"""
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/commits"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else None,
+        "Accept": "application/vnd.github+json",
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.get(url, headers={k: v for k, v in headers.items() if v})
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "module": "github_commits",
+            "bucket": "GitHub Live Data",
+            "status": "OK",
+            "fetched_n": len(data),
+            "data": {"commits": data},
+            "citations": [url],
+            "fetched_at": time.time(),
+        }
+
+@app.get("/v1/github/issues")
+async def github_issues(owner: str, repo: str):
+    """Fetch open issues from a GitHub repo"""
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/issues"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else None,
+        "Accept": "application/vnd.github+json",
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.get(url, headers={k: v for k, v in headers.items() if v}, params={"state": "open"})
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "module": "github_issues",
+            "bucket": "GitHub Live Data",
+            "status": "OK",
+            "fetched_n": len(data),
+            "data": {"issues": data},
+            "citations": [url],
+            "fetched_at": time.time(),
+        }
+
+@app.get("/v1/github/releases")
+async def github_releases(owner: str, repo: str):
+    """Fetch releases from a GitHub repo"""
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/releases"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else None,
+        "Accept": "application/vnd.github+json",
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.get(url, headers={k: v for k, v in headers.items() if v})
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "module": "github_releases",
+            "bucket": "GitHub Live Data",
+            "status": "OK",
+            "fetched_n": len(data),
+            "data": {"releases": data},
+            "citations": [url],
+            "fetched_at": time.time(),
+        }
