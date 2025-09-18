@@ -23,6 +23,10 @@ Additionally, most endpoints now accept an optional ``limit`` query
 parameter which controls how many records are returned (default 50).  This
 parameter helps callers manage payload sizes without having to fetch
 the full data set.
+
+This revised version removes all API key requirements to allow public
+access, and introduces a `/github/releases` endpoint that fetches the
+latest releases for a given repository directly from the GitHub REST API.
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ import urllib.parse
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.utils.validation import validate_symbol, validate_condition
@@ -104,8 +108,9 @@ _semaphore: asyncio.Semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 # API key enforcement placeholder.  The original implementation compared
 # a request header against an environment variable.  To support public
-# operation the check simply returns.
-def _require_key(x_api_key: Optional[str]) -> None:
+# operation the check simply returns.  All endpoints no longer accept
+# ``x-api-key`` headers.
+def _require_key(_: Optional[str]) -> None:
     return
 
 
@@ -222,6 +227,7 @@ def status() -> Dict[str, Any]:
             "B5: /tract/drugs, /tract/ligandability-sm, /tract/ligandability-ab, /tract/ligandability-oligo, /tract/modality, /tract/immunogenicity",
             "B6: /clin/endpoints, /clin/rwe, /clin/safety, /clin/pipeline",
             "B7: /comp/intensity, /comp/freedom",
+            "GitHub: /github/releases",
         ],
     }
 
@@ -234,7 +240,6 @@ def status() -> Dict[str, Any]:
 async def genetics_l2g(
     gene: str,
     efo: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of associations to return"),
 ) -> Evidence:
     """Gene–disease associations from DisGeNET; fallback to GWAS Catalog.
@@ -245,7 +250,6 @@ async def genetics_l2g(
     name.  Results are truncated to ``limit`` entries.
     """
 
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo, field_name="efo")
     # Primary: DisGeNET gene–disease associations.
@@ -287,7 +291,6 @@ async def genetics_l2g(
 @router.get("/genetics/rare", response_model=Evidence)
 async def genetics_rare(
     gene: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of variants to return"),
 ) -> Evidence:
     """Rare variant associations via ClinVar; fallback to gnomAD.
@@ -299,7 +302,6 @@ async def genetics_rare(
     to ``limit`` entries.
     """
 
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     # Primary: ClinVar via E‑utilities esearch.
     clinvar_url = (
@@ -365,7 +367,6 @@ async def genetics_rare(
 async def genetics_mendelian(
     gene: str,
     efo: Optional[str] = None,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of diseases to return"),
 ) -> Evidence:
     """Mendelian disease associations via the Monarch API.
@@ -376,7 +377,6 @@ async def genetics_mendelian(
     are truncated to ``limit`` entries.
     """
 
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     url = f"https://api.monarchinitiative.org/api/bioentity/gene/{urllib.parse.quote(gene)}/diseases?rows=20"
     try:
@@ -405,7 +405,6 @@ async def genetics_mendelian(
 async def genetics_mr(
     gene: str,
     efo: str,
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """Mendelian randomisation placeholder using OpenGWAS.
 
@@ -415,7 +414,6 @@ async def genetics_mr(
     ``NO_DATA`` while still documenting the appropriate data source.
     """
 
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo, field_name="efo")
     return Evidence(
@@ -431,7 +429,6 @@ async def genetics_mr(
 @router.get("/genetics/lncrna", response_model=Evidence)
 async def genetics_lncrna(
     gene: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of lncRNAs to return"),
 ) -> Evidence:
     """Long non‑coding RNAs for a gene via RNAcentral.
@@ -441,7 +438,6 @@ async def genetics_lncrna(
     records.  If the API call fails, returns an error.
     """
 
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     url = f"https://rnacentral.org/api/v1/rna?q={urllib.parse.quote(gene)}&page_size={limit}"
     try:
@@ -469,7 +465,6 @@ async def genetics_lncrna(
 @router.get("/genetics/mirna", response_model=Evidence)
 async def genetics_mirna(
     gene: str,
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """MicroRNA interactions placeholder (TarBase).
 
@@ -480,7 +475,6 @@ async def genetics_mirna(
     providing citations to the appropriate resources.
     """
 
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     return Evidence(
         status="NO_DATA",
@@ -496,7 +490,6 @@ async def genetics_mirna(
 async def genetics_sqtl(
     gene: str,
     efo: Optional[str] = None,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of sQTLs to return"),
 ) -> Evidence:
     """Splicing QTLs from the eQTL Catalogue.
@@ -505,7 +498,6 @@ async def genetics_sqtl(
     with the supplied gene.  Returns up to ``limit`` records.
     """
 
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     url = f"https://www.ebi.ac.uk/eqtl/api/genes/{urllib.parse.quote(gene)}/sqtls"
     try:
@@ -534,7 +526,6 @@ async def genetics_sqtl(
 async def genetics_epigenetics(
     gene: str,
     efo: Optional[str] = None,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of experiments to return"),
 ) -> Evidence:
     """Epigenetic data from the ENCODE portal.
@@ -545,7 +536,6 @@ async def genetics_epigenetics(
     empty result.
     """
 
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     search_url = (
         "https://www.encodeproject.org/search/?"
@@ -580,7 +570,6 @@ async def genetics_epigenetics(
 @router.get("/assoc/bulk-rna", response_model=Evidence)
 async def assoc_bulk_rna(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of genes to return"),
 ) -> Evidence:
     """Tissue‑associated genes from GTEx for a given condition.
@@ -590,7 +579,6 @@ async def assoc_bulk_rna(
     error is reported.
     """
 
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     url = f"https://gtexportal.org/api/v2/association/genesByTissue?tissueSiteDetail={urllib.parse.quote(condition)}"
     try:
@@ -618,7 +606,6 @@ async def assoc_bulk_rna(
 @router.get("/assoc/bulk-prot", response_model=Evidence)
 async def assoc_bulk_prot(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of proteins to return"),
 ) -> Evidence:
     """Proteins associated with a condition from ProteomicsDB.
@@ -627,7 +614,6 @@ async def assoc_bulk_prot(
     up to ``limit`` records.  If the API call fails, an error is reported.
     """
 
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     url = (
         "https://www.proteomicsdb.org/proteomicsdb/api/v2/proteins/search"
@@ -662,7 +648,6 @@ async def assoc_bulk_prot(
 @router.get("/assoc/sc", response_model=Evidence)
 async def assoc_sc(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """Single‑cell expression placeholder using cellxgene‑census.
 
@@ -672,7 +657,6 @@ async def assoc_sc(
     appropriate resource.
     """
 
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     return Evidence(
         status="NO_DATA",
@@ -687,7 +671,6 @@ async def assoc_sc(
 @router.get("/assoc/perturb", response_model=Evidence)
 async def assoc_perturb(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """CRISPR perturbation placeholder using BioGRID ORCS.
 
@@ -696,7 +679,6 @@ async def assoc_perturb(
     remains unimplemented and returns ``NO_DATA``.
     """
 
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     return Evidence(
         status="NO_DATA",
@@ -715,7 +697,6 @@ async def assoc_perturb(
 @router.get("/expr/baseline", response_model=Evidence)
 async def expression_baseline(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=500, description="Maximum number of baseline entries to return"),
 ) -> Evidence:
     """Baseline expression from the Human Protein Atlas (HPA).
@@ -726,7 +707,6 @@ async def expression_baseline(
     to UniProt search.  Returns up to ``limit`` baseline records.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     # Primary: Human Protein Atlas search.  The HPA API allows a custom
     # search with a gene symbol and returns a JSON structure.  We request
@@ -802,7 +782,6 @@ async def expression_baseline(
 @router.get("/expr/localization", response_model=Evidence)
 async def expr_localization(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of localization entries to return"),
 ) -> Evidence:
     """Protein localisation evidence from the COMPARTMENTS API.
@@ -811,7 +790,6 @@ async def expr_localization(
     COMPARTMENTS database.  Returns up to ``limit`` localisation entries.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = (
         "https://compartments.jensenlab.org/Service"
@@ -842,7 +820,6 @@ async def expr_localization(
 @router.get("/expr/inducibility", response_model=Evidence)
 async def expr_inducibility(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of dataset identifiers to return"),
 ) -> Evidence:
     """Inducible expression evidence from GEO via E‑utilities.
@@ -853,7 +830,6 @@ async def expr_inducibility(
     an error is returned.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = (
         f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=gds&term={urllib.parse.quote(symbol)}%5Bgene%5D"
@@ -888,7 +864,6 @@ async def expr_inducibility(
 @router.get("/mech/pathways", response_model=Evidence)
 async def mech_pathways(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of pathways to return"),
 ) -> Evidence:
     """Pathway assignments via Reactome search.
@@ -898,7 +873,6 @@ async def mech_pathways(
     are returned.  If the call fails an error is returned.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     search = (
         f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(symbol)}&species=Homo%20sapiens"
@@ -906,7 +880,7 @@ async def mech_pathways(
     try:
         js = await _get_json(search)
         hits = js.get("results", []) if isinstance(js, dict) else []
-        pathways = []
+        pathways: List[Dict[str, Any]] = []
         for h in hits:
             # Filter to pathway entries (stId starting with R‑HSA).
             if "Pathway" in h.get("species", "") or h.get("stId", "").startswith("R-HSA"):
@@ -941,7 +915,6 @@ async def mech_ppi(
     symbol: str,
     cutoff: float = Query(0.9, ge=0.0, le=1.0, description="Minimum interaction score to include"),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of interaction partners to return"),
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """Protein–protein interaction neighbours via STRING.
 
@@ -951,7 +924,6 @@ async def mech_ppi(
     ``limit`` parameter.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     map_url = (
         "https://string-db.org/api/json/get_string_ids"
@@ -1005,7 +977,6 @@ async def mech_ppi(
 @router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500, description="Maximum number of interactions to return"),
 ) -> Evidence:
     """Ligand–receptor interactions via OmniPath.
@@ -1015,7 +986,6 @@ async def mech_ligrec(
     ``limit`` interactions.  If the call fails, an error is reported.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = "https://omnipathdb.org/interactions?format=json&genes={gene}&substrate_only=false"
     try:
@@ -1051,7 +1021,6 @@ async def mech_ligrec(
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500, description="Maximum number of drug interactions to return"),
 ) -> Evidence:
     """Drug–gene interactions via DGIdb; fallback to OpenTargets.
@@ -1062,7 +1031,6 @@ async def tract_drugs(
     ``limit`` interaction records.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(symbol)}"
     try:
@@ -1133,7 +1101,6 @@ async def tract_drugs(
 @router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500, description="Maximum number of small‑molecule targets to return"),
 ) -> Evidence:
     """Small‑molecule ligandability via ChEMBL.
@@ -1143,7 +1110,6 @@ async def tract_ligandability_sm(
     returned.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(symbol)}&format=json"
     try:
@@ -1171,7 +1137,6 @@ async def tract_ligandability_sm(
 @router.get("/tract/ligandability-ab", response_model=Evidence)
 async def tract_ligandability_ab(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of structures to return"),
 ) -> Evidence:
     """Antibody ligandability via PDBe.
@@ -1181,7 +1146,6 @@ async def tract_ligandability_ab(
     assess antibody accessibility.  Returns up to ``limit`` entries.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(symbol)}"
     try:
@@ -1213,7 +1177,6 @@ async def tract_ligandability_ab(
 @router.get("/tract/ligandability-oligo", response_model=Evidence)
 async def tract_ligandability_oligo(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """Oligonucleotide ligandability placeholder (RiboAPT).
 
@@ -1224,7 +1187,6 @@ async def tract_ligandability_oligo(
     endpoint returns ``NO_DATA``.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     return Evidence(
         status="NO_DATA",
@@ -1239,7 +1201,6 @@ async def tract_ligandability_oligo(
 @router.get("/tract/modality", response_model=Evidence)
 async def tract_modality(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """Therapeutic modality placeholder.
 
@@ -1249,7 +1210,6 @@ async def tract_modality(
     This endpoint is not implemented and returns ``NO_DATA``.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     return Evidence(
         status="NO_DATA",
@@ -1264,7 +1224,6 @@ async def tract_modality(
 @router.get("/tract/immunogenicity", response_model=Evidence)
 async def tract_immunogenicity(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """Immunogenicity evidence via IEDB (placeholder).
 
@@ -1274,7 +1233,6 @@ async def tract_immunogenicity(
     return ``NO_DATA`` and cite the resource.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     return Evidence(
         status="NO_DATA",
@@ -1293,7 +1251,6 @@ async def tract_immunogenicity(
 @router.get("/clin/endpoints", response_model=Evidence)
 async def clin_endpoints(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(3, ge=1, le=100, description="Maximum number of trials to return"),
 ) -> Evidence:
     """Clinical trials for a given condition from ClinicalTrials.gov.
@@ -1303,7 +1260,6 @@ async def clin_endpoints(
     JSON response.  If the call fails an error is returned.
     """
 
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     base = "https://clinicaltrials.gov/api/v2/studies"
     q = f"{base}?query.cond={urllib.parse.quote(condition)}&pageSize={limit}"
@@ -1332,7 +1288,6 @@ async def clin_endpoints(
 @router.get("/clin/rwe", response_model=Evidence)
 async def clin_rwe(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """Real‑world evidence placeholder.
 
@@ -1341,7 +1296,6 @@ async def clin_rwe(
     unimplemented and returns ``NO_DATA``.
     """
 
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     return Evidence(
         status="NO_DATA",
@@ -1356,7 +1310,6 @@ async def clin_rwe(
 @router.get("/clin/safety", response_model=Evidence)
 async def clin_safety(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=500, description="Maximum number of adverse event reports to return"),
 ) -> Evidence:
     """Drug safety signals via openFDA.
@@ -1366,7 +1319,6 @@ async def clin_safety(
     error is returned.  Note that openFDA has strict rate limits.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = f"https://api.fda.gov/drug/event.json?search=patient.drug.openfda.generic_name:{urllib.parse.quote(symbol)}&limit={limit}"
     try:
@@ -1394,7 +1346,6 @@ async def clin_safety(
 @router.get("/clin/pipeline", response_model=Evidence)
 async def clin_pipeline(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=500, description="Maximum number of pipeline entries to return"),
 ) -> Evidence:
     """Drug development pipeline via Inxight Drugs; fallback to tract_drugs.
@@ -1405,7 +1356,6 @@ async def clin_pipeline(
     up to ``limit`` pipeline entries.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     inx_url = f"https://drugs.ncats.io/api/v1/drugs?name={urllib.parse.quote(symbol)}"
     try:
@@ -1423,7 +1373,7 @@ async def clin_pipeline(
     except Exception:
         pass
     # Fallback: reuse tract_drugs implementation.
-    result = await _safe_call(tract_drugs(symbol, x_api_key, limit))
+    result = await _safe_call(tract_drugs(symbol, limit))
     return Evidence(
         status=result.status,
         source=result.source,
@@ -1442,7 +1392,6 @@ async def clin_pipeline(
 async def comp_intensity(
     symbol: str,
     condition: Optional[str] = None,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of patent records to return"),
 ) -> Evidence:
     """Competitive intensity via PatentsView.
@@ -1455,7 +1404,6 @@ async def comp_intensity(
     results are truncated to ``limit`` entries.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     cond = condition if condition else ""
     query = {"_and": [
@@ -1485,8 +1433,8 @@ async def comp_intensity(
     except Exception:
         pass
     # Fallback: number of drugs and trials as proxy for competition.
-    drug_res = await _safe_call(tract_drugs(symbol, x_api_key, limit))
-    trial_res = await _safe_call(clin_endpoints(condition or symbol, x_api_key, limit))
+    drug_res = await _safe_call(tract_drugs(symbol, limit))
+    trial_res = await _safe_call(clin_endpoints(condition or symbol, limit))
     count = (drug_res.fetched_n if drug_res else 0) + (trial_res.fetched_n if trial_res else 0)
     return Evidence(
         status="OK",
@@ -1506,7 +1454,6 @@ async def comp_intensity(
 @router.get("/comp/freedom", response_model=Evidence)
 async def comp_freedom(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of patent identifiers to return"),
 ) -> Evidence:
     """Freedom‑to‑operate via PatentsView.
@@ -1518,7 +1465,6 @@ async def comp_freedom(
     gateway.
     """
 
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     query = {"_or": [
         {"patent_title": {"_text_any": symbol}},
@@ -1543,6 +1489,56 @@ async def comp_freedom(
             source=str(e),
             fetched_n=0,
             data={"symbol": symbol, "patents": []},
+            citations=[url],
+            fetched_at=_now(),
+        )
+
+
+# -----------------------------------------------------------------------------
+# GitHub endpoints
+# -----------------------------------------------------------------------------
+
+@router.get("/github/releases", response_model=Evidence)
+async def github_releases(
+    repository: str,
+    per_page: int = Query(5, ge=1, le=100, description="Number of releases to return"),
+) -> Evidence:
+    """Return recent GitHub releases for a repository.
+
+    This endpoint proxies the GitHub REST API.  It returns the latest
+    releases for the specified repository.  If there are no releases,
+    an empty list is returned.  Results are wrapped in an Evidence
+    object.
+    """
+
+    url = f"https://api.github.com/repos/{repository}/releases?per_page={per_page}"
+    try:
+        js = await _get_json(url)
+        processed: List[Dict[str, Any]] = []
+        if isinstance(js, list):
+            for r in js:
+                processed.append(
+                    {
+                        "name": r.get("name") or r.get("tag_name"),
+                        "tag_name": r.get("tag_name"),
+                        "published_at": r.get("published_at"),
+                        "html_url": r.get("html_url"),
+                    }
+                )
+        return Evidence(
+            status="OK",
+            source="GitHub releases API",
+            fetched_n=len(processed),
+            data={"repository": repository, "releases": processed},
+            citations=[url],
+            fetched_at=_now(),
+        )
+    except Exception as e:
+        return Evidence(
+            status="ERROR",
+            source=str(e),
+            fetched_n=0,
+            data={"repository": repository, "releases": []},
             citations=[url],
             fetched_at=_now(),
         )
