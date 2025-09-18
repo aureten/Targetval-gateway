@@ -1,0 +1,315 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "TARGETVAL Gateway",
+    "version": "0.3.0"
+  },
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Health V1 Health Get",
+                  "type": "object",
+                  "additionalProperties": { "type": "number" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clinical/ctgov": {
+      "get": {
+        "summary": "Ctgov",
+        "operationId": "ctgov_clinical_ctgov_get",
+        "parameters": [
+          {
+            "name": "condition",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "Condition" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Evidence" }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/github/commits": {
+      "get": {
+        "summary": "Github Commits",
+        "operationId": "github_commits_v1_github_commits_get",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "Owner" }
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "Repo" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": { "schema": {} }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/github/issues": {
+      "get": {
+        "summary": "Github Issues",
+        "operationId": "github_issues_v1_github_issues_get",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "Owner" }
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "Repo" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": { "schema": {} }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/github/releases": {
+      "get": {
+        "summary": "Github Releases",
+        "operationId": "github_releases_v1_github_releases_get",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "Owner" }
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "Repo" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": { "schema": {} }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/targetval": {
+      "get": {
+        "summary": "Targetval",
+        "operationId": "targetval_v1_targetval_get",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "title": "Symbol",
+              "anyOf": [
+                { "type": "string" },
+                { "type": "null" }
+              ]
+            }
+          },
+          {
+            "name": "ensembl_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "title": "Ensembl Id",
+              "anyOf": [
+                { "type": "string" },
+                { "type": "null" }
+              ]
+            }
+          },
+          {
+            "name": "condition",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "title": "Condition",
+              "anyOf": [
+                { "type": "string" },
+                { "type": "null" }
+              ]
+            }
+          },
+          {
+            "name": "efo_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "title": "Efo Id",
+              "anyOf": [
+                { "type": "string" },
+                { "type": "null" }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Targetval V1 Targetval Get",
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Evidence": {
+        "title": "Evidence",
+        "type": "object",
+        "required": [
+          "status",
+          "source",
+          "fetched_n",
+          "data",
+          "citations",
+          "fetched_at"
+        ],
+        "properties": {
+          "status": { "title": "Status", "type": "string" },
+          "source": { "title": "Source", "type": "string" },
+          "fetched_n": { "title": "Fetched N", "type": "integer" },
+          "data": {
+            "title": "Data",
+            "type": "object",
+            "additionalProperties": true
+          },
+          "citations": {
+            "title": "Citations",
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "fetched_at": { "title": "Fetched At", "type": "number" }
+        }
+      },
+      "HTTPValidationError": {
+        "title": "HTTPValidationError",
+        "type": "object",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            }
+          }
+        }
+      },
+      "ValidationError": {
+        "title": "ValidationError",
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "properties": {
+          "loc": {
+            "title": "Location",
+            "type": "array",
+            "items": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "integer" }
+              ]
+            }
+          },
+          "msg": { "title": "Message", "type": "string" },
+          "type": { "title": "Error Type", "type": "string" }
+        }
+      }
+    }
+  }
+}
