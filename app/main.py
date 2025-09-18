@@ -13,6 +13,11 @@ Additionally, this version exposes a plugin manifest at
 ``/.well-known/ai-plugin.json`` so that the gateway can be used as a
 ChatGPT custom connector.  It also enables CORS to allow web-based
 clients, including ChatGPT, to call the API directly from a browser.
+
+This revised version removes all API key enforcement and no longer
+accepts an ``x-api-key`` header.  It also uses the updated router
+functions that no longer require a key, and simplifies the aggregator
+accordingly.
 """
 
 import asyncio
@@ -22,7 +27,7 @@ import urllib.parse
 from typing import Dict, List, Optional, Any
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -62,8 +67,6 @@ from app.routers.targetval_router import (
     comp_intensity,
     comp_freedom,
 )
-
-API_KEY = os.getenv("API_KEY")
 
 # Create the FastAPI app
 app = FastAPI(title="TARGETVAL Gateway", version="0.3.0")
@@ -120,18 +123,15 @@ class Evidence(BaseModel):
     fetched_at: float
 
 
-def require_key(x_api_key: Optional[str]) -> None:
-    return
-
-
+# Public health endpoint
 @app.get("/v1/health")
 def health() -> Dict[str, float]:
     return {"ok": True, "time": time.time()}
 
 
+# ClinicalTrials.gov simple proxy (no key required)
 @app.get("/clinical/ctgov", response_model=Evidence)
-async def ctgov(condition: str, x_api_key: Optional[str] = Header(default=None)) -> Evidence:
-    require_key(x_api_key)
+async def ctgov(condition: str) -> Evidence:
     base = "https://clinicaltrials.gov/api/v2/studies"
     q = f"{base}?query.cond={urllib.parse.quote(condition)}&pageSize=3"
     async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=3.0)) as client:
@@ -154,6 +154,7 @@ async def ctgov(condition: str, x_api_key: Optional[str] = Header(default=None))
 
 
 async def safe_call(coro) -> RouterEvidence:
+    """Wrap a coroutine call and return a RouterEvidence on error."""
     try:
         return await coro
     except HTTPException as e:
@@ -284,16 +285,22 @@ MODULE_BUCKET_MAP: Dict[str, str] = {
 }
 
 
-# --- Revised aggregator with GitHub included ---
+# --- Revised aggregator without API key enforcement ---
 @app.get("/v1/targetval")
 async def targetval(
     symbol: Optional[str] = None,
     ensembl_id: Optional[str] = None,
     condition: Optional[str] = None,
     efo_id: Optional[str] = None,
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    require_key(x_api_key)
+    """Aggregate evidence across all modules and GitHub endpoints.
+
+    The caller must provide both a gene (symbol or Ensembl ID) and a
+    condition (disease name or EFO ID).  The aggregator concurrently
+    invokes each module and collates the results into a list of
+    evidence objects tagged with their module and bucket.
+    """
+
     gene = ensembl_id or symbol
     efo = efo_id or condition
     if gene is None or efo is None:
@@ -302,38 +309,43 @@ async def targetval(
             detail="Must supply gene (symbol or ensembl_id) and condition (efo_id or condition).",
         )
 
+    # Map each module to its coroutine.  We rely on default limits defined in
+    # the router; for endpoints that take additional arguments, we specify
+    # sensible defaults directly (e.g. cutoff for mech_ppi).
     tasks: Dict[str, asyncio.Future] = {
-        "genetics_l2g": safe_call(genetics_l2g(gene, efo, x_api_key)),
-        "genetics_rare": safe_call(genetics_rare(gene, x_api_key)),
-        "genetics_mendelian": safe_call(genetics_mendelian(gene, efo, x_api_key)),
-        "genetics_mr": safe_call(genetics_mr(gene, efo, x_api_key)),
-        "genetics_lncrna": safe_call(genetics_lncrna(gene, x_api_key)),
-        "genetics_mirna": safe_call(genetics_mirna(gene, x_api_key)),
-        "genetics_sqtl": safe_call(genetics_sqtl(gene, efo, x_api_key)),
-        "genetics_epigenetics": safe_call(genetics_epigenetics(gene, efo, x_api_key)),
-        "assoc_bulk_rna": safe_call(assoc_bulk_rna(condition, x_api_key)),
-        "assoc_bulk_prot": safe_call(assoc_bulk_prot(condition, x_api_key)),
-        "assoc_sc": safe_call(assoc_sc(condition, x_api_key)),
-        "assoc_perturb": safe_call(assoc_perturb(condition, x_api_key)),
-        "expression_baseline": safe_call(expression_baseline(symbol, x_api_key)),
-        "expr_localization": safe_call(expr_localization(symbol, x_api_key)),
-        "expr_inducibility": safe_call(expr_inducibility(symbol, x_api_key)),
-        "mech_pathways": safe_call(mech_pathways(symbol, x_api_key)),
-        "mech_ppi": safe_call(mech_ppi(symbol, 0.9, 50, x_api_key)),
-        "mech_ligrec": safe_call(mech_ligrec(symbol, x_api_key)),
-        "tract_drugs": safe_call(tract_drugs(symbol, x_api_key)),
-        "tract_ligandability_sm": safe_call(tract_ligandability_sm(symbol, x_api_key)),
-        "tract_ligandability_ab": safe_call(tract_ligandability_ab(symbol, x_api_key)),
-        "tract_ligandability_oligo": safe_call(tract_ligandability_oligo(symbol, x_api_key)),
-        "tract_modality": safe_call(tract_modality(symbol, x_api_key)),
-        "tract_immunogenicity": safe_call(tract_immunogenicity(symbol, x_api_key)),
-        "clin_endpoints": safe_call(clin_endpoints(condition, x_api_key)),
-        "clin_rwe": safe_call(clin_rwe(condition, x_api_key)),
-        "clin_safety": safe_call(clin_safety(symbol, x_api_key)),
-        "clin_pipeline": safe_call(clin_pipeline(symbol, x_api_key)),
-        "comp_intensity": safe_call(comp_intensity(symbol, condition, x_api_key)),
-        "comp_freedom": safe_call(comp_freedom(symbol, x_api_key)),
-        # --- GitHub modules ---
+        "genetics_l2g": safe_call(genetics_l2g(gene, efo)),
+        "genetics_rare": safe_call(genetics_rare(gene)),
+        "genetics_mendelian": safe_call(genetics_mendelian(gene, efo)),
+        "genetics_mr": safe_call(genetics_mr(gene, efo)),
+        "genetics_lncrna": safe_call(genetics_lncrna(gene)),
+        "genetics_mirna": safe_call(genetics_mirna(gene)),
+        "genetics_sqtl": safe_call(genetics_sqtl(gene, efo)),
+        "genetics_epigenetics": safe_call(genetics_epigenetics(gene, efo)),
+        "assoc_bulk_rna": safe_call(assoc_bulk_rna(condition or "")),
+        "assoc_bulk_prot": safe_call(assoc_bulk_prot(condition or "")),
+        "assoc_sc": safe_call(assoc_sc(condition or "")),
+        "assoc_perturb": safe_call(assoc_perturb(condition or "")),
+        "expression_baseline": safe_call(expression_baseline(gene)),
+        "expr_localization": safe_call(expr_localization(gene)),
+        "expr_inducibility": safe_call(expr_inducibility(gene)),
+        "mech_pathways": safe_call(mech_pathways(gene)),
+        "mech_ppi": safe_call(mech_ppi(gene, 0.9, 50)),
+        "mech_ligrec": safe_call(mech_ligrec(gene)),
+        "tract_drugs": safe_call(tract_drugs(gene)),
+        "tract_ligandability_sm": safe_call(tract_ligandability_sm(gene)),
+        "tract_ligandability_ab": safe_call(tract_ligandability_ab(gene)),
+        "tract_ligandability_oligo": safe_call(tract_ligandability_oligo(gene)),
+        "tract_modality": safe_call(tract_modality(gene)),
+        "tract_immunogenicity": safe_call(tract_immunogenicity(gene)),
+        "clin_endpoints": safe_call(clin_endpoints(condition or "")),
+        "clin_rwe": safe_call(clin_rwe(condition or "")),
+        "clin_safety": safe_call(clin_safety(gene)),
+        "clin_pipeline": safe_call(clin_pipeline(gene)),
+        "comp_intensity": safe_call(comp_intensity(gene, condition)),
+        "comp_freedom": safe_call(comp_freedom(gene)),
+        # GitHub modules target a specific repository.  You can make these
+        # parameters configurable or derive them from the gene/condition if
+        # desired.  Here we hard-code to the Targetval-gateway repository.
         "github_commits": safe_call(github_commits(owner="aureten", repo="Targetval-gateway")),
         "github_issues": safe_call(github_issues(owner="aureten", repo="Targetval-gateway")),
         "github_releases": safe_call(github_releases(owner="aureten", repo="Targetval-gateway")),
