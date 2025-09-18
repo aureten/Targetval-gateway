@@ -77,6 +77,7 @@ app.add_middleware(
 )
 
 # Plugin manifest for ChatGPT
+# These URLs should point to files hosted in your GitHub repository.
 PLUGIN_MANIFEST: Dict[str, Any] = {
     "schema_version": "v1",
     "name_for_human": "TargetVal Gateway",
@@ -92,10 +93,16 @@ PLUGIN_MANIFEST: Dict[str, Any] = {
         "objects across genetics, expression, clinical, and GitHub modules."
     ),
     "auth": {"type": "none"},
-    "api": {"type": "openapi", "url": "https://targetval-gateway.onrender.com/openapi.json"},
-    "logo_url": "https://targetval-gateway.onrender.com/logo.png",
+    # Replace with the raw GitHub URL to your OpenAPI spec
+    "api": {
+        "type": "openapi",
+        "url": "https://raw.githubusercontent.com/aureten/Targetval-gateway/main/openapi.json",
+    },
+    # Replace with the raw GitHub URL to your logo file
+    "logo_url": "https://raw.githubusercontent.com/aureten/Targetval-gateway/main/logo.png",
     "contact_email": "your-email@example.com",
-    "legal_info_url": "https://targetval-gateway.onrender.com/legal",
+    # Replace with the raw GitHub URL to your legal info file
+    "legal_info_url": "https://raw.githubusercontent.com/aureten/Targetval-gateway/main/legal.html",
 }
 
 
@@ -150,9 +157,23 @@ async def safe_call(coro) -> RouterEvidence:
     try:
         return await coro
     except HTTPException as e:
-        return RouterEvidence(status="ERROR", source=str(e.detail), fetched_n=0, data={}, citations=[], fetched_at=time.time())
+        return RouterEvidence(
+            status="ERROR",
+            source=str(e.detail),
+            fetched_n=0,
+            data={},
+            citations=[],
+            fetched_at=time.time(),
+        )
     except Exception as e:
-        return RouterEvidence(status="ERROR", source=str(e), fetched_n=0, data={}, citations=[], fetched_at=time.time())
+        return RouterEvidence(
+            status="ERROR",
+            source=str(e),
+            fetched_n=0,
+            data={},
+            citations=[],
+            fetched_at=time.time(),
+        )
 
 
 # --- GitHub Live Data Endpoints ---
@@ -164,34 +185,64 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 @app.get("/v1/github/commits")
 async def github_commits(owner: str, repo: str):
     url = f"{GITHUB_API}/repos/{owner}/{repo}/commits"
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else None, "Accept": "application/vnd.github+json"}
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else None,
+        "Accept": "application/vnd.github+json",
+    }
     async with httpx.AsyncClient() as client:
         r = await client.get(url, headers={k: v for k, v in headers.items() if v})
         r.raise_for_status()
         data = r.json()
-        return RouterEvidence(status="OK", source=url, fetched_n=len(data), data={"commits": data}, citations=[url], fetched_at=time.time())
+        return RouterEvidence(
+            status="OK",
+            source=url,
+            fetched_n=len(data),
+            data={"commits": data},
+            citations=[url],
+            fetched_at=time.time(),
+        )
 
 
 @app.get("/v1/github/issues")
 async def github_issues(owner: str, repo: str):
     url = f"{GITHUB_API}/repos/{owner}/{repo}/issues"
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else None, "Accept": "application/vnd.github+json"}
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else None,
+        "Accept": "application/vnd.github+json",
+    }
     async with httpx.AsyncClient() as client:
         r = await client.get(url, headers={k: v for k, v in headers.items() if v}, params={"state": "open"})
         r.raise_for_status()
         data = r.json()
-        return RouterEvidence(status="OK", source=url, fetched_n=len(data), data={"issues": data}, citations=[url], fetched_at=time.time())
+        return RouterEvidence(
+            status="OK",
+            source=url,
+            fetched_n=len(data),
+            data={"issues": data},
+            citations=[url],
+            fetched_at=time.time(),
+        )
 
 
 @app.get("/v1/github/releases")
 async def github_releases(owner: str, repo: str):
     url = f"{GITHUB_API}/repos/{owner}/{repo}/releases"
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else None, "Accept": "application/vnd.github+json"}
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else None,
+        "Accept": "application/vnd.github+json",
+    }
     async with httpx.AsyncClient() as client:
         r = await client.get(url, headers={k: v for k, v in headers.items() if v})
         r.raise_for_status()
         data = r.json()
-        return RouterEvidence(status="OK", source=url, fetched_n=len(data), data={"releases": data}, citations=[url], fetched_at=time.time())
+        return RouterEvidence(
+            status="OK",
+            source=url,
+            fetched_n=len(data),
+            data={"releases": data},
+            citations=[url],
+            fetched_at=time.time(),
+        )
 
 
 # --- Module to bucket mapping ---
@@ -246,7 +297,10 @@ async def targetval(
     gene = ensembl_id or symbol
     efo = efo_id or condition
     if gene is None or efo is None:
-        raise HTTPException(status_code=400, detail="Must supply gene (symbol or ensembl_id) and condition (efo_id or condition).")
+        raise HTTPException(
+            status_code=400,
+            detail="Must supply gene (symbol or ensembl_id) and condition (efo_id or condition).",
+        )
 
     tasks: Dict[str, asyncio.Future] = {
         "genetics_l2g": safe_call(genetics_l2g(gene, efo, x_api_key)),
@@ -300,4 +354,8 @@ async def targetval(
             }
         )
 
-    return {"target": {"symbol": symbol, "ensembl_id": ensembl_id}, "context": {"condition": condition, "efo_id": efo_id}, "evidence": evidence_list}
+    return {
+        "target": {"symbol": symbol, "ensembl_id": ensembl_id},
+        "context": {"condition": condition, "efo_id": efo_id},
+        "evidence": evidence_list,
+    }
