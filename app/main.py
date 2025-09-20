@@ -367,3 +367,10 @@ async def targetval(
         "context": {"condition": condition, "efo_id": efo_id},
         "evidence": evidence_list,
     }
+# app/main.py
+
+from app.main import app  # or whatever imports you have
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
