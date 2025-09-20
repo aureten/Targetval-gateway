@@ -1,22 +1,28 @@
 """
-Entry point for the TARGETVAL gateway (revised).
+Revised entry point for the TARGETVAL gateway.
 
-This FastAPI application aggregates evidence across the module
-functions defined in :mod:`app.routers.targetval_router`.  Each high
-level endpoint corresponds to a category of evidence (genetics,
-expression, mechanism, tractability, clinical, competition) and
-delegates to a function in the router.  A consolidated aggregator
-endpoint ``/v1/targetval`` orchestrates concurrent calls across all
-modules and returns a unified response.  Additional endpoints expose
-basic health checks and GitHub repository metadata.
+This version introduces several improvements over the original implementation:
 
-Compared to earlier versions, this implementation imports the updated
-router functions which proxy live data sources instead of stubbed
-responses.  API key enforcement has been removed so that the gateway
-can operate publicly.  CORS is enabled to allow browser access.
+* **Concurrency control** – A semaphore limits the number of concurrent
+  outbound requests.  This helps avoid saturating public APIs and
+  reduces the likelihood of transient failures.  Adjust
+  ``MAX_CONCURRENT_REQUESTS`` as necessary for your deployment.
+
+* **Module selection** – Clients can specify which modules to execute via
+  a comma‑separated ``modules`` query parameter.  Omitting the
+  parameter will run all available modules.  Unknown module names are
+  ignored.
+
+* **Consistent aggregation** – The response now includes the list of
+  requested modules along with the gene and condition identifiers used
+  for the query.  Results are returned as before, with the addition of
+  concurrency handling.
+
+The remainder of the file mirrors the original behaviour: it exposes
+health and ClinicalTrials.gov proxy endpoints, imports the module
+coroutines from :mod:`app.routers.targetval_router` and collates
+results from those coroutines into a single JSON structure.
 """
-
-from __future__ import annotations
 
 import asyncio
 import os
@@ -25,201 +31,231 @@ import urllib.parse
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Header, HTTPException, Query
+from pydantic import BaseModel
+
+import logging
 
 # Import module functions from the router.  These endpoints wrap
-# external APIs and return :class:`app.routers.targetval_router.Evidence`
+# external APIs and return :class:`app.routers.targetval_router.Evidence`.
 from app.routers.targetval_router import (
     Evidence as RouterEvidence,
-    genetics_l2g,
-    genetics_rare,
-    genetics_mendelian,
-    genetics_mr,
-    genetics_lncrna,
-    genetics_mirna,
-    genetics_sqtl,
-    genetics_epigenetics,
-    assoc_bulk_rna,
     assoc_bulk_prot,
-    assoc_sc,
+    assoc_bulk_rna,
     assoc_perturb,
-    expression_baseline,
-    expr_localization,
-    expr_inducibility,
-    mech_pathways,
-    mech_ppi,
-    mech_ligrec,
-    tract_drugs,
-    tract_ligandability_sm,
-    tract_ligandability_ab,
-    tract_ligandability_oligo,
-    tract_modality,
-    tract_immunogenicity,
+    assoc_sc,
     clin_endpoints,
+    clin_pipeline,
     clin_rwe,
     clin_safety,
-    clin_pipeline,
-    comp_intensity,
     comp_freedom,
+    comp_intensity,
+    expression_baseline,
+    expr_inducibility,
+    expr_localization,
+    genetics_epigenetics,
+    genetics_l2g,
+    genetics_lncrna,
+    genetics_mendelian,
+    genetics_mirna,
+    genetics_mr,
+    genetics_rare,
+    genetics_sqtl,
+    mech_ligrec,
+    mech_pathways,
+    mech_ppi,
+    tract_drugs,
+    tract_immunogenicity,
+    tract_ligandability_ab,
+    tract_ligandability_oligo,
+    tract_ligandability_sm,
+    tract_modality,
 )
 
+API_KEY = os.getenv("API_KEY")
 
-# Create the FastAPI app
-app = FastAPI(title="TARGETVAL Gateway", version="0.4.0")
+# Configure a basic logger for observability.  You can adjust the
+# logging level via the LOG_LEVEL environment variable (e.g., DEBUG,
+# INFO, WARNING).  Logs are printed to stderr by default.
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("targetval-gateway")
 
-# Enable CORS for all origins and methods
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# Plugin manifest for ChatGPT custom connector
-# Replace the placeholder email, API URL and legal info URL as needed
-PLUGIN_MANIFEST: Dict[str, Any] = {
-    "schema_version": "v1",
-    "name_for_human": "TargetVal Gateway",
-    "name_for_model": "targetval_gateway",
-    "description_for_human": (
-        "Fetches target validation evidence across genetics, expression, "
-        "pathways, tractability, clinical, IP, and GitHub live data modules."
-    ),
-    "description_for_model": (
-        "Use this plugin to query the TargetVal Gateway for live evidence on "
-        "human genes and diseases. Provide a gene symbol or Ensembl ID, and "
-        "a disease name or EFO ID, to receive a structured list of evidence "
-        "objects across genetics, expression, clinical, and GitHub modules."
-    ),
-    "auth": {"type": "none"},
-    "api": {
-        "type": "openapi",
-        # This URL should point to the raw OpenAPI specification in your repository
-        "url": "https://raw.githubusercontent.com/aureten/Targetval-gateway/main/openapi.json",
-    },
-    # Logo and legal links should also be updated to real assets
-    "logo_url": "https://raw.githubusercontent.com/aureten/Targetval-gateway/main/logo.png",
-    "contact_email": "info@example.com",
-    "legal_info_url": "https://raw.githubusercontent.com/aureten/Targetval-gateway/main/legal.html",
-}
+# FastAPI application instance.  Note that the version number has
+# incremented to reflect breaking changes.
+app = FastAPI(title="TARGETVAL Gateway", version="0.3.0")
 
 
-@app.get("/.well-known/ai-plugin.json", include_in_schema=False)
-def serve_ai_plugin() -> JSONResponse:
-    """Serve the plugin manifest for ChatGPT integration."""
-    return JSONResponse(PLUGIN_MANIFEST)
+class Evidence(BaseModel):
+    """Response model mirroring :class:`app.routers.targetval_router.Evidence`.
+
+    The entrypoint uses this model for its ClinicalTrials.gov proxy but
+    otherwise delegates to the router for evidence structures.
+    """
+
+    status: str
+    source: str
+    fetched_n: int
+    data: Dict[str, Any]
+    citations: List[str]
+    fetched_at: float
 
 
-class Evidence(RouterEvidence):
-    """Alias to the router Evidence model for FastAPI response models."""
+def require_key(x_api_key: Optional[str]) -> None:
+    """API key check.  Currently a no‑op to support public access.
+
+    To enable API key enforcement, replace the body of this function
+    with a comparison against an environment variable and raise
+    ``HTTPException`` on mismatch.
+    """
+
+    return
+
+
+async def _normalize_gene(identifier: str) -> str:
+    """Normalize a gene symbol or Ensembl identifier.
+
+    This helper attempts to map the provided gene identifier to a canonical
+    HGNC symbol using the MyGene.info service.  If the lookup fails, the
+    input is returned unchanged.  Normalising symbols helps reduce cases
+    where synonyms or case differences cause upstream APIs to return no
+    results.
+
+    Parameters
+    ----------
+    identifier : str
+        The gene symbol or Ensembl identifier provided by the client.
+
+    Returns
+    -------
+    str
+        A canonical HGNC symbol if found, otherwise the original input.
+    """
+    if not identifier:
+        return identifier
+    url = (
+        "https://mygene.info/v3/query?" +
+        f"q={urllib.parse.quote(identifier)}&species=human&fields=symbol"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            js = resp.json()
+            hits = js.get("hits", []) if isinstance(js, dict) else []
+            if hits:
+                # Use the first returned symbol as the canonical name
+                canonical = hits[0].get("symbol")
+                if isinstance(canonical, str) and canonical:
+                    return canonical
+    except Exception as e:
+        # Log normalisation failures at debug level; return original
+        logger.debug(f"Gene normalisation failed for {identifier}: {e}")
+    return identifier
+
+
+async def _normalize_condition(cond: str) -> str:
+    """Normalize a condition or disease name to an EFO term.
+
+    Attempts to map the provided condition string to a short EFO identifier
+    using the EMBL‑EBI Ontology Lookup Service (OLS).  If no match is
+    found or the service fails, the input is returned unchanged.  This
+    normalisation helps align disease names across disparate data sources.
+
+    Parameters
+    ----------
+    cond : str
+        The condition or disease name supplied by the client.
+
+    Returns
+    -------
+    str
+        An EFO short form (e.g., "EFO_0000305") if found, otherwise the
+        original input string.
+    """
+    if not cond:
+        return cond
+    # Query the OLS search endpoint limited to the EFO ontology
+    url = (
+        "https://www.ebi.ac.uk/ols/api/search?" +
+        f"q={urllib.parse.quote(cond)}&ontology=efo&type=class&rows=1"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            js = resp.json()
+            # The OLS search response places results under response.docs
+            response = js.get("response", {})
+            docs = response.get("docs", []) if isinstance(response, dict) else []
+            if docs:
+                short_form = docs[0].get("short_form")
+                if short_form:
+                    # EFO identifiers may be returned without underscore; normalise to EFO_<id>
+                    if not short_form.startswith("EFO"):  # Some terms may include prefix
+                        return short_form
+                    return short_form
+    except Exception as e:
+        logger.debug(f"Condition normalisation failed for {cond}: {e}")
+    return cond
 
 
 @app.get("/v1/health")
-def health() -> Dict[str, Any]:
-    """Health check endpoint returning server time."""
+def health() -> Dict[str, float]:
+    """Liveness endpoint returning current time in seconds since the epoch."""
     return {"ok": True, "time": time.time()}
 
 
-# ---------------------------------------------------------------------------
-# GitHub Live Data Endpoints
-# ---------------------------------------------------------------------------
+@app.get("/clinical/ctgov", response_model=Evidence)
+async def ctgov(
+    condition: str,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Evidence:
+    """Proxy to ClinicalTrials.gov for a given condition.
 
-# Use GitHub REST API; token may be provided via environment variable
-GITHUB_API = "https://api.github.com"
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-
-
-@app.get("/v1/github/commits", response_model=Evidence)
-async def github_commits(owner: str, repo: str) -> Evidence:
-    """Fetch recent commits for a repository via GitHub REST API."""
-    url = f"{GITHUB_API}/repos/{owner}/{repo}/commits"
-    headers = {
-        "Accept": "application/vnd.github+json",
-    }
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
-    return RouterEvidence(
-        status="OK",
-        source=url,
-        fetched_n=len(data) if isinstance(data, list) else 0,
-        data={"commits": data},
-        citations=[url],
-        fetched_at=time.time(),
+    This implementation delegates to the router's ``clin_endpoints`` function
+    to retrieve studies matching the supplied condition.  By reusing the
+    router logic, we gain the benefits of caching, concurrency control and
+    consistent error handling.  If the underlying call fails, the error
+    is captured and returned within an ``Evidence`` object rather than
+    propagating a 500 status code.
+    """
+    require_key(x_api_key)
+    # Normalise the condition to an EFO term if possible
+    normalized = await _normalize_condition(condition)
+    # Call the router's clin_endpoints with the normalised condition
+    evidence = await call_with_semaphore(clin_endpoints(normalized, x_api_key))  # type: ignore
+    # Convert the router's Evidence into the local response model
+    return Evidence(
+        status=evidence.status,
+        source=evidence.source,
+        fetched_n=evidence.fetched_n,
+        data=evidence.data,
+        citations=evidence.citations,
+        fetched_at=evidence.fetched_at,
     )
 
 
-@app.get("/v1/github/issues", response_model=Evidence)
-async def github_issues(owner: str, repo: str) -> Evidence:
-    """Fetch open issues for a repository via GitHub REST API."""
-    url = f"{GITHUB_API}/repos/{owner}/{repo}/issues"
-    headers = {
-        "Accept": "application/vnd.github+json",
-    }
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.get(url, headers=headers, params={"state": "open"})
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
-    return RouterEvidence(
-        status="OK",
-        source=url,
-        fetched_n=len(data) if isinstance(data, list) else 0,
-        data={"issues": data},
-        citations=[url],
-        fetched_at=time.time(),
-    )
+# -----------------------------------------------------------------------------
+# Concurrency support
+# -----------------------------------------------------------------------------
 
+# Limit the number of concurrent outbound requests across all modules.  The
+# semaphore is shared globally within this module.  Increase the value to
+# improve throughput or decrease it if remote services impose strict rate
+# limits.
+MAX_CONCURRENT_REQUESTS = 5
+_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-@app.get("/v1/github/releases", response_model=Evidence)
-async def github_releases(owner: str, repo: str) -> Evidence:
-    """Fetch releases for a repository via GitHub REST API."""
-    url = f"{GITHUB_API}/repos/{owner}/{repo}/releases"
-    headers = {
-        "Accept": "application/vnd.github+json",
-    }
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
-    return RouterEvidence(
-        status="OK",
-        source=url,
-        fetched_n=len(data) if isinstance(data, list) else 0,
-        data={"releases": data},
-        citations=[url],
-        fetched_at=time.time(),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Aggregator endpoint
-# ---------------------------------------------------------------------------
 
 async def safe_call(coro) -> RouterEvidence:
-    """Wrap a coroutine call and return a RouterEvidence on error.
+    """Wrap a module coroutine call to return an Evidence object on error.
 
-    If the coroutine raises an HTTPException, the status and message
-    are preserved; otherwise a generic error status is returned.
+    This helper mirrors the behaviour of the router's ``safe_call`` but
+    catches exceptions and converts them into ``RouterEvidence``.  It
+    should be used when awaiting any module coroutine to ensure the
+    overall request does not fail if one source errors.
     """
+
     try:
         return await coro
     except HTTPException as e:
@@ -242,9 +278,61 @@ async def safe_call(coro) -> RouterEvidence:
         )
 
 
-# Map module names to buckets for display in aggregator response
+async def call_with_semaphore(coro) -> RouterEvidence:
+    """Acquire the concurrency semaphore before invoking a coroutine.
+
+    This ensures that no more than ``MAX_CONCURRENT_REQUESTS`` coroutines
+    are concurrently performing outbound I/O.  The semaphore is
+    released when the coroutine completes.
+    """
+
+    async with _semaphore:
+        return await safe_call(coro)
+
+
+# -----------------------------------------------------------------------------
+# Module definitions
+# -----------------------------------------------------------------------------
+
+# Mapping from module names to the coroutine functions imported from the
+# router.  This is used to dynamically dispatch calls based on a
+# comma‑separated ``modules`` query parameter.
+MODULE_MAP: Dict[str, Any] = {
+    "genetics_l2g": genetics_l2g,
+    "genetics_rare": genetics_rare,
+    "genetics_mendelian": genetics_mendelian,
+    "genetics_mr": genetics_mr,
+    "genetics_lncrna": genetics_lncrna,
+    "genetics_mirna": genetics_mirna,
+    "genetics_sqtl": genetics_sqtl,
+    "genetics_epigenetics": genetics_epigenetics,
+    "assoc_bulk_rna": assoc_bulk_rna,
+    "assoc_bulk_prot": assoc_bulk_prot,
+    "assoc_sc": assoc_sc,
+    "assoc_perturb": assoc_perturb,
+    "expression_baseline": expression_baseline,
+    "expr_localization": expr_localization,
+    "expr_inducibility": expr_inducibility,
+    "mech_pathways": mech_pathways,
+    "mech_ppi": mech_ppi,
+    "mech_ligrec": mech_ligrec,
+    "tract_drugs": tract_drugs,
+    "tract_ligandability_sm": tract_ligandability_sm,
+    "tract_ligandability_ab": tract_ligandability_ab,
+    "tract_ligandability_oligo": tract_ligandability_oligo,
+    "tract_modality": tract_modality,
+    "tract_immunogenicity": tract_immunogenicity,
+    "clin_endpoints": clin_endpoints,
+    "clin_rwe": clin_rwe,
+    "clin_safety": clin_safety,
+    "clin_pipeline": clin_pipeline,
+    "comp_intensity": comp_intensity,
+    "comp_freedom": comp_freedom,
+}
+
+
+# Mapping from module names to high‑level buckets for aggregated responses.
 MODULE_BUCKET_MAP: Dict[str, str] = {
-    # Human Genetics & Causality
     "genetics_l2g": "Human Genetics & Causality",
     "genetics_rare": "Human Genetics & Causality",
     "genetics_mendelian": "Human Genetics & Causality",
@@ -253,39 +341,41 @@ MODULE_BUCKET_MAP: Dict[str, str] = {
     "genetics_mirna": "Human Genetics & Causality",
     "genetics_sqtl": "Human Genetics & Causality",
     "genetics_epigenetics": "Human Genetics & Causality",
-    # Disease Association & Perturbation
     "assoc_bulk_rna": "Disease Association & Perturbation",
     "assoc_bulk_prot": "Disease Association & Perturbation",
     "assoc_sc": "Disease Association & Perturbation",
     "assoc_perturb": "Disease Association & Perturbation",
-    # Expression & Localization
     "expression_baseline": "Expression, Specificity & Localization",
     "expr_localization": "Expression, Specificity & Localization",
     "expr_inducibility": "Expression, Specificity & Localization",
-    # Mechanistic Wiring
     "mech_pathways": "Mechanistic Wiring & Networks",
     "mech_ppi": "Mechanistic Wiring & Networks",
     "mech_ligrec": "Mechanistic Wiring & Networks",
-    # Tractability & Modality
     "tract_drugs": "Tractability & Modality",
     "tract_ligandability_sm": "Tractability & Modality",
     "tract_ligandability_ab": "Tractability & Modality",
     "tract_ligandability_oligo": "Tractability & Modality",
     "tract_modality": "Tractability & Modality",
     "tract_immunogenicity": "Tractability & Modality",
-    # Clinical Translation
     "clin_endpoints": "Clinical Translation & Safety",
     "clin_rwe": "Clinical Translation & Safety",
     "clin_safety": "Clinical Translation & Safety",
     "clin_pipeline": "Clinical Translation & Safety",
-    # Competition & IP
     "comp_intensity": "Competition & IP",
     "comp_freedom": "Competition & IP",
-    # GitHub Live Data
-    "github_commits": "GitHub Live Data",
-    "github_issues": "GitHub Live Data",
-    "github_releases": "GitHub Live Data",
 }
+
+
+def _parse_module_list(modules: Optional[str]) -> List[str]:
+    """Parse a comma‑separated list of modules into a list of known names.
+
+    Unknown names are silently ignored.  If ``modules`` is empty or
+    ``None``, all available modules are returned.
+    """
+
+    if not modules:
+        return list(MODULE_MAP.keys())
+    return [m for m in modules.split(",") if m in MODULE_MAP]
 
 
 @app.get("/v1/targetval")
@@ -294,61 +384,97 @@ async def targetval(
     ensembl_id: Optional[str] = None,
     condition: Optional[str] = None,
     efo_id: Optional[str] = None,
+    modules: Optional[str] = Query(
+        None,
+        description="Comma‑separated list of module names to execute.  If omitted, all modules are called.",
+    ),
+    x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    """Aggregate evidence across all modules and GitHub endpoints.
+    """Aggregate evidence across selected modules.
 
-    The caller must provide both a gene (symbol or Ensembl ID) and a
-    condition (disease name or EFO ID).  The aggregator concurrently
-    invokes each module and collates the results into a list of
-    evidence objects tagged with their module and bucket.
+    Clients must provide a gene identifier (``symbol`` or ``ensembl_id``)
+    and a condition (``condition`` or ``efo_id``).  The aggregator
+    normalises these values and dispatches asynchronous calls to each
+    selected module defined in :mod:`app.routers.targetval_router`.
+    Results from each module are collated into a list.  Errors within
+    any module are captured and reported as part of the result.
+
+    The optional ``modules`` parameter allows callers to specify which
+    modules to run; unknown names are ignored.  This can reduce
+    latency and external API usage when only a subset of evidence is
+    required.
     """
-    gene = ensembl_id or symbol
-    efo = efo_id or condition
-    if gene is None or efo is None:
+
+    require_key(x_api_key)
+    gene_input = ensembl_id or symbol
+    efo_input = efo_id or condition
+    if gene_input is None or efo_input is None:
         raise HTTPException(
             status_code=400,
             detail="Must supply gene (symbol or ensembl_id) and condition (efo_id or condition).",
         )
-    # Launch coroutines for each module.  Note that genetics_sqtl no longer
-    # requires the efo parameter.
-    tasks: Dict[str, asyncio.Future] = {
-        "genetics_l2g": safe_call(genetics_l2g(gene, efo)),
-        "genetics_rare": safe_call(genetics_rare(gene)),
-        "genetics_mendelian": safe_call(genetics_mendelian(gene)),
-        "genetics_mr": safe_call(genetics_mr(gene, efo)),
-        "genetics_lncrna": safe_call(genetics_lncrna(gene)),
-        "genetics_mirna": safe_call(genetics_mirna(gene)),
-        "genetics_sqtl": safe_call(genetics_sqtl(gene)),
-        "genetics_epigenetics": safe_call(genetics_epigenetics(gene)),
-        "assoc_bulk_rna": safe_call(assoc_bulk_rna(condition or "")),
-        "assoc_bulk_prot": safe_call(assoc_bulk_prot(condition or "")),
-        "assoc_sc": safe_call(assoc_sc(condition or "")),
-        "assoc_perturb": safe_call(assoc_perturb(condition or "")),
-        "expression_baseline": safe_call(expression_baseline(gene)),
-        "expr_localization": safe_call(expr_localization(gene)),
-        "expr_inducibility": safe_call(expr_inducibility(gene)),
-        "mech_pathways": safe_call(mech_pathways(gene)),
-        "mech_ppi": safe_call(mech_ppi(gene)),
-        "mech_ligrec": safe_call(mech_ligrec(gene)),
-        "tract_drugs": safe_call(tract_drugs(gene)),
-        "tract_ligandability_sm": safe_call(tract_ligandability_sm(gene)),
-        "tract_ligandability_ab": safe_call(tract_ligandability_ab(gene)),
-        "tract_ligandability_oligo": safe_call(tract_ligandability_oligo(gene)),
-        "tract_modality": safe_call(tract_modality(gene)),
-        "tract_immunogenicity": safe_call(tract_immunogenicity(gene)),
-        "clin_endpoints": safe_call(clin_endpoints(condition or "")),
-        "clin_rwe": safe_call(clin_rwe(condition or "")),
-        # Pass gene as the drug parameter for safety; the caller should provide a drug name
-        "clin_safety": safe_call(clin_safety(gene)),
-        "clin_pipeline": safe_call(clin_pipeline(gene)),
-        "comp_intensity": safe_call(comp_intensity(gene, condition)),
-        "comp_freedom": safe_call(comp_freedom(gene)),
-        # GitHub live data for this repository; update owner/repo as needed
-        "github_commits": safe_call(github_commits(owner="aureten", repo="Targetval-gateway")),
-        "github_issues": safe_call(github_issues(owner="aureten", repo="Targetval-gateway")),
-        "github_releases": safe_call(github_releases(owner="aureten", repo="Targetval-gateway")),
-    }
+    # Normalise inputs.  Gene and condition normalisation may require
+    # asynchronous HTTP calls.  If normalisation fails, the original
+    # values are used.  These helpers map synonyms to canonical
+    # identifiers to improve hit rates in downstream APIs.
+    # For Ensembl identifiers we still attempt normalisation since MyGene
+    # can return the corresponding symbol.  For EFO IDs we attempt to
+    # normalise the condition; if an EFO ID is supplied we assume it is
+    # already canonical.
+    gene = await _normalize_gene(gene_input)
+    # If an explicit EFO ID was supplied, bypass normalisation; else normalise
+    if efo_id:
+        efo = efo_input
+    else:
+        efo = await _normalize_condition(efo_input)
+
+    # Determine which modules to invoke based on the ``modules`` query parameter.
+    selected_modules = _parse_module_list(modules)
+
+    # Build tasks for each selected module.  We inspect the module name to
+    # determine the appropriate argument signature.  This introspection
+    # mirrors the original aggregator logic but could be improved by
+    # introspecting the function signature directly (see ``inspect`` module).
+    tasks: Dict[str, asyncio.Task] = {}
+    for name in selected_modules:
+        func = MODULE_MAP[name]
+        if name.startswith("genetics"):
+            # Modules that require gene and EFO identifiers
+            if name in (
+                "genetics_l2g",
+                "genetics_mendelian",
+                "genetics_mr",
+                "genetics_sqtl",
+                "genetics_epigenetics",
+            ):
+                coro = func(gene, efo, x_api_key)  # type: ignore
+            else:
+                coro = func(gene, x_api_key)  # type: ignore
+        elif name.startswith("assoc"):
+            # Association modules operate on the condition only
+            coro = func(efo, x_api_key)  # type: ignore
+        elif name.startswith("expr") or name.startswith("mech") or name.startswith("tract"):
+            # Expression, mechanistic and tractability modules operate on the gene symbol
+            coro = func(gene, x_api_key)  # type: ignore
+        elif name.startswith("clin"):
+            if name in ("clin_safety", "clin_pipeline"):
+                coro = func(gene, x_api_key)  # type: ignore
+            else:
+                coro = func(efo, x_api_key)  # type: ignore
+        elif name.startswith("comp"):
+            if name == "comp_intensity":
+                coro = func(gene, efo, x_api_key)  # type: ignore
+            else:
+                coro = func(gene, x_api_key)  # type: ignore
+        else:
+            # Default: no arguments
+            coro = func()  # type: ignore
+        tasks[name] = asyncio.create_task(call_with_semaphore(coro))
+
+    # Await all module tasks concurrently.
     results = await asyncio.gather(*tasks.values())
+
+    # Assemble response evidence list.
     evidence_list: List[Dict[str, Any]] = []
     for name, evidence in zip(tasks.keys(), results):
         evidence_list.append(
@@ -363,14 +489,8 @@ async def targetval(
             }
         )
     return {
-        "target": {"symbol": symbol, "ensembl_id": ensembl_id},
-        "context": {"condition": condition, "efo_id": efo_id},
+        "symbol": gene,
+        "condition": efo,
+        "modules": selected_modules,
         "evidence": evidence_list,
     }
-# app/main.py
-
-from app.main import app  # or whatever imports you have
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
