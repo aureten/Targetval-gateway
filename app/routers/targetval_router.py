@@ -1,26 +1,16 @@
 """
-Routes implementing the TARGETVAL gateway (revised, consolidated).
+Routes implementing the TARGETVAL gateway (bounded, resilient).
 
 This module exposes a suite of REST endpoints grouped by functional
-buckets (e.g., Human Genetics & Causality, Disease Association &
-Perturbation, Expression & Localization, Mechanistic Wiring,
-Tractability & Modality, Clinical Translation & Safety, Competition & IP).
+buckets (Human Genetics; Disease Association; Expression; Mechanistic Wiring;
+Tractability; Clinical Translation; Competition & IP).
 
-Key improvements over the original:
-* Robust 429/5xx retry with exponential back‑off & jitter for all outbound calls
-* Configurable concurrency (semaphore) and cache TTL via env vars
-* Default outbound headers (User‑Agent, Accept JSON) + longer, configurable timeout
-* The 8 previously‑stubbed modules are now wired to live, public APIs:
-  - /genetics/mr  → EpiGraphDB xQTL multi‑SNP MR
-  - /genetics/mirna → miRNet 2.0 (fallback ENCORI/starBase TSV)
-  - /assoc/sc → Human Protein Atlas single‑cell signal by condition term
-  - /assoc/perturb → BioGRID ORCS screens and top gene hits (requires ORCS key)
-  - /tract/ligandability-oligo → Ribocentre Aptamer API
-  - /tract/modality → rule‑based scoring integrating COMPARTMENTS, ChEMBL, PDBe
-  - /tract/immunogenicity → IEDB IQ‑API (epitope_search & tcell_search)
-  - /clin/rwe → openFDA FAERS + ClinicalTrials.gov v2 observational studies
-
-All endpoints return a structured Evidence payload and never propagate errors.
+Key implementation notes:
+* Bounded outbound wrappers: REQUEST_BUDGET_S caps total time per upstream call.
+* Per-attempt timeout is short; retries are limited and jittered.
+* Default headers: strong User-Agent + Accept JSON to avoid rejections.
+* Slow/fragile upstreams run with tries=1 and have pragmatic fallbacks.
+* All endpoints return a structured Evidence payload and never propagate errors.
 """
 
 from __future__ import annotations
@@ -31,7 +21,7 @@ import os
 import random
 import time
 import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query
@@ -39,15 +29,16 @@ from pydantic import BaseModel
 
 from app.utils.validation import validate_symbol, validate_condition
 
-# Router instance used by the FastAPI application.
+# -----------------------------------------------------------------------------
+# Router & models
+# -----------------------------------------------------------------------------
+
 router = APIRouter()
 
 
 class Evidence(BaseModel):
-    """Container for evidence returned by an endpoint."""
-
     status: str           # "OK" | "ERROR" | "NO_DATA"
-    source: str           # description of upstream API / method
+    source: str           # upstream API / method used
     fetched_n: int        # count before limit slicing (if applicable)
     data: Dict[str, Any]  # module-specific payload
     citations: List[str]  # URLs used as evidence
@@ -58,31 +49,32 @@ class Evidence(BaseModel):
 # Caching, concurrency & outbound client defaults
 # -----------------------------------------------------------------------------
 
-# In‑memory cache for upstream HTTP GET requests.
 CACHE: Dict[str, Dict[str, Any]] = {}
-
-# Configurable cache TTL and concurrency
 CACHE_TTL: int = int(os.getenv("CACHE_TTL_SECONDS", str(24 * 60 * 60)))
 
 # Outbound HTTP client settings (configurable)
 DEFAULT_TIMEOUT = httpx.Timeout(
-    float(os.getenv("OUTBOUND_TIMEOUT_S", "45.0")),  # read/write total
+    float(os.getenv("OUTBOUND_TIMEOUT_S", "12.0")),  # per-attempt read/write
     connect=6.0,
 )
 DEFAULT_HEADERS: Dict[str, str] = {
     "User-Agent": os.getenv(
         "OUTBOUND_USER_AGENT",
-        "TargetVal/1.2 (+https://github.com/aureten/Targetval-gateway)"
+        "TargetVal/1.3 (+https://github.com/aureten/Targetval-gateway)"
     ),
     "Accept": "application/json",
 }
 
-MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
+REQUEST_BUDGET_S: float = float(os.getenv("REQUEST_BUDGET_S", "25.0"))
+OUTBOUND_TRIES: int = int(os.getenv("OUTBOUND_TRIES", "2"))
+BACKOFF_BASE_S: float = float(os.getenv("BACKOFF_BASE_S", "0.6"))
+
+MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "8"))
 _semaphore: asyncio.Semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
-# API key enforcement placeholder (wire your middleware/key check here if needed).
 def _require_key(x_api_key: Optional[str]) -> None:
+    """Wire API key middleware here if needed."""
     return
 
 
@@ -90,25 +82,31 @@ def _now() -> float:
     return time.time()
 
 
-async def _get_json(url: str, tries: int = 3, headers: Optional[Dict[str, str]] = None) -> Any:
-    """HTTP GET returning parsed JSON with cache, 429 back‑off, and jitter."""
+# -----------------------------------------------------------------------------
+# Bounded outbound wrappers
+# -----------------------------------------------------------------------------
+
+async def _get_json(url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None) -> Any:
+    """HTTP GET → JSON with cache, bounded total time, limited retries, jittered backoff."""
     cached = CACHE.get(url)
     if cached and (_now() - cached.get("timestamp", 0) < CACHE_TTL):
         return cached["data"]
 
     last_err: Optional[Exception] = None
+    t0 = _now()
     async with _semaphore:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             for attempt in range(1, tries + 1):
+                remaining = REQUEST_BUDGET_S - (_now() - t0)
+                if remaining <= 0:
+                    break
                 try:
                     merged = {**DEFAULT_HEADERS, **(headers or {})}
-                    resp = await client.get(url, headers=merged)
-                    # Handle rate-limits (429) or transient 5xx before raising
+                    resp = await asyncio.wait_for(client.get(url, headers=merged), timeout=remaining)
                     if resp.status_code in (429, 500, 502, 503, 504):
-                        # Exponential backoff with jitter
-                        backoff = min(2 ** (attempt - 1) * 0.8, 10.0) + random.random() * 0.25
-                        await asyncio.sleep(backoff)
                         last_err = HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+                        backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.2
+                        await asyncio.sleep(backoff)
                         continue
                     resp.raise_for_status()
                     data = resp.json()
@@ -116,31 +114,34 @@ async def _get_json(url: str, tries: int = 3, headers: Optional[Dict[str, str]] 
                     return data
                 except Exception as e:
                     last_err = e
-                    # backoff & jitter
-                    backoff = min(2 ** (attempt - 1) * 0.8, 10.0) + random.random() * 0.25
+                    backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.2
                     await asyncio.sleep(backoff)
     raise HTTPException(status_code=502, detail=f"GET failed for {url}: {last_err}")
 
 
-async def _get_text(url: str, tries: int = 3, headers: Optional[Dict[str, str]] = None) -> str:
-    """HTTP GET returning text (no caching, used for TSV sources)."""
+async def _get_text(url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None) -> str:
+    """HTTP GET → text with bounded total time, limited retries, jittered backoff."""
     last_err: Optional[Exception] = None
+    t0 = _now()
     async with _semaphore:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             for attempt in range(1, tries + 1):
+                remaining = REQUEST_BUDGET_S - (_now() - t0)
+                if remaining <= 0:
+                    break
                 try:
                     merged = {**DEFAULT_HEADERS, **(headers or {})}
-                    resp = await client.get(url, headers=merged)
+                    resp = await asyncio.wait_for(client.get(url, headers=merged), timeout=remaining)
                     if resp.status_code in (429, 500, 502, 503, 504):
-                        backoff = min(2 ** (attempt - 1) * 0.8, 10.0) + random.random() * 0.25
-                        await asyncio.sleep(backoff)
                         last_err = HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+                        backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.2
+                        await asyncio.sleep(backoff)
                         continue
                     resp.raise_for_status()
                     return resp.text
                 except Exception as e:
                     last_err = e
-                    backoff = min(2 ** (attempt - 1) * 0.8, 10.0) + random.random() * 0.25
+                    backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.2
                     await asyncio.sleep(backoff)
     raise HTTPException(status_code=502, detail=f"GET text failed for {url}: {last_err}")
 
@@ -148,27 +149,31 @@ async def _get_text(url: str, tries: int = 3, headers: Optional[Dict[str, str]] 
 async def _post_json(
     url: str,
     payload: Dict[str, Any],
-    tries: int = 3,
+    tries: int = OUTBOUND_TRIES,
     headers: Optional[Dict[str, str]] = None,
 ) -> Any:
-    """HTTP POST with JSON body and 429/5xx back‑off (no caching)."""
+    """HTTP POST → JSON with bounded total time, limited retries, jittered backoff."""
     last_err: Optional[Exception] = None
+    t0 = _now()
     async with _semaphore:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             for attempt in range(1, tries + 1):
+                remaining = REQUEST_BUDGET_S - (_now() - t0)
+                if remaining <= 0:
+                    break
                 try:
                     merged = {**DEFAULT_HEADERS, **(headers or {})}
-                    resp = await client.post(url, json=payload, headers=merged)
+                    resp = await asyncio.wait_for(client.post(url, json=payload, headers=merged), timeout=remaining)
                     if resp.status_code in (429, 500, 502, 503, 504):
-                        backoff = min(2 ** (attempt - 1) * 0.8, 10.0) + random.random() * 0.25
-                        await asyncio.sleep(backoff)
                         last_err = HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+                        backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.2
+                        await asyncio.sleep(backoff)
                         continue
                     resp.raise_for_status()
                     return resp.json()
                 except Exception as e:
                     last_err = e
-                    backoff = min(2 ** (attempt - 1) * 0.8, 10.0) + random.random() * 0.25
+                    backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.2
                     await asyncio.sleep(backoff)
     raise HTTPException(status_code=502, detail=f"POST failed for {url}: {last_err}")
 
@@ -178,23 +183,9 @@ async def _safe_call(coro):
     try:
         return await coro
     except HTTPException as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e.detail),
-            fetched_n=0,
-            data={},
-            citations=[],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e.detail), fetched_n=0, data={}, citations=[], fetched_at=_now())
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={},
-            citations=[],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0, data={}, citations=[], fetched_at=_now())
 
 
 # -----------------------------------------------------------------------------
@@ -232,109 +223,89 @@ async def genetics_l2g(
     gene: str,
     efo: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of associations to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo, field_name="efo")
+
     dis_url = f"https://www.disgenet.org/api/gda/gene/{urllib.parse.quote(gene)}?format=json"
     try:
-        js = await _get_json(dis_url)
+        js = await _get_json(dis_url, tries=1)
         records = js if isinstance(js, list) else []
         return Evidence(
-            status="OK",
-            source="DisGeNET gene–disease associations",
-            fetched_n=len(records),
+            status="OK", source="DisGeNET GDA", fetched_n=len(records),
             data={"gene": gene, "efo": efo, "results": records[:limit]},
-            citations=[dis_url],
-            fetched_at=_now(),
+            citations=[dis_url], fetched_at=_now(),
         )
     except Exception:
         pass
+
     gwas_url = f"https://www.ebi.ac.uk/gwas/rest/api/associations?geneName={urllib.parse.quote(gene)}"
     try:
-        js = await _get_json(gwas_url)
+        js = await _get_json(gwas_url, tries=1)
         hits: List[Dict[str, Any]] = []
         if isinstance(js, dict):
             hits = js.get("_embedded", {}).get("associations", [])
         elif isinstance(js, list):
             hits = js
         return Evidence(
-            status="OK",
-            source="GWAS Catalog associations",
-            fetched_n=len(hits),
+            status="OK", source="GWAS Catalog associations", fetched_n=len(hits),
             data={"gene": gene, "efo": efo, "results": hits[:limit]},
-            citations=[gwas_url],
-            fetched_at=_now(),
+            citations=[gwas_url], fetched_at=_now(),
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"gene": gene, "efo": efo, "results": []},
+                        citations=[gwas_url], fetched_at=_now())
 
 
 @router.get("/genetics/rare", response_model=Evidence)
 async def genetics_rare(
     gene: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of variants to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
+
     clinvar_url = (
         f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&term={urllib.parse.quote(gene)}%5Bgene%5D"
         "&retmode=json"
     )
     try:
-        js = await _get_json(clinvar_url)
+        js = await _get_json(clinvar_url, tries=1)
         ids = js.get("esearchresult", {}).get("idlist", [])
         return Evidence(
-            status="OK",
-            source="ClinVar E‑utilities",
-            fetched_n=len(ids),
+            status="OK", source="ClinVar E-utilities", fetched_n=len(ids),
             data={"gene": gene, "variants": ids[:limit]},
-            citations=[clinvar_url],
-            fetched_at=_now(),
+            citations=[clinvar_url], fetched_at=_now(),
         )
     except Exception:
         pass
+
     gql_url = "https://gnomad.broadinstitute.org/api"
     query = {
         "query": """
         query ($symbol: String!) {
           gene(symbol: $symbol) {
-            variants {
-              variantId
-              genome { ac an }
-            }
+            variants { variantId genome { ac an } }
           }
-        }
-        """,
+        }""",
         "variables": {"symbol": gene},
     }
     try:
-        body = await _post_json(gql_url, query)
-        variants = (
-            body.get("data", {})
-            .get("gene", {})
-            .get("variants", [])
-            or []
-        )
+        body = await _post_json(gql_url, query, tries=1)
+        variants = (body.get("data", {}).get("gene", {}).get("variants", []) or [])
         return Evidence(
-            status="OK",
-            source="gnomAD GraphQL",
-            fetched_n=len(variants),
+            status="OK", source="gnomAD GraphQL", fetched_n=len(variants),
             data={"gene": gene, "variants": variants[:limit]},
-            citations=[gql_url],
-            fetched_at=_now(),
+            citations=[gql_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"gene": gene, "variants": []},
-            citations=[gql_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"gene": gene, "variants": []},
+                        citations=[gql_url], fetched_at=_now())
 
 
 @router.get("/genetics/mendelian", response_model=Evidence)
@@ -342,185 +313,131 @@ async def genetics_mendelian(
     gene: str,
     efo: Optional[str] = None,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of diseases to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
+
     url = f"https://api.monarchinitiative.org/api/bioentity/gene/{urllib.parse.quote(gene)}/diseases?rows=20"
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         associations = js.get("associations", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="Monarch API",
-            fetched_n=len(associations),
+            status="OK", source="Monarch API", fetched_n=len(associations),
             data={"gene": gene, "diseases": associations[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"gene": gene, "diseases": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"gene": gene, "diseases": []},
+                        citations=[url], fetched_at=_now())
 
 
-# -------------------------- NEW (live) ----------------------------------------
 @router.get("/genetics/mr", response_model=Evidence)
 async def genetics_mr(
     gene: str,
     efo: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of MR rows to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    """
-    Mendelian randomisation via EpiGraphDB's xQTL multi‑SNP MR.
-
-    Strategy:
-      1) Map the provided EFO term/ID to a disease label (EpiGraphDB: /ontology/disease-efo)
-      2) Call /xqtl/multi-snp-mr with exposure_gene=<gene>, outcome_trait=<label>
-      3) Return rows (instruments and causal estimates); truncated by `limit`.
-    """
+    """EpiGraphDB xQTL multi‑SNP MR."""
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo, field_name="efo")
 
-    # Map EFO -> disease label (fuzzy OK)
     disease_label = efo
     map_url = f"https://api.epigraphdb.org/ontology/disease-efo?efo_term={urllib.parse.quote(efo)}&fuzzy=true"
     try:
-        mapping = await _get_json(map_url)
+        mapping = await _get_json(map_url, tries=1)
         results = mapping.get("results", []) if isinstance(mapping, dict) else []
         if results:
             top = results[0]
-            disease_label = (
-                top.get("disease_label")
-                or (top.get("disease") or {}).get("label")
-                or disease_label
-            )
+            disease_label = top.get("disease_label") or (top.get("disease") or {}).get("label") or disease_label
     except Exception:
         pass
 
     base = "https://api.epigraphdb.org/xqtl/multi-snp-mr"
     qs = urllib.parse.urlencode({"exposure_gene": gene, "outcome_trait": disease_label})
     mr_url = f"{base}?{qs}"
-
     try:
-        mr = await _get_json(mr_url)
+        mr = await _get_json(mr_url, tries=1)
         rows = mr.get("results", []) if isinstance(mr, dict) else (mr or [])
         return Evidence(
-            status="OK",
-            source="EpiGraphDB xQTL multi‑SNP MR",
-            fetched_n=len(rows),
+            status="OK", source="EpiGraphDB xQTL multi‑SNP MR", fetched_n=len(rows),
             data={"gene": gene, "efo": efo, "outcome_trait": disease_label, "mr": rows[:limit]},
-            citations=[mr_url, map_url],
-            fetched_at=_now(),
+            citations=[mr_url, map_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=f"MR request failed: {e}",
-            fetched_n=0,
-            data={"gene": gene, "efo": efo, "outcome_trait": disease_label, "mr": []},
-            citations=[mr_url, map_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=f"MR request failed: {e}", fetched_n=0,
+                        data={"gene": gene, "efo": efo, "outcome_trait": disease_label, "mr": []},
+                        citations=[mr_url, map_url], fetched_at=_now())
 
 
 @router.get("/genetics/lncrna", response_model=Evidence)
 async def genetics_lncrna(
     gene: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of lncRNAs to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     url = f"https://rnacentral.org/api/v1/rna?q={urllib.parse.quote(gene)}&page_size={limit}"
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         results = js.get("results", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="RNAcentral REST",
-            fetched_n=len(results),
+            status="OK", source="RNAcentral", fetched_n=len(results),
             data={"gene": gene, "lncRNAs": results[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"gene": gene, "lncRNAs": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"gene": gene, "lncRNAs": []},
+                        citations=[url], fetched_at=_now())
 
 
-# -------------------------- NEW (live) ----------------------------------------
 @router.get("/genetics/mirna", response_model=Evidence)
 async def genetics_mirna(
     gene: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(100, ge=1, le=500, description="Maximum number of miRNA interactions to return"),
+    limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """
-    miRNA–gene interactions (live):
-      * Primary: miRNet 2.0 API (JSON)
-      * Fallback: ENCORI / starBase miRNA-Target API (TSV)
-    """
+    """miRNA–gene interactions: miRNet (primary), ENCORI (fallback)."""
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
 
-    # Primary: miRNet 2.0 (table/gene)
     mirnet_url = "https://api.mirnet.ca/table/gene"
     payload = {"org": "hsa", "idOpt": "symbol", "myList": gene, "selSource": "All"}
     try:
-        r = await _post_json(mirnet_url, payload)
+        r = await _post_json(mirnet_url, payload, tries=1)
         rows = r.get("data", []) if isinstance(r, dict) else (r or [])
-        simplified = []
-        for it in rows[:limit]:
-            simplified.append({
-                "miRNA": it.get("miRNA") or it.get("mirna") or it.get("ID"),
-                "target": it.get("Target") or it.get("Gene") or gene,
-                "evidence": it.get("Category") or it.get("Evidence") or it.get("Source"),
-                "pmid": it.get("PMID") or it.get("PubMedID"),
-                "source_db": it.get("Source") or "miRNet"
-            })
+        simplified = [{
+            "miRNA": it.get("miRNA") or it.get("mirna") or it.get("ID"),
+            "target": it.get("Target") or it.get("Gene") or gene,
+            "evidence": it.get("Category") or it.get("Evidence") or it.get("Source"),
+            "pmid": it.get("PMID") or it.get("PubMedID"),
+            "source_db": it.get("Source") or "miRNet"
+        } for it in rows[:limit]]
         return Evidence(
-            status="OK",
-            source="miRNet 2.0",
-            fetched_n=len(rows),
+            status="OK", source="miRNet 2.0", fetched_n=len(rows),
             data={"gene": gene, "interactions": simplified},
-            citations=[mirnet_url],
-            fetched_at=_now(),
+            citations=[mirnet_url], fetched_at=_now(),
         )
     except Exception:
         pass
 
-    # Fallback: ENCORI / starBase (TSV)
     encori_url = (
         "https://rnasysu.com/encori/api/miRNATarget/"
         f"?assembly=hg38&geneType=mRNA&miRNA=all&clipExpNum=1&degraExpNum=0&pancancerNum=0&programNum=1&program=TargetScan"
         f"&target={urllib.parse.quote(gene)}&cellType=all"
     )
     try:
-        tsv = await _get_text(encori_url)
+        tsv = await _get_text(encori_url, tries=1)
         lines = [ln for ln in tsv.splitlines() if ln.strip()]
-        if not lines or len(lines) == 1:
-            return Evidence(
-                status="OK",
-                source="ENCORI/starBase",
-                fetched_n=0,
-                data={"gene": gene, "interactions": []},
-                citations=[encori_url],
-                fetched_at=_now(),
-            )
+        if len(lines) <= 1:
+            return Evidence(status="OK", source="ENCORI/starBase", fetched_n=0,
+                            data={"gene": gene, "interactions": []},
+                            citations=[encori_url], fetched_at=_now())
         header = [h.strip() for h in lines[0].split("\t")]
         out = []
         for ln in lines[1:][:limit]:
@@ -534,22 +451,14 @@ async def genetics_mirna(
                 "cell_type": row.get("Cell_Type"),
             })
         return Evidence(
-            status="OK",
-            source="ENCORI/starBase",
-            fetched_n=len(out),
+            status="OK", source="ENCORI/starBase", fetched_n=len(out),
             data={"gene": gene, "interactions": out},
-            citations=[encori_url],
-            fetched_at=_now(),
+            citations=[encori_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=f"miRNA API error: {e}",
-            fetched_n=0,
-            data={"gene": gene, "interactions": []},
-            citations=[mirnet_url, encori_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=f"miRNA API error: {e}", fetched_n=0,
+                        data={"gene": gene, "interactions": []},
+                        citations=[mirnet_url, encori_url], fetched_at=_now())
 
 
 @router.get("/genetics/sqtl", response_model=Evidence)
@@ -557,31 +466,23 @@ async def genetics_sqtl(
     gene: str,
     efo: Optional[str] = None,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of sQTLs to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     url = f"https://www.ebi.ac.uk/eqtl/api/genes/{urllib.parse.quote(gene)}/sqtls"
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         results = js.get("sqtls", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="eQTL Catalogue",
-            fetched_n=len(results),
+            status="OK", source="eQTL Catalogue", fetched_n=len(results),
             data={"gene": gene, "sqtls": results[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"gene": gene, "sqtls": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"gene": gene, "sqtls": []},
+                        citations=[url], fetched_at=_now())
 
 
 @router.get("/genetics/epigenetics", response_model=Evidence)
@@ -589,7 +490,7 @@ async def genetics_epigenetics(
     gene: str,
     efo: Optional[str] = None,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of experiments to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
@@ -598,25 +499,17 @@ async def genetics_epigenetics(
         f"searchTerm={urllib.parse.quote(gene)}&format=json&limit={limit}&type=Experiment"
     )
     try:
-        js = await _get_json(search_url)
+        js = await _get_json(search_url, tries=1)
         hits = js.get("@graph", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="ENCODE Search API",
-            fetched_n=len(hits),
+            status="OK", source="ENCODE Search API", fetched_n=len(hits),
             data={"gene": gene, "experiments": hits[:limit]},
-            citations=[search_url],
-            fetched_at=_now(),
+            citations=[search_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"gene": gene, "experiments": []},
-            citations=[search_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"gene": gene, "experiments": []},
+                        citations=[search_url], fetched_at=_now())
 
 
 # -----------------------------------------------------------------------------
@@ -627,21 +520,18 @@ async def genetics_epigenetics(
 async def assoc_bulk_rna(
     condition: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of genes to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     url = f"https://gtexportal.org/api/v2/association/genesByTissue?tissueSiteDetail={urllib.parse.quote(condition)}"
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         genes = js.get("genes", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="GTEx genesByTissue",
-            fetched_n=len(genes),
+            status="OK", source="GTEx genesByTissue", fetched_n=len(genes),
             data={"condition": condition, "genes": genes[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
         # Fallback → HPA search with rna_gtex hints
@@ -650,7 +540,7 @@ async def assoc_bulk_rna(
             f"?format=json&columns=gene,rna_gtex,rna_tissue&search={urllib.parse.quote(condition)}"
         )
         try:
-            hj = await _get_json(hpa)
+            hj = await _get_json(hpa, tries=1)
             rows = hj if isinstance(hj, list) else []
             genes = [{"gene": r.get("gene"), "rna_gtex": r.get("rna_gtex")} for r in rows if r.get("rna_gtex")]
             return Evidence(
@@ -658,25 +548,19 @@ async def assoc_bulk_rna(
                 source="Human Protein Atlas (fallback)",
                 fetched_n=len(genes),
                 data={"condition": condition, "genes": genes[:limit]},
-                citations=[url, hpa],
-                fetched_at=_now(),
+                citations=[url, hpa], fetched_at=_now(),
             )
         except Exception:
-            return Evidence(
-                status="ERROR",
-                source=str(e),
-                fetched_n=0,
-                data={"condition": condition, "genes": []},
-                citations=[url],
-                fetched_at=_now(),
-            )
+            return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                            data={"condition": condition, "genes": []},
+                            citations=[url], fetched_at=_now())
 
 
 @router.get("/assoc/bulk-prot", response_model=Evidence)
 async def assoc_bulk_prot(
     condition: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of proteins to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
@@ -685,57 +569,43 @@ async def assoc_bulk_prot(
         f"?search={urllib.parse.quote(condition)}"
     )
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         records: List[Any] = []
         if isinstance(js, dict):
             records = js.get("items", js.get("proteins", js.get("results", [])))
         elif isinstance(js, list):
             records = js
         return Evidence(
-            status="OK",
-            source="ProteomicsDB proteins search",
-            fetched_n=len(records),
+            status="OK", source="ProteomicsDB proteins search", fetched_n=len(records),
             data={"condition": condition, "proteins": records[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
         # Fallback → PRIDE project list as a proxy
         pride = f"https://www.ebi.ac.uk/pride/ws/archive/project/list?keyword={urllib.parse.quote(condition)}"
         try:
-            pj = await _get_json(pride)
+            pj = await _get_json(pride, tries=1)
             items = pj if isinstance(pj, list) else []
             return Evidence(
                 status="OK" if items else "NO_DATA",
                 source="PRIDE Archive (fallback)",
                 fetched_n=len(items),
                 data={"condition": condition, "proteins": items[:limit]},
-                citations=[url, pride],
-                fetched_at=_now(),
+                citations=[url, pride], fetched_at=_now(),
             )
         except Exception:
-            return Evidence(
-                status="ERROR",
-                source=str(e),
-                fetched_n=0,
-                data={"condition": condition, "proteins": []},
-                citations=[url],
-                fetched_at=_now(),
-            )
+            return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                            data={"condition": condition, "proteins": []},
+                            citations=[url], fetched_at=_now())
 
 
-# -------------------------- NEW (live) ----------------------------------------
 @router.get("/assoc/sc", response_model=Evidence)
 async def assoc_sc(
     condition: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(100, ge=1, le=500, description="Maximum number of rows to return"),
+    limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """
-    Single‑cell signal using Human Protein Atlas search API.
-    We treat `condition` as a cell type / tissue / disease keyword and
-    surface rows containing single‑cell fields.
-    """
+    """Single‑cell signal using Human Protein Atlas search API."""
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
@@ -744,7 +614,7 @@ async def assoc_sc(
         f"?format=json&columns=ensembl,gene,cell_type,rna_cell_type,rna_tissue,rna_gtex&search={urllib.parse.quote(condition)}"
     )
     try:
-        js = await _get_json(hpa_url)
+        js = await _get_json(hpa_url, tries=1)
         rows = js if isinstance(js, list) else []
         out: List[Dict[str, Any]] = []
         for r in rows:
@@ -756,47 +626,32 @@ async def assoc_sc(
                     "tissue": r.get("rna_tissue"),
                 })
         return Evidence(
-            status="OK",
-            source="Human Protein Atlas (search_download)",
-            fetched_n=len(out),
+            status="OK", source="Human Protein Atlas (search_download)", fetched_n=len(out),
             data={"condition": condition, "sc_records": out[:limit]},
-            citations=[hpa_url],
-            fetched_at=_now(),
+            citations=[hpa_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=f"HPA search failed: {e}",
-            fetched_n=0,
-            data={"condition": condition, "sc_records": []},
-            citations=[hpa_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=f"HPA search failed: {e}", fetched_n=0,
+                        data={"condition": condition, "sc_records": []},
+                        citations=[hpa_url], fetched_at=_now())
 
 
-# -------------------------- NEW (live) ----------------------------------------
 @router.get("/assoc/perturb", response_model=Evidence)
 async def assoc_perturb(
     condition: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(100, ge=1, le=500, description="Maximum number of screen or hit rows to return"),
+    limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """
-    CRISPR perturbation from BioGRID ORCS REST service.
-    Requires ORCS access key (free): set env ORCS_ACCESS_KEY.
-    """
+    """CRISPR perturbation from BioGRID ORCS REST (requires ORCS_ACCESS_KEY)."""
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
     access_key = os.getenv("ORCS_ACCESS_KEY")
     if not access_key:
         return Evidence(
-            status="ERROR",
-            source="Missing ORCS access key (set ORCS_ACCESS_KEY)",
-            fetched_n=0,
-            data={"condition": condition, "screens": []},
-            citations=["https://orcsws.thebiogrid.org/"],
-            fetched_at=_now(),
+            status="ERROR", source="Missing ORCS access key (set ORCS_ACCESS_KEY)",
+            fetched_n=0, data={"condition": condition, "screens": []},
+            citations=["https://orcsws.thebiogrid.org/"], fetched_at=_now(),
         )
 
     base = "https://orcsws.thebiogrid.org/screens/"
@@ -805,9 +660,8 @@ async def assoc_perturb(
         f"&organismID=9606&conditionName={urllib.parse.quote(condition)}&start=0&max=50"
     )
     try:
-        screens = await _get_json(list_url)
-        screens_list = screens if isinstance(screens, list) else []
-        screens_list = screens_list[: min(3, len(screens_list))]
+        screens = await _get_json(list_url, tries=1)
+        screens_list = (screens if isinstance(screens, list) else [])[: min(3, len(screens or []))]
         hits_collected: List[Dict[str, Any]] = []
 
         for sc in screens_list:
@@ -816,7 +670,7 @@ async def assoc_perturb(
                 continue
             sc_url = f"https://orcsws.thebiogrid.org/screen/{sc_id}?accesskey={urllib.parse.quote(access_key)}&format=json&hit=yes&start=0&max={min(200, limit)}"
             try:
-                sc_hits = await _get_json(sc_url)
+                sc_hits = await _get_json(sc_url, tries=1)
                 for h in (sc_hits if isinstance(sc_hits, list) else []):
                     hits_collected.append({
                         "screen_id": sc_id,
@@ -830,22 +684,14 @@ async def assoc_perturb(
                 continue
 
         return Evidence(
-            status="OK",
-            source="BioGRID ORCS REST",
-            fetched_n=len(hits_collected),
+            status="OK", source="BioGRID ORCS REST", fetched_n=len(hits_collected),
             data={"condition": condition, "screens_n": len(screens_list), "hits": hits_collected[:limit]},
-            citations=[list_url],
-            fetched_at=_now(),
+            citations=[list_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=f"ORCS error: {e}",
-            fetched_n=0,
-            data={"condition": condition, "screens": []},
-            citations=[list_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=f"ORCS error: {e}", fetched_n=0,
+                        data={"condition": condition, "screens": []},
+                        citations=[list_url], fetched_at=_now())
 
 
 # -----------------------------------------------------------------------------
@@ -856,97 +702,79 @@ async def assoc_perturb(
 async def expression_baseline(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=500, description="Maximum number of baseline entries to return"),
+    limit: int = Query(50, ge=1, le=500),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+
+    # HPA → UniProt → GXA (UniProt is usually faster than GXA)
     hpa_url = (
         "https://www.proteinatlas.org/api/search_download.php"
         f"?format=json&columns=ensembl,gene,cell_type,rna_cell_type,rna_tissue,rna_gtex&search={urllib.parse.quote(symbol)}"
     )
     try:
-        js = await _get_json(hpa_url)
+        js = await _get_json(hpa_url, tries=1)
         records = js if isinstance(js, list) else []
         if records:
             return Evidence(
-                status="OK",
-                source="Human Protein Atlas search_download",
-                fetched_n=len(records),
+                status="OK", source="Human Protein Atlas search_download", fetched_n=len(records),
                 data={"symbol": symbol, "baseline": records[:limit]},
-                citations=[hpa_url],
-                fetched_at=_now(),
+                citations=[hpa_url], fetched_at=_now(),
             )
     except Exception:
         pass
-    atlas_url = f"https://www.ebi.ac.uk/gxa/genes/{urllib.parse.quote(symbol)}.json"
-    try:
-        body = await _get_json(atlas_url)
-        results: List[Dict[str, Any]] = []
-        experiments = body.get("experiments", []) if isinstance(body, dict) else []
-        for exp in experiments:
-            for d in exp.get("data", []):
-                results.append(
-                    {
-                        "tissue": d.get("organismPart") or d.get("tissue") or "NA",
-                        "level": d.get("expressions", [{}])[0].get("value"),
-                    }
-                )
-        if results:
-            return Evidence(
-                status="OK",
-                source="Expression Atlas (baseline)",
-                fetched_n=len(results),
-                data={"symbol": symbol, "baseline": results[:limit]},
-                citations=[atlas_url],
-                fetched_at=_now(),
-            )
-    except Exception:
-        pass
+
     uniprot_url = f"https://rest.uniprot.org/uniprotkb/search?query={urllib.parse.quote(symbol)}&format=json&size={limit}"
     try:
-        body = await _get_json(uniprot_url)
+        body = await _get_json(uniprot_url, tries=1)
         entries = body.get("results", []) if isinstance(body, dict) else []
+        if entries:
+            return Evidence(
+                status="OK", source="UniProt search", fetched_n=len(entries),
+                data={"symbol": symbol, "baseline": entries[:limit]},
+                citations=[uniprot_url], fetched_at=_now(),
+            )
+    except Exception:
+        pass
+
+    atlas_url = f"https://www.ebi.ac.uk/gxa/genes/{urllib.parse.quote(symbol)}.json"
+    try:
+        body = await _get_json(atlas_url, tries=1)
+        results: List[Dict[str, Any]] = []
+        for exp in body.get("experiments", []) if isinstance(body, dict) else []:
+            for d in exp.get("data", []):
+                results.append({"tissue": d.get("organismPart") or d.get("tissue") or "NA",
+                                "level": d.get("expressions", [{}])[0].get("value")})
         return Evidence(
-            status="OK",
-            source="UniProt search",
-            fetched_n=len(entries),
-            data={"symbol": symbol, "baseline": entries[:limit]},
-            citations=[uniprot_url],
-            fetched_at=_now(),
+            status="OK" if results else "NO_DATA",
+            source="Expression Atlas (baseline)",
+            fetched_n=len(results),
+            data={"symbol": symbol, "baseline": results[:limit]},
+            citations=[atlas_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "baseline": []},
-            citations=[hpa_url, atlas_url, uniprot_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"symbol": symbol, "baseline": []},
+                        citations=[hpa_url, uniprot_url, atlas_url], fetched_at=_now())
 
 
 @router.get("/expr/localization", response_model=Evidence)
 async def expr_localization(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of localization entries to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
-    url = (
-        "https://compartments.jensenlab.org/Service"
-        f"?gene_names={urllib.parse.quote(symbol)}&format=json"
-    )
+
+    url = f"https://compartments.jensenlab.org/Service?gene_names={urllib.parse.quote(symbol)}&format=json"
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         locs = js.get(symbol, []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="COMPARTMENTS API",
-            fetched_n=len(locs),
+            status="OK", source="COMPARTMENTS API", fetched_n=len(locs),
             data={"symbol": symbol, "localization": locs[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
         # Fallback → UniProt subcellular location
@@ -956,7 +784,7 @@ async def expr_localization(
             "&fields=cc_subcellular_location&format=json&size=1"
         )
         try:
-            uj = await _get_json(uni)
+            uj = await _get_json(uni, tries=1)
             locs = []
             for r in (uj.get("results", []) or []):
                 for c in (r.get("comments", []) or []):
@@ -967,25 +795,19 @@ async def expr_localization(
                 source="UniProt (fallback)",
                 fetched_n=len(locs),
                 data={"symbol": symbol, "localization": locs[:limit]},
-                citations=[url, uni],
-                fetched_at=_now(),
+                citations=[url, uni], fetched_at=_now(),
             )
         except Exception:
-            return Evidence(
-                status="ERROR",
-                source=str(e),
-                fetched_n=0,
-                data={"symbol": symbol, "localization": []},
-                citations=[url],
-                fetched_at=_now(),
-            )
+            return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                            data={"symbol": symbol, "localization": []},
+                            citations=[url], fetched_at=_now())
 
 
 @router.get("/expr/inducibility", response_model=Evidence)
 async def expr_inducibility(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of dataset identifiers to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
@@ -994,25 +816,17 @@ async def expr_inducibility(
         "&retmode=json"
     )
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         ids = js.get("esearchresult", {}).get("idlist", [])
         return Evidence(
-            status="OK",
-            source="GEO E‑utilities",
-            fetched_n=len(ids),
+            status="OK", source="GEO E-utilities", fetched_n=len(ids),
             data={"symbol": symbol, "datasets": ids[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "datasets": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"symbol": symbol, "datasets": []},
+                        citations=[url], fetched_at=_now())
 
 
 # -----------------------------------------------------------------------------
@@ -1023,136 +837,94 @@ async def expr_inducibility(
 async def mech_pathways(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of pathways to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
-    search = (
-        f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(symbol)}&species=Homo%20sapiens"
-    )
+    search = f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(symbol)}&species=Homo%20sapiens"
     try:
-        js = await _get_json(search)
+        js = await _get_json(search, tries=1)
         hits = js.get("results", []) if isinstance(js, dict) else []
         pathways = []
         for h in hits:
             if "Pathway" in h.get("species", "") or h.get("stId", "").startswith("R-HSA"):
-                pathways.append(
-                    {
-                        "name": h.get("name"),
-                        "stId": h.get("stId"),
-                        "score": h.get("score"),
-                    }
-                )
+                pathways.append({"name": h.get("name"), "stId": h.get("stId"), "score": h.get("score")})
         return Evidence(
-            status="OK",
-            source="Reactome ContentService",
-            fetched_n=len(pathways),
+            status="OK", source="Reactome ContentService", fetched_n=len(pathways),
             data={"symbol": symbol, "pathways": pathways[:limit]},
-            citations=[search],
-            fetched_at=_now(),
+            citations=[search], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "pathways": []},
-            citations=[search],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"symbol": symbol, "pathways": []},
+                        citations=[search], fetched_at=_now())
 
 
 @router.get("/mech/ppi", response_model=Evidence)
 async def mech_ppi(
     symbol: str,
-    cutoff: float = Query(0.9, ge=0.0, le=1.0, description="Minimum interaction score to include"),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of interaction partners to return"),
+    cutoff: float = Query(0.9, ge=0.0, le=1.0),
+    limit: int = Query(50, ge=1, le=200),
     x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
-    map_url = (
-        "https://string-db.org/api/json/get_string_ids"
-        f"?identifiers={urllib.parse.quote(symbol)}&species=9606"
+
+    map_url = "https://string-db.org/api/json/get_string_ids?identifiers={id}&species=9606".format(
+        id=urllib.parse.quote(symbol)
     )
-    network_url_tpl = "https://string-db.org/api/json/network?identifiers={id}&species=9606"
+    net_tpl = "https://string-db.org/api/json/network?identifiers={id}&species=9606"
     try:
-        ids = await _get_json(map_url)
+        ids = await _get_json(map_url, tries=1)
         if not ids:
-            return Evidence(
-                status="OK",
-                source="STRING",
-                fetched_n=0,
-                data={"symbol": symbol, "neighbors": []},
-                citations=[map_url],
-                fetched_at=_now(),
-            )
+            return Evidence(status="OK", source="STRING", fetched_n=0,
+                            data={"symbol": symbol, "neighbors": []},
+                            citations=[map_url], fetched_at=_now())
         string_id = ids[0].get("stringId")
-        net = await _get_json(network_url_tpl.format(id=string_id))
+        net = await _get_json(net_tpl.format(id=string_id), tries=1)
         neighbors: List[Dict[str, Any]] = []
         for edge in net:
             score = edge.get("score") or edge.get("combined_score")
             if score and float(score) >= cutoff:
-                neighbors.append(
-                    {
-                        "preferredName_A": edge.get("preferredName_A"),
-                        "preferredName_B": edge.get("preferredName_B"),
-                        "score": float(score),
-                    }
-                )
+                neighbors.append({
+                    "preferredName_A": edge.get("preferredName_A"),
+                    "preferredName_B": edge.get("preferredName_B"),
+                    "score": float(score),
+                })
         neighbors = neighbors[:limit]
         return Evidence(
-            status="OK",
-            source="STRING REST",
-            fetched_n=len(neighbors),
+            status="OK", source="STRING REST", fetched_n=len(neighbors),
             data={"symbol": symbol, "neighbors": neighbors},
-            citations=[map_url, network_url_tpl.format(id=string_id)],
-            fetched_at=_now(),
+            citations=[map_url, net_tpl.format(id=string_id)], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "neighbors": []},
-            citations=[map_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"symbol": symbol, "neighbors": []},
+                        citations=[map_url], fetched_at=_now())
 
 
 @router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(100, ge=1, le=500, description="Maximum number of interactions to return"),
+    limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = "https://omnipathdb.org/interactions?format=json&genes={gene}&substrate_only=false"
     try:
-        js = await _get_json(url.format(gene=urllib.parse.quote(symbol)))
+        js = await _get_json(url.format(gene=urllib.parse.quote(symbol)), tries=1)
         interactions = js if isinstance(js, list) else []
-        filtered: List[Dict[str, Any]] = []
-        for i in interactions:
-            if symbol in (i.get("source", ""), i.get("target", "")):
-                filtered.append(i)
+        filtered = [i for i in interactions if symbol in (i.get("source", ""), i.get("target", ""))]
         return Evidence(
-            status="OK",
-            source="OmniPath interactions",
-            fetched_n=len(filtered),
+            status="OK", source="OmniPath interactions", fetched_n=len(filtered),
             data={"symbol": symbol, "interactions": filtered[:limit]},
-            citations=[url.format(gene=urllib.parse.quote(symbol))],
-            fetched_at=_now(),
+            citations=[url.format(gene=urllib.parse.quote(symbol))], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "interactions": []},
-            citations=[url.format(gene=urllib.parse.quote(symbol))],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"symbol": symbol, "interactions": []},
+                        citations=[url.format(gene=urllib.parse.quote(symbol))], fetched_at=_now())
 
 
 # -----------------------------------------------------------------------------
@@ -1163,172 +935,117 @@ async def mech_ligrec(
 async def tract_drugs(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(100, ge=1, le=500, description="Maximum number of drug interactions to return"),
+    limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """
-    Known/experimental drugs for a target. OpenTargets first (fast, robust),
-    DGIdb fallback.
-    """
+    """Known/experimental drugs for a target. OpenTargets first; DGIdb fallback."""
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
 
-    # 1) OpenTargets knownDrugs (GraphQL)
     gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
     query = {
         "query": """
         query ($symbol: String!) {
           target(approvedSymbol: $symbol) {
-            id
-            approvedSymbol
-            knownDrugs {
-              rows {
-                drugId
-                drugName
-                mechanismOfAction
-              }
-              count
-            }
+            knownDrugs { rows { drugId drugName mechanismOfAction } count }
           }
-        }
-        """,
+        }""",
         "variables": {"symbol": symbol},
     }
     try:
-        res = await _post_json(gql_url, query)
-        rows = (
-            res.get("data", {})
-            .get("target", {})
-            .get("knownDrugs", {})
-            .get("rows", [])
-        )
+        res = await _post_json(gql_url, query, tries=1)
+        rows = (res.get("data", {}).get("target", {}).get("knownDrugs", {}).get("rows", []))
         if rows:
             return Evidence(
-                status="OK",
-                source="OpenTargets knownDrugs",
-                fetched_n=len(rows),
+                status="OK", source="OpenTargets knownDrugs", fetched_n=len(rows),
                 data={"symbol": symbol, "interactions": rows[:limit]},
-                citations=[gql_url],
-                fetched_at=_now(),
+                citations=[gql_url], fetched_at=_now(),
             )
     except Exception:
         pass
 
-    # 2) DGIdb fallback
     dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(symbol)}"
     try:
-        body = await _get_json(dg_url)
+        body = await _get_json(dg_url, tries=1)
         matched = body.get("matchedTerms", []) if isinstance(body, dict) else []
         interactions: List[Any] = []
         for term in matched or []:
             interactions.extend(term.get("interactions", []))
         return Evidence(
             status="OK" if interactions else "NO_DATA",
-            source="DGIdb",
-            fetched_n=len(interactions),
+            source="DGIdb", fetched_n=len(interactions),
             data={"symbol": symbol, "interactions": interactions[:limit]},
-            citations=[dg_url],
-            fetched_at=_now(),
+            citations=[dg_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=f"DGIdb failed: {e}",
-            fetched_n=0,
-            data={"symbol": symbol, "interactions": []},
-            citations=[gql_url, dg_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=f"DGIdb failed: {e}", fetched_n=0,
+                        data={"symbol": symbol, "interactions": []},
+                        citations=[gql_url, dg_url], fetched_at=_now())
 
 
 @router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(100, ge=1, le=500, description="Maximum number of small‑molecule targets to return"),
+    limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(symbol)}&format=json"
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         targets = js.get("targets", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="ChEMBL target search",
-            fetched_n=len(targets),
+            status="OK", source="ChEMBL target search", fetched_n=len(targets),
             data={"symbol": symbol, "targets": targets[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "targets": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"symbol": symbol, "targets": []},
+                        citations=[url], fetched_at=_now())
 
 
 @router.get("/tract/ligandability-ab", response_model=Evidence)
 async def tract_ligandability_ab(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of structures to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(symbol)}"
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         entries: List[Any] = []
         if isinstance(js, dict):
             for _, vals in js.items():
                 if isinstance(vals, list):
                     entries.extend(vals)
         return Evidence(
-            status="OK",
-            source="PDBe proteins API",
-            fetched_n=len(entries),
+            status="OK", source="PDBe proteins API", fetched_n=len(entries),
             data={"symbol": symbol, "structures": entries[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "structures": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"symbol": symbol, "structures": []},
+                        citations=[url], fetched_at=_now())
 
 
-# -------------------------- NEW (live) ----------------------------------------
 @router.get("/tract/ligandability-oligo", response_model=Evidence)
 async def tract_ligandability_oligo(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(100, ge=1, le=500, description="Maximum number of aptamers to return"),
+    limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """
-    Oligonucleotide ligandability via Ribocentre Aptamer API.
-    """
+    """Oligonucleotide ligandability via Ribocentre Aptamer API."""
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
 
     api_url = f"https://aptamer.ribocentre.org/api/?search={urllib.parse.quote(symbol)}"
     try:
-        js = await _get_json(api_url)
-        items = (
-            js.get("results")
-            or js.get("items")
-            or js.get("data")
-            or js.get("entries")
-            or []
-        )
+        js = await _get_json(api_url, tries=1)
+        items = js.get("results") or js.get("items") or js.get("data") or js.get("entries") or []
         out = []
         for it in items:
             ligand = (it.get("Ligand") or it.get("Target") or it.get("ligand") or "")
@@ -1342,65 +1059,48 @@ async def tract_ligandability_oligo(
                     "ref": it.get("Article name") or it.get("reference"),
                 })
         return Evidence(
-            status="OK",
-            source="Ribocentre Aptamer API",
-            fetched_n=len(out),
+            status="OK", source="Ribocentre Aptamer API", fetched_n=len(out),
             data={"symbol": symbol, "aptamers": out[:limit]},
-            citations=[api_url],
-            fetched_at=_now(),
+            citations=[api_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=f"Aptamer API error: {e}",
-            fetched_n=0,
-            data={"symbol": symbol, "aptamers": []},
-            citations=[api_url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=f"Aptamer API error: {e}", fetched_n=0,
+                        data={"symbol": symbol, "aptamers": []},
+                        citations=[api_url], fetched_at=_now())
 
 
-# -------------------------- NEW (live) ----------------------------------------
 @router.get("/tract/modality", response_model=Evidence)
 async def tract_modality(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """
-    Heuristic therapeutic modality assessment (live inputs).
-
-    Signals integrated:
-      * COMPARTMENTS: subcellular localisation (extracellular/plasma membrane boosts Ab/oligo)
-      * ChEMBL: existing target entries (boosts small‑molecule)
-      * PDBe: structural coverage (support for both; indicates tractability)
+    Heuristic modality assessment using COMPARTMENTS + ChEMBL + PDBe.
     """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
 
-    comp_url = (
-        "https://compartments.jensenlab.org/Service"
-        f"?gene_names={urllib.parse.quote(symbol)}&format=json"
-    )
+    comp_url = f"https://compartments.jensenlab.org/Service?gene_names={urllib.parse.quote(symbol)}&format=json"
     chembl_url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(symbol)}&format=json"
     pdbe_url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(symbol)}"
 
     async def _get_comp():
         try:
-            js = await _get_json(comp_url)
+            js = await _get_json(comp_url, tries=1)
             return js.get(symbol, []) if isinstance(js, dict) else []
         except Exception:
             return []
 
     async def _get_chembl():
         try:
-            js = await _get_json(chembl_url)
+            js = await _get_json(chembl_url, tries=1)
             return js.get("targets", []) if isinstance(js, dict) else []
         except Exception:
             return []
 
     async def _get_pdbe():
         try:
-            js = await _get_json(pdbe_url)
+            js = await _get_json(pdbe_url, tries=1)
             entries: List[Any] = []
             if isinstance(js, dict):
                 for _, vals in js.items():
@@ -1418,41 +1118,16 @@ async def tract_modality(
     has_chembl = len(chemblres) > 0
     has_structure = len(pdberes) > 0
 
-    sm_score = 0.0
-    if has_chembl:
-        sm_score += 0.6
-    if has_structure:
-        sm_score += 0.25
-    if is_extracellular and not is_membrane:
-        sm_score -= 0.15
-
-    ab_score = 0.0
-    if is_membrane or is_extracellular:
-        ab_score += 0.6
-    if has_structure:
-        ab_score += 0.25
-    if has_chembl and not (is_membrane or is_extracellular):
-        ab_score -= 0.1
-
-    oligo_score = 0.0
-    if is_extracellular or "cytosol" in loc_terms or "nucleus" in loc_terms:
-        oligo_score += 0.5
-    if has_structure:
-        oligo_score += 0.1
-    if has_chembl:
-        oligo_score += 0.05
+    sm_score = (0.6 if has_chembl else 0.0) + (0.25 if has_structure else 0.0) - (0.15 if (is_extracellular and not is_membrane) else 0.0)
+    ab_score = (0.6 if (is_membrane or is_extracellular) else 0.0) + (0.25 if has_structure else 0.0) - (0.1 if (has_chembl and not (is_membrane or is_extracellular)) else 0.0)
+    oligo_score = (0.5 if (is_extracellular or ("cytosol" in loc_terms) or ("nucleus" in loc_terms)) else 0.0) + (0.1 if has_structure else 0.0) + (0.05 if has_chembl else 0.0)
 
     def clamp(x: float) -> float:
         return max(0.0, min(1.0, round(x, 3)))
 
     recommendation = sorted(
-        [
-            ("small_molecule", clamp(sm_score)),
-            ("antibody", clamp(ab_score)),
-            ("oligo", clamp(oligo_score)),
-        ],
-        key=lambda kv: kv[1],
-        reverse=True,
+        [("small_molecule", clamp(sm_score)), ("antibody", clamp(ab_score)), ("oligo", clamp(oligo_score))],
+        key=lambda kv: kv[1], reverse=True,
     )
 
     return Evidence(
@@ -1479,16 +1154,13 @@ async def tract_modality(
     )
 
 
-# -------------------------- NEW (live) ----------------------------------------
 @router.get("/tract/immunogenicity", response_model=Evidence)
 async def tract_immunogenicity(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of epitope/assay rows to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    """
-    Immunogenicity via IEDB IQ‑API (PostgREST).
-    """
+    """Immunogenicity via IEDB IQ‑API (epitope_search + tcell_search)."""
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
 
@@ -1496,44 +1168,41 @@ async def tract_immunogenicity(
     epi_url = f"{base}/epitope_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
     tc_url = f"{base}/tcell_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
 
-    try:
-        epi = await _get_json(epi_url)
-        tc = await _get_json(tc_url)
-        epi_list = epi if isinstance(epi, list) else []
-        tc_list = tc if isinstance(tc, list) else []
+    async def _epi():
+        try:
+            e = await _get_json(epi_url, tries=1)
+            return e if isinstance(e, list) else []
+        except Exception:
+            return []
 
-        hla_counts: Dict[str, int] = {}
-        for r in tc_list:
-            allele = r.get("mhc_allele_name") or r.get("assay_mhc_allele_name") or r.get("mhc_name")
-            if allele:
-                hla_counts[allele] = hla_counts.get(allele, 0) + 1
+    async def _tc():
+        try:
+            t = await _get_json(tc_url, tries=1)
+            return t if isinstance(t, list) else []
+        except Exception:
+            return []
 
-        return Evidence(
-            status="OK",
-            source="IEDB IQ‑API (epitope_search + tcell_search)",
-            fetched_n=len(epi_list) + len(tc_list),
-            data={
-                "symbol": symbol,
-                "epitopes_n": len(epi_list),
-                "tcell_assays_n": len(tc_list),
-                "hla_breakdown": sorted([[k, v] for k, v in hla_counts.items()], key=lambda kv: kv[1], reverse=True)[:25],
-                "examples": {
-                    "epitopes": epi_list[: min(10, limit)],
-                    "tcell_assays": tc_list[: min(10, limit)],
-                },
-            },
-            citations=[epi_url, tc_url],
-            fetched_at=_now(),
-        )
-    except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=f"IEDB query failed: {e}",
-            fetched_n=0,
-            data={"symbol": symbol, "epitopes_n": 0, "tcell_assays_n": 0},
-            citations=[epi_url, tc_url],
-            fetched_at=_now(),
-        )
+    epi_list, tc_list = await asyncio.gather(_epi(), _tc())
+    hla_counts: Dict[str, int] = {}
+    for r in tc_list:
+        allele = r.get("mhc_allele_name") or r.get("assay_mhc_allele_name") or r.get("mhc_name")
+        if allele:
+            hla_counts[allele] = hla_counts.get(allele, 0) + 1
+
+    return Evidence(
+        status="OK",
+        source="IEDB IQ‑API",
+        fetched_n=len(epi_list) + len(tc_list),
+        data={
+            "symbol": symbol,
+            "epitopes_n": len(epi_list),
+            "tcell_assays_n": len(tc_list),
+            "hla_breakdown": sorted([[k, v] for k, v in hla_counts.items()], key=lambda kv: kv[1], reverse=True)[:25],
+            "examples": {"epitopes": epi_list[: min(10, limit)], "tcell_assays": tc_list[: min(10, limit)]},
+        },
+        citations=[epi_url, tc_url],
+        fetched_at=_now(),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1544,43 +1213,35 @@ async def tract_immunogenicity(
 async def clin_endpoints(
     condition: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(3, ge=1, le=100, description="Maximum number of trials to return"),
+    limit: int = Query(3, ge=1, le=100),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
     base = "https://clinicaltrials.gov/api/v2/studies"
     q = f"{base}?query.cond={urllib.parse.quote(condition)}&pageSize={limit}"
     try:
-        js = await _get_json(q)
+        js = await _get_json(q, tries=1)
         studies = js.get("studies", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="ClinicalTrials.gov v2",
-            fetched_n=len(studies),
+            status="OK", source="ClinicalTrials.gov v2", fetched_n=len(studies),
             data={"condition": condition, "studies": studies[:limit]},
-            citations=[q],
-            fetched_at=_now(),
+            citations=[q], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"condition": condition, "studies": []},
-            citations=[q],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"condition": condition, "studies": []},
+                        citations=[q], fetched_at=_now())
 
 
-# -------------------------- NEW (live) ----------------------------------------
 @router.get("/clin/rwe", response_model=Evidence)
 async def clin_rwe(
     condition: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=200, description="Maximum number of RWE proxy rows to return"),
+    limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     """
-    Real‑world evidence proxies from public sources (FAERS + Ct.Gov).
+    RWE proxies: FAERS (openFDA) + ClinicalTrials.gov observational.
+    Both fetched concurrently with bounded retries.
     """
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
@@ -1594,30 +1255,27 @@ async def clin_rwe(
         f"?query.cond={urllib.parse.quote(condition)}&filter.studyType=Observational&pageSize={min(100, limit)}"
     )
 
-    faers_results: List[Dict[str, Any]] = []
-    trials: List[Dict[str, Any]] = []
-    try:
-        faers = await _get_json(faers_url)
-        faers_results = faers.get("results", []) if isinstance(faers, dict) else []
-    except Exception:
-        pass
-    try:
-        js = await _get_json(ct_url)
-        trials = js.get("studies", []) if isinstance(js, dict) else []
-    except Exception:
-        pass
+    async def _faers():
+        try:
+            f = await _get_json(faers_url, tries=1)
+            return f.get("results", []) if isinstance(f, dict) else []
+        except Exception:
+            return []
 
+    async def _ct():
+        try:
+            c = await _get_json(ct_url, tries=1)
+            return c.get("studies", []) if isinstance(c, dict) else []
+        except Exception:
+            return []
+
+    faers_results, trials = await asyncio.gather(_faers(), _ct())
     return Evidence(
         status="OK",
         source="openFDA FAERS + ClinicalTrials.gov v2",
         fetched_n=len(faers_results) + len(trials),
-        data={
-            "condition": condition,
-            "faers_events": faers_results[:limit],
-            "observational_trials": trials[:limit],
-        },
-        citations=[faers_url, ct_url],
-        fetched_at=_now(),
+        data={"condition": condition, "faers_events": faers_results[:limit], "observational_trials": trials[:limit]},
+        citations=[faers_url, ct_url], fetched_at=_now(),
     )
 
 
@@ -1625,64 +1283,50 @@ async def clin_rwe(
 async def clin_safety(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=500, description="Maximum number of adverse event reports to return"),
+    limit: int = Query(50, ge=1, le=500),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     url = f"https://api.fda.gov/drug/event.json?search=patient.drug.openfda.generic_name:{urllib.parse.quote(symbol)}&limit={limit}"
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         results = js.get("results", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="openFDA FAERS",
-            fetched_n=len(results),
+            status="OK", source="openFDA FAERS", fetched_n=len(results),
             data={"symbol": symbol, "reports": results[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "reports": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"symbol": symbol, "reports": []},
+                        citations=[url], fetched_at=_now())
 
 
 @router.get("/clin/pipeline", response_model=Evidence)
 async def clin_pipeline(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(50, ge=1, le=500, description="Maximum number of pipeline entries to return"),
+    limit: int = Query(50, ge=1, le=500),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     inx_url = f"https://drugs.ncats.io/api/v1/drugs?name={urllib.parse.quote(symbol)}"
     try:
-        js = await _get_json(inx_url)
+        js = await _get_json(inx_url, tries=1)
         items = js.get("content", []) if isinstance(js, dict) else []
         if items:
             return Evidence(
-                status="OK",
-                source="Inxight Drugs",
-                fetched_n=len(items),
+                status="OK", source="Inxight Drugs", fetched_n=len(items),
                 data={"symbol": symbol, "pipeline": items[:limit]},
-                citations=[inx_url],
-                fetched_at=_now(),
+                citations=[inx_url], fetched_at=_now(),
             )
     except Exception:
         pass
     result = await _safe_call(tract_drugs(symbol, x_api_key, limit))
     return Evidence(
-        status=result.status,
-        source=result.source,
-        fetched_n=result.fetched_n,
+        status=result.status, source=result.source, fetched_n=result.fetched_n,
         data={"symbol": symbol, "pipeline": result.data.get("interactions", [])[:limit]},
-        citations=result.citations,
-        fetched_at=result.fetched_at,
+        citations=result.citations, fetched_at=result.fetched_at,
     )
 
 
@@ -1695,51 +1339,38 @@ async def comp_intensity(
     symbol: str,
     condition: Optional[str] = None,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum number of patent records to return"),
+    limit: int = Query(100, ge=1, le=1000),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
-    cond = condition if condition else ""
+    cond = condition or ""
     query = {"_and": [
-        {"_or": [
-            {"patent_title": {"_text_any": symbol}},
-            {"patent_abstract": {"_text_any": symbol}}
-        ]},
+        {"_or": [{"patent_title": {"_text_any": symbol}}, {"patent_abstract": {"_text_any": symbol}}]},
     ]}
     if cond:
-        query["_and"].append({"_or": [
-            {"patent_title": {"_text_any": cond}},
-            {"patent_abstract": {"_text_any": cond}}
-        ]})
+        query["_and"].append({"_or": [{"patent_title": {"_text_any": cond}}, {"patent_abstract": {"_text_any": cond}}]})
     query_str = urllib.parse.quote(json.dumps(query))
     fields = urllib.parse.quote(json.dumps(["patent_id"]))
     pat_url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
     try:
-        js = await _get_json(pat_url)
+        js = await _get_json(pat_url, tries=1)
         patents = js.get("patents", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="PatentsView query",
-            fetched_n=len(patents),
+            status="OK", source="PatentsView query", fetched_n=len(patents),
             data={"symbol": symbol, "condition": condition, "patents": patents[:limit]},
-            citations=[pat_url],
-            fetched_at=_now(),
+            citations=[pat_url], fetched_at=_now(),
         )
     except Exception:
         pass
+
     drug_res = await _safe_call(tract_drugs(symbol, x_api_key, limit))
     trial_res = await _safe_call(clin_endpoints(condition or symbol, x_api_key, limit))
     count = (drug_res.fetched_n if drug_res else 0) + (trial_res.fetched_n if trial_res else 0)
     return Evidence(
-        status="OK",
-        source="Drugs+Trials fallback",
-        fetched_n=count,
-        data={
-            "symbol": symbol,
-            "condition": condition,
-            "drugs_n": drug_res.fetched_n if drug_res else 0,
-            "trials_n": trial_res.fetched_n if trial_res else 0,
-        },
+        status="OK", source="Drugs+Trials fallback", fetched_n=count,
+        data={"symbol": symbol, "condition": condition,
+              "drugs_n": drug_res.fetched_n if drug_res else 0,
+              "trials_n": trial_res.fetched_n if trial_res else 0},
         citations=(drug_res.citations if drug_res else []) + (trial_res.citations if trial_res else []),
         fetched_at=_now(),
     )
@@ -1749,34 +1380,23 @@ async def comp_intensity(
 async def comp_freedom(
     symbol: str,
     x_api_key: Optional[str] = Header(default=None),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum number of patent identifiers to return"),
+    limit: int = Query(100, ge=1, le=1000),
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
-    query = {"_or": [
-        {"patent_title": {"_text_any": symbol}},
-        {"patent_abstract": {"_text_any": symbol}}
-    ]}
+    query = {"_or": [{"patent_title": {"_text_any": symbol}}, {"patent_abstract": {"_text_any": symbol}}]}
     query_str = urllib.parse.quote(json.dumps(query))
     fields = urllib.parse.quote(json.dumps(["patent_id"]))
     url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
     try:
-        js = await _get_json(url)
+        js = await _get_json(url, tries=1)
         patents = js.get("patents", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK",
-            source="PatentsView FTO query",
-            fetched_n=len(patents),
+            status="OK", source="PatentsView FTO query", fetched_n=len(patents),
             data={"symbol": symbol, "patents": patents[:limit]},
-            citations=[url],
-            fetched_at=_now(),
+            citations=[url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "patents": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+                        data={"symbol": symbol, "patents": []},
+                        citations=[url], fetched_at=_now())
