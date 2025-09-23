@@ -9,6 +9,7 @@ Tractability & Modality, Clinical Translation & Safety, Competition & IP).
 Key improvements over the original:
 * Robust 429/5xx retry with exponential back‑off & jitter for all outbound calls
 * Configurable concurrency (semaphore) and cache TTL via env vars
+* Default outbound headers (User‑Agent, Accept JSON) + longer, configurable timeout
 * The 8 previously‑stubbed modules are now wired to live, public APIs:
   - /genetics/mr  → EpiGraphDB xQTL multi‑SNP MR
   - /genetics/mirna → miRNet 2.0 (fallback ENCORI/starBase TSV)
@@ -54,7 +55,7 @@ class Evidence(BaseModel):
 
 
 # -----------------------------------------------------------------------------
-# Caching and concurrency support
+# Caching, concurrency & outbound client defaults
 # -----------------------------------------------------------------------------
 
 # In‑memory cache for upstream HTTP GET requests.
@@ -62,12 +63,25 @@ CACHE: Dict[str, Dict[str, Any]] = {}
 
 # Configurable cache TTL and concurrency
 CACHE_TTL: int = int(os.getenv("CACHE_TTL_SECONDS", str(24 * 60 * 60)))
-DEFAULT_TIMEOUT = httpx.Timeout(25.0, connect=4.0)
+
+# Outbound HTTP client settings (configurable)
+DEFAULT_TIMEOUT = httpx.Timeout(
+    float(os.getenv("OUTBOUND_TIMEOUT_S", "45.0")),  # read/write total
+    connect=6.0,
+)
+DEFAULT_HEADERS: Dict[str, str] = {
+    "User-Agent": os.getenv(
+        "OUTBOUND_USER_AGENT",
+        "TargetVal/1.2 (+https://github.com/aureten/Targetval-gateway)"
+    ),
+    "Accept": "application/json",
+}
+
 MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
 _semaphore: asyncio.Semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
-# API key enforcement placeholder.
+# API key enforcement placeholder (wire your middleware/key check here if needed).
 def _require_key(x_api_key: Optional[str]) -> None:
     return
 
@@ -87,7 +101,8 @@ async def _get_json(url: str, tries: int = 3, headers: Optional[Dict[str, str]] 
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             for attempt in range(1, tries + 1):
                 try:
-                    resp = await client.get(url, headers=headers)
+                    merged = {**DEFAULT_HEADERS, **(headers or {})}
+                    resp = await client.get(url, headers=merged)
                     # Handle rate-limits (429) or transient 5xx before raising
                     if resp.status_code in (429, 500, 502, 503, 504):
                         # Exponential backoff with jitter
@@ -114,7 +129,8 @@ async def _get_text(url: str, tries: int = 3, headers: Optional[Dict[str, str]] 
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             for attempt in range(1, tries + 1):
                 try:
-                    resp = await client.get(url, headers=headers)
+                    merged = {**DEFAULT_HEADERS, **(headers or {})}
+                    resp = await client.get(url, headers=merged)
                     if resp.status_code in (429, 500, 502, 503, 504):
                         backoff = min(2 ** (attempt - 1) * 0.8, 10.0) + random.random() * 0.25
                         await asyncio.sleep(backoff)
@@ -141,7 +157,8 @@ async def _post_json(
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             for attempt in range(1, tries + 1):
                 try:
-                    resp = await client.post(url, json=payload, headers=headers)
+                    merged = {**DEFAULT_HEADERS, **(headers or {})}
+                    resp = await client.post(url, json=payload, headers=merged)
                     if resp.status_code in (429, 500, 502, 503, 504):
                         backoff = min(2 ** (attempt - 1) * 0.8, 10.0) + random.random() * 0.25
                         await asyncio.sleep(backoff)
@@ -208,7 +225,6 @@ def status() -> Dict[str, Any]:
 
 # -----------------------------------------------------------------------------
 # BUCKET 1 – Human Genetics & Causality
-# (Your existing 6 live endpoints kept as‑is except for retry improvements.)
 # -----------------------------------------------------------------------------
 
 @router.get("/genetics/l2g", response_model=Evidence)
@@ -378,10 +394,8 @@ async def genetics_mr(
     map_url = f"https://api.epigraphdb.org/ontology/disease-efo?efo_term={urllib.parse.quote(efo)}&fuzzy=true"
     try:
         mapping = await _get_json(map_url)
-        # EpiGraphDB responses typically wrap data under 'results'
         results = mapping.get("results", []) if isinstance(mapping, dict) else []
         if results:
-            # Prefer disease label if present
             top = results[0]
             disease_label = (
                 top.get("disease_label")
@@ -389,10 +403,8 @@ async def genetics_mr(
                 or disease_label
             )
     except Exception:
-        # mapping failure is non-fatal; proceed with original efo string
         pass
 
-    # Run MR
     base = "https://api.epigraphdb.org/xqtl/multi-snp-mr"
     qs = urllib.parse.urlencode({"exposure_gene": gene, "outcome_trait": disease_label})
     mr_url = f"{base}?{qs}"
@@ -461,25 +473,16 @@ async def genetics_mirna(
     miRNA–gene interactions (live):
       * Primary: miRNet 2.0 API (JSON)
       * Fallback: ENCORI / starBase miRNA-Target API (TSV)
-
-    Returns a list of interactions with fields like miRNA, target, evidence/source and PMID where available.
     """
     _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
 
     # Primary: miRNet 2.0 (table/gene)
     mirnet_url = "https://api.mirnet.ca/table/gene"
-    payload = {
-        "org": "hsa",         # human
-        "idOpt": "symbol",    # gene symbol
-        "myList": gene,
-        "selSource": "All"    # include all integrated sources
-    }
+    payload = {"org": "hsa", "idOpt": "symbol", "myList": gene, "selSource": "All"}
     try:
         r = await _post_json(mirnet_url, payload)
-        # Typical miRNet response includes a "data" list (rows are dicts)
         rows = r.get("data", []) if isinstance(r, dict) else (r or [])
-        # Normalise minimal fields
         simplified = []
         for it in rows[:limit]:
             simplified.append({
@@ -501,7 +504,6 @@ async def genetics_mirna(
         pass
 
     # Fallback: ENCORI / starBase (TSV)
-    # doc: https://rnasysu.com/encori/tutorialAPI.php
     encori_url = (
         "https://rnasysu.com/encori/api/miRNATarget/"
         f"?assembly=hg38&geneType=mRNA&miRNA=all&clipExpNum=1&degraExpNum=0&pancancerNum=0&programNum=1&program=TargetScan"
@@ -511,7 +513,6 @@ async def genetics_mirna(
         tsv = await _get_text(encori_url)
         lines = [ln for ln in tsv.splitlines() if ln.strip()]
         if not lines or len(lines) == 1:
-            # header only or empty
             return Evidence(
                 status="OK",
                 source="ENCORI/starBase",
@@ -643,14 +644,32 @@ async def assoc_bulk_rna(
             fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"condition": condition, "genes": []},
-            citations=[url],
-            fetched_at=_now(),
+        # Fallback → HPA search with rna_gtex hints
+        hpa = (
+            "https://www.proteinatlas.org/api/search_download.php"
+            f"?format=json&columns=gene,rna_gtex,rna_tissue&search={urllib.parse.quote(condition)}"
         )
+        try:
+            hj = await _get_json(hpa)
+            rows = hj if isinstance(hj, list) else []
+            genes = [{"gene": r.get("gene"), "rna_gtex": r.get("rna_gtex")} for r in rows if r.get("rna_gtex")]
+            return Evidence(
+                status="OK" if genes else "NO_DATA",
+                source="Human Protein Atlas (fallback)",
+                fetched_n=len(genes),
+                data={"condition": condition, "genes": genes[:limit]},
+                citations=[url, hpa],
+                fetched_at=_now(),
+            )
+        except Exception:
+            return Evidence(
+                status="ERROR",
+                source=str(e),
+                fetched_n=0,
+                data={"condition": condition, "genes": []},
+                citations=[url],
+                fetched_at=_now(),
+            )
 
 
 @router.get("/assoc/bulk-prot", response_model=Evidence)
@@ -681,14 +700,28 @@ async def assoc_bulk_prot(
             fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"condition": condition, "proteins": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+        # Fallback → PRIDE project list as a proxy
+        pride = f"https://www.ebi.ac.uk/pride/ws/archive/project/list?keyword={urllib.parse.quote(condition)}"
+        try:
+            pj = await _get_json(pride)
+            items = pj if isinstance(pj, list) else []
+            return Evidence(
+                status="OK" if items else "NO_DATA",
+                source="PRIDE Archive (fallback)",
+                fetched_n=len(items),
+                data={"condition": condition, "proteins": items[:limit]},
+                citations=[url, pride],
+                fetched_at=_now(),
+            )
+        except Exception:
+            return Evidence(
+                status="ERROR",
+                source=str(e),
+                fetched_n=0,
+                data={"condition": condition, "proteins": []},
+                citations=[url],
+                fetched_at=_now(),
+            )
 
 
 # -------------------------- NEW (live) ----------------------------------------
@@ -700,17 +733,12 @@ async def assoc_sc(
 ) -> Evidence:
     """
     Single‑cell signal using Human Protein Atlas search API.
-
-    Practical interpretation with current gateway inputs:
-      * We treat `condition` as a cell type / tissue / disease keyword and
-        use HPA's search endpoint (JSON) to surface rows containing single‑cell
-        fields (`cell_type`, `rna_cell_type`, etc.), then summarise top matching
-        cell types and genes.
+    We treat `condition` as a cell type / tissue / disease keyword and
+    surface rows containing single‑cell fields.
     """
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
-    # HPA search: pull fields that include single‑cell info
     hpa_url = (
         "https://www.proteinatlas.org/api/search_download.php"
         f"?format=json&columns=ensembl,gene,cell_type,rna_cell_type,rna_tissue,rna_gtex&search={urllib.parse.quote(condition)}"
@@ -718,7 +746,6 @@ async def assoc_sc(
     try:
         js = await _get_json(hpa_url)
         rows = js if isinstance(js, list) else []
-        # Consolidate single‑cell-ish signals
         out: List[Dict[str, Any]] = []
         for r in rows:
             if any(k in r and r[k] for k in ("cell_type", "rna_cell_type")):
@@ -756,12 +783,6 @@ async def assoc_perturb(
 ) -> Evidence:
     """
     CRISPR perturbation from BioGRID ORCS REST service.
-
-    Steps:
-      1) List human screens filtered by conditionName containing `condition`
-      2) For first 1–3 screens, fetch significant (hit=yes) gene‑level results
-      3) Return screen metadata + top hits
-
     Requires ORCS access key (free): set env ORCS_ACCESS_KEY.
     """
     _require_key(x_api_key)
@@ -778,7 +799,6 @@ async def assoc_perturb(
             fetched_at=_now(),
         )
 
-    # List candidate screens (organism=9606)
     base = "https://orcsws.thebiogrid.org/screens/"
     list_url = (
         f"{base}?accesskey={urllib.parse.quote(access_key)}&format=json"
@@ -787,10 +807,9 @@ async def assoc_perturb(
     try:
         screens = await _get_json(list_url)
         screens_list = screens if isinstance(screens, list) else []
-        screens_list = screens_list[: min(3, len(screens_list))]  # cap screen fan‑out
+        screens_list = screens_list[: min(3, len(screens_list))]
         hits_collected: List[Dict[str, Any]] = []
 
-        # Fetch top hits for a couple of screens
         for sc in screens_list:
             sc_id = sc.get("SCREEN_ID") or sc.get("ID") or sc.get("SCREENID")
             if not sc_id:
@@ -808,7 +827,6 @@ async def assoc_perturb(
                         "pubmed_id": sc.get("PUBMED_ID"),
                     })
             except Exception:
-                # tolerate per‑screen failures
                 continue
 
         return Evidence(
@@ -832,7 +850,6 @@ async def assoc_perturb(
 
 # -----------------------------------------------------------------------------
 # BUCKET 3 – Expression, Specificity & Localization
-# (kept as in your code)
 # -----------------------------------------------------------------------------
 
 @router.get("/expr/baseline", response_model=Evidence)
@@ -932,14 +949,36 @@ async def expr_localization(
             fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(
-            status="ERROR",
-            source=str(e),
-            fetched_n=0,
-            data={"symbol": symbol, "localization": []},
-            citations=[url],
-            fetched_at=_now(),
+        # Fallback → UniProt subcellular location
+        uni = (
+            "https://rest.uniprot.org/uniprotkb/search?"
+            f"query=gene_exact:{urllib.parse.quote(symbol)}+AND+organism_id:9606"
+            "&fields=cc_subcellular_location&format=json&size=1"
         )
+        try:
+            uj = await _get_json(uni)
+            locs = []
+            for r in (uj.get("results", []) or []):
+                for c in (r.get("comments", []) or []):
+                    if c.get("commentType") == "SUBCELLULAR LOCATION":
+                        locs.append(c)
+            return Evidence(
+                status="OK" if locs else "NO_DATA",
+                source="UniProt (fallback)",
+                fetched_n=len(locs),
+                data={"symbol": symbol, "localization": locs[:limit]},
+                citations=[url, uni],
+                fetched_at=_now(),
+            )
+        except Exception:
+            return Evidence(
+                status="ERROR",
+                source=str(e),
+                fetched_n=0,
+                data={"symbol": symbol, "localization": []},
+                citations=[url],
+                fetched_at=_now(),
+            )
 
 
 @router.get("/expr/inducibility", response_model=Evidence)
@@ -1126,27 +1165,14 @@ async def tract_drugs(
     x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500, description="Maximum number of drug interactions to return"),
 ) -> Evidence:
+    """
+    Known/experimental drugs for a target. OpenTargets first (fast, robust),
+    DGIdb fallback.
+    """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
-    dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(symbol)}"
-    try:
-        body = await _get_json(dg_url)
-        matched = body.get("matchedTerms", []) if isinstance(body, dict) else []
-        interactions: List[Any] = []
-        if matched:
-            for term in matched:
-                interactions.extend(term.get("interactions", []))
-        if interactions:
-            return Evidence(
-                status="OK",
-                source="DGIdb",
-                fetched_n=len(interactions),
-                data={"symbol": symbol, "interactions": interactions[:limit]},
-                citations=[dg_url],
-                fetched_at=_now(),
-            )
-    except Exception:
-        pass
+
+    # 1) OpenTargets knownDrugs (GraphQL)
     gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
     query = {
         "query": """
@@ -1160,6 +1186,7 @@ async def tract_drugs(
                 drugName
                 mechanismOfAction
               }
+              count
             }
           }
         }
@@ -1174,21 +1201,41 @@ async def tract_drugs(
             .get("knownDrugs", {})
             .get("rows", [])
         )
+        if rows:
+            return Evidence(
+                status="OK",
+                source="OpenTargets knownDrugs",
+                fetched_n=len(rows),
+                data={"symbol": symbol, "interactions": rows[:limit]},
+                citations=[gql_url],
+                fetched_at=_now(),
+            )
+    except Exception:
+        pass
+
+    # 2) DGIdb fallback
+    dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(symbol)}"
+    try:
+        body = await _get_json(dg_url)
+        matched = body.get("matchedTerms", []) if isinstance(body, dict) else []
+        interactions: List[Any] = []
+        for term in matched or []:
+            interactions.extend(term.get("interactions", []))
         return Evidence(
-            status="OK",
-            source="OpenTargets knownDrugs",
-            fetched_n=len(rows),
-            data={"symbol": symbol, "interactions": rows[:limit]},
-            citations=[gql_url],
+            status="OK" if interactions else "NO_DATA",
+            source="DGIdb",
+            fetched_n=len(interactions),
+            data={"symbol": symbol, "interactions": interactions[:limit]},
+            citations=[dg_url],
             fetched_at=_now(),
         )
     except Exception as e:
         return Evidence(
             status="ERROR",
-            source=str(e),
+            source=f"DGIdb failed: {e}",
             fetched_n=0,
             data={"symbol": symbol, "interactions": []},
-            citations=[dg_url, gql_url],
+            citations=[gql_url, dg_url],
             fetched_at=_now(),
         )
 
@@ -1268,9 +1315,6 @@ async def tract_ligandability_oligo(
 ) -> Evidence:
     """
     Oligonucleotide ligandability via Ribocentre Aptamer API.
-
-    We query the JSON API with a general search by symbol and filter to entries
-    that mention the symbol in ligand/target fields.
     """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
@@ -1278,7 +1322,6 @@ async def tract_ligandability_oligo(
     api_url = f"https://aptamer.ribocentre.org/api/?search={urllib.parse.quote(symbol)}"
     try:
         js = await _get_json(api_url)
-        # API returns an object; aptamer entries typically under 'results' or 'items'.
         items = (
             js.get("results")
             or js.get("items")
@@ -1286,7 +1329,6 @@ async def tract_ligandability_oligo(
             or js.get("entries")
             or []
         )
-        # Best‑effort filtering
         out = []
         for it in items:
             ligand = (it.get("Ligand") or it.get("Target") or it.get("ligand") or "")
@@ -1331,13 +1373,10 @@ async def tract_modality(
       * COMPARTMENTS: subcellular localisation (extracellular/plasma membrane boosts Ab/oligo)
       * ChEMBL: existing target entries (boosts small‑molecule)
       * PDBe: structural coverage (support for both; indicates tractability)
-
-    Output: scores (0–1), rationale, and raw snippets from sources.
     """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
 
-    # Fetch inputs concurrently
     comp_url = (
         "https://compartments.jensenlab.org/Service"
         f"?gene_names={urllib.parse.quote(symbol)}&format=json"
@@ -1373,42 +1412,36 @@ async def tract_modality(
 
     compres, chemblres, pdberes = await asyncio.gather(_get_comp(), _get_chembl(), _get_pdbe())
 
-    # Scoring heuristics (transparent & simple)
     loc_terms = " ".join([str(x) for x in compres]).lower()
     is_extracellular = any(t in loc_terms for t in ["secreted", "extracellular", "extracellular space"])
     is_membrane = any(t in loc_terms for t in ["plasma membrane", "cell membrane", "membrane"])
     has_chembl = len(chemblres) > 0
     has_structure = len(pdberes) > 0
 
-    # Small molecule: target exists in ChEMBL and not exclusively extracellular domain‑only
     sm_score = 0.0
     if has_chembl:
         sm_score += 0.6
     if has_structure:
         sm_score += 0.25
     if is_extracellular and not is_membrane:
-        sm_score -= 0.15  # penalise pure secreted targets for SM
+        sm_score -= 0.15
 
-    # Antibody: extracellular or membrane localisation + structural support
     ab_score = 0.0
     if is_membrane or is_extracellular:
         ab_score += 0.6
     if has_structure:
         ab_score += 0.25
     if has_chembl and not (is_membrane or is_extracellular):
-        ab_score -= 0.1  # intracellular enzyme with SM precedence
+        ab_score -= 0.1
 
-    # Oligo (ASO/siRNA/aptamer): extracellular secreted or nuclear/cytosolic mRNA abundant
-    # We use localisation proxy; specific aptamer evidence is available via /tract/ligandability-oligo.
     oligo_score = 0.0
     if is_extracellular or "cytosol" in loc_terms or "nucleus" in loc_terms:
         oligo_score += 0.5
     if has_structure:
-        oligo_score += 0.1  # structural info supports targeting knowledge
+        oligo_score += 0.1
     if has_chembl:
-        oligo_score += 0.05  # existence of binders suggests tractable pocket or exploration
+        oligo_score += 0.05
 
-    # Clamp scores
     def clamp(x: float) -> float:
         return max(0.0, min(1.0, round(x, 3)))
 
@@ -1455,15 +1488,10 @@ async def tract_immunogenicity(
 ) -> Evidence:
     """
     Immunogenicity via IEDB IQ‑API (PostgREST).
-
-    We query:
-      * epitope_search filtered by parent_source_antigen_names contains SYMBOL
-      * tcell_search likewise, to pull assay/HLA context
     """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
 
-    # PostgREST "contains" operator: cs.{SYMBOL}
     base = "https://query-api.iedb.org"
     epi_url = f"{base}/epitope_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
     tc_url = f"{base}/tcell_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
@@ -1474,7 +1502,6 @@ async def tract_immunogenicity(
         epi_list = epi if isinstance(epi, list) else []
         tc_list = tc if isinstance(tc, list) else []
 
-        # Minimal summary: count by reported HLA allele if present
         hla_counts: Dict[str, int] = {}
         for r in tc_list:
             allele = r.get("mhc_allele_name") or r.get("assay_mhc_allele_name") or r.get("mhc_name")
@@ -1553,23 +1580,15 @@ async def clin_rwe(
     limit: int = Query(50, ge=1, le=200, description="Maximum number of RWE proxy rows to return"),
 ) -> Evidence:
     """
-    Real‑world evidence proxies from public sources:
-
-      * openFDA FAERS: adverse event reports where MedDRA reaction term == `condition`
-      * ClinicalTrials.gov v2: observational/registry studies matching the condition
-
-    True RWE (claims/EHR) requires licensed datasets; this endpoint exposes
-    open proxies to provide a live signal without proprietary access.
+    Real‑world evidence proxies from public sources (FAERS + Ct.Gov).
     """
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
-    # FAERS events where the reaction term matches condition exactly
     faers_url = (
         "https://api.fda.gov/drug/event.json"
         f"?search=patient.reaction.reactionmeddrapt.exact:%22{urllib.parse.quote(condition)}%22&limit={limit}"
     )
-    # ClinicalTrials.gov observational studies (best-effort filter via query parameters)
     ct_url = (
         "https://clinicaltrials.gov/api/v2/studies"
         f"?query.cond={urllib.parse.quote(condition)}&filter.studyType=Observational&pageSize={min(100, limit)}"
@@ -1581,7 +1600,6 @@ async def clin_rwe(
         faers = await _get_json(faers_url)
         faers_results = faers.get("results", []) if isinstance(faers, dict) else []
     except Exception:
-        # tolerate FAERS outage
         pass
     try:
         js = await _get_json(ct_url)
@@ -1694,7 +1712,8 @@ async def comp_intensity(
             {"patent_abstract": {"_text_any": cond}}
         ]})
     query_str = urllib.parse.quote(json.dumps(query))
-    pat_url = f"https://api.patentsview.org/patents/query?q={query_str}&f=[\"patent_id\"]"
+    fields = urllib.parse.quote(json.dumps(["patent_id"]))
+    pat_url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
     try:
         js = await _get_json(pat_url)
         patents = js.get("patents", []) if isinstance(js, dict) else []
@@ -1739,7 +1758,8 @@ async def comp_freedom(
         {"patent_abstract": {"_text_any": symbol}}
     ]}
     query_str = urllib.parse.quote(json.dumps(query))
-    url = f"https://api.patentsview.org/patents/query?q={query_str}&f=[\"patent_id\"]"
+    fields = urllib.parse.quote(json.dumps(["patent_id"]))
+    url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
     try:
         js = await _get_json(url)
         patents = js.get("patents", []) if isinstance(js, dict) else []
