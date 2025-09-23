@@ -942,6 +942,7 @@ async def tract_drugs(
     validate_symbol(symbol, field_name="symbol")
 
     gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
+    # 1) OpenTargets knownDrugs (GraphQL)
     query = {
         "query": """
         query ($symbol: String!) {
@@ -963,6 +964,28 @@ async def tract_drugs(
     except Exception:
         pass
 
+    # 1b) OpenTargets drug search by target (lighter query)
+    alt_query = {
+        "query": """
+        query ($q: String!) {
+          search(queryString: $q) { drugs { id name } }
+        }""",
+        "variables": {"q": f"target:{symbol}"},
+    }
+    try:
+        res = await _post_json(gql_url, alt_query, tries=1)
+        drugs = (res.get("data", {}).get("search", {}).get("drugs", []) or [])
+        if drugs:
+            rows = [{"drugId": d.get("id"), "drugName": d.get("name"), "mechanismOfAction": None} for d in drugs]
+            return Evidence(
+                status="OK", source="OpenTargets search(drugs) (fallback)", fetched_n=len(rows),
+                data={"symbol": symbol, "interactions": rows[:limit]},
+                citations=[gql_url], fetched_at=_now(),
+            )
+    except Exception:
+        pass
+
+    # 2) DGIdb fallback
     dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(symbol)}"
     try:
         body = await _get_json(dg_url, tries=1)
@@ -1227,10 +1250,32 @@ async def clin_endpoints(
             data={"condition": condition, "studies": studies[:limit]},
             citations=[q], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
-                        data={"condition": condition, "studies": []},
-                        citations=[q], fetched_at=_now())
+    except Exception as e_v2:
+        # Fallback to v1 study_fields API
+        v1 = ("https://clinicaltrials.gov/api/query/study_fields"
+              f"?expr={urllib.parse.quote(condition)}"
+              f"&fields=NCTId,Condition,PrimaryOutcomeMeasure,BriefTitle,StudyType"
+              f"&min_rnk=1&max_rnk={limit}&fmt=json")
+        try:
+            js1 = await _get_json(v1, tries=1)
+            fields = js1.get("StudyFieldsResponse", {}).get("StudyFields", [])
+            return Evidence(
+                status="OK" if fields else "NO_DATA",
+                source="ClinicalTrials.gov v1 study_fields (fallback)",
+                fetched_n=len(fields),
+                data={"condition": condition, "studies": fields[:limit]},
+                citations=[q, v1],
+                fetched_at=_now(),
+            )
+        except Exception:
+            return Evidence(
+                status="ERROR",
+                source=str(e_v2),
+                fetched_n=0,
+                data={"condition": condition, "studies": []},
+                citations=[q],
+                fetched_at=_now(),
+            )
 
 
 @router.get("/clin/rwe", response_model=Evidence)
