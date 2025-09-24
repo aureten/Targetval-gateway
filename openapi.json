@@ -242,6 +242,42 @@
           }
         }
       }
+    },
+    "/aggregate": {
+      "post": {
+        "summary": "Aggregate all evidence modules",
+        "operationId": "aggregate",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "gene": { "type": "string" },
+                  "condition": { "type": "string" },
+                  "efo": { "type": "string" },
+                  "limit": { "type": "integer" }
+                },
+                "required": ["gene", "condition"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Aggregated module results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -290,11 +326,7 @@
       "ValidationError": {
         "title": "ValidationError",
         "type": "object",
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
+        "required": ["loc", "msg", "type"],
         "properties": {
           "loc": {
             "title": "Location",
