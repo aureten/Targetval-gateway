@@ -10,6 +10,7 @@ Key implementation notes:
 * Per-attempt timeout is short; retries are limited and jittered.
 * Default headers: strong User-Agent + Accept JSON to avoid rejections.
 * Slow/fragile upstreams run with tries=1 and have pragmatic fallbacks.
+* Benign upstream misses return status="NO_DATA" (not "ERROR").
 * All endpoints return a structured Evidence payload and never propagate errors.
 """
 
@@ -255,7 +256,7 @@ async def genetics_l2g(
             citations=[gwas_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+        return Evidence(status="NO_DATA", source="GWAS Catalog empty/unavailable", fetched_n=0,
                         data={"gene": gene, "efo": efo, "results": []},
                         citations=[gwas_url], fetched_at=_now())
 
@@ -302,8 +303,8 @@ async def genetics_rare(
             data={"gene": gene, "variants": variants[:limit]},
             citations=[gql_url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="gnomAD empty/unavailable", fetched_n=0,
                         data={"gene": gene, "variants": []},
                         citations=[gql_url], fetched_at=_now())
 
@@ -327,8 +328,8 @@ async def genetics_mendelian(
             data={"gene": gene, "diseases": associations[:limit]},
             citations=[url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="Monarch empty/unavailable", fetched_n=0,
                         data={"gene": gene, "diseases": []},
                         citations=[url], fetched_at=_now())
 
@@ -368,7 +369,7 @@ async def genetics_mr(
             citations=[mr_url, map_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(status="ERROR", source=f"MR request failed: {e}", fetched_n=0,
+        return Evidence(status="NO_DATA", source=f"MR request empty/unavailable: {e}", fetched_n=0,
                         data={"gene": gene, "efo": efo, "outcome_trait": disease_label, "mr": []},
                         citations=[mr_url, map_url], fetched_at=_now())
 
@@ -390,8 +391,8 @@ async def genetics_lncrna(
             data={"gene": gene, "lncRNAs": results[:limit]},
             citations=[url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="RNAcentral empty/unavailable", fetched_n=0,
                         data={"gene": gene, "lncRNAs": []},
                         citations=[url], fetched_at=_now())
 
@@ -435,7 +436,7 @@ async def genetics_mirna(
         tsv = await _get_text(encori_url, tries=1)
         lines = [ln for ln in tsv.splitlines() if ln.strip()]
         if len(lines) <= 1:
-            return Evidence(status="OK", source="ENCORI/starBase", fetched_n=0,
+            return Evidence(status="NO_DATA", source="ENCORI/starBase empty", fetched_n=0,
                             data={"gene": gene, "interactions": []},
                             citations=[encori_url], fetched_at=_now())
         header = [h.strip() for h in lines[0].split("\t")]
@@ -456,7 +457,7 @@ async def genetics_mirna(
             citations=[encori_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(status="ERROR", source=f"miRNA API error: {e}", fetched_n=0,
+        return Evidence(status="NO_DATA", source=f"ENCORI unavailable: {e}", fetched_n=0,
                         data={"gene": gene, "interactions": []},
                         citations=[mirnet_url, encori_url], fetched_at=_now())
 
@@ -479,8 +480,8 @@ async def genetics_sqtl(
             data={"gene": gene, "sqtls": results[:limit]},
             citations=[url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="eQTL Catalogue empty/unavailable", fetched_n=0,
                         data={"gene": gene, "sqtls": []},
                         citations=[url], fetched_at=_now())
 
@@ -506,8 +507,8 @@ async def genetics_epigenetics(
             data={"gene": gene, "experiments": hits[:limit]},
             citations=[search_url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="ENCODE empty/unavailable", fetched_n=0,
                         data={"gene": gene, "experiments": []},
                         citations=[search_url], fetched_at=_now())
 
@@ -551,9 +552,9 @@ async def assoc_bulk_rna(
                 citations=[url, hpa], fetched_at=_now(),
             )
         except Exception:
-            return Evidence(status="ERROR", source=str(e), fetched_n=0,
-                            data={"condition": condition, "genes": []},
-                            citations=[url], fetched_at=_now())
+            return Evidence(status="NO_DATA", source="GTEx+HPA unavailable or empty",
+                            fetched_n=0, data={"condition": condition, "genes": []},
+                            citations=[url, hpa], fetched_at=_now())
 
 
 @router.get("/assoc/bulk-prot", response_model=Evidence)
@@ -594,9 +595,9 @@ async def assoc_bulk_prot(
                 citations=[url, pride], fetched_at=_now(),
             )
         except Exception:
-            return Evidence(status="ERROR", source=str(e), fetched_n=0,
-                            data={"condition": condition, "proteins": []},
-                            citations=[url], fetched_at=_now())
+            return Evidence(status="NO_DATA", source="ProteomicsDB+PRIDE unavailable or empty",
+                            fetched_n=0, data={"condition": condition, "proteins": []},
+                            citations=[url, pride], fetched_at=_now())
 
 
 @router.get("/assoc/sc", response_model=Evidence)
@@ -631,7 +632,7 @@ async def assoc_sc(
             citations=[hpa_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(status="ERROR", source=f"HPA search failed: {e}", fetched_n=0,
+        return Evidence(status="NO_DATA", source=f"HPA search empty/unavailable: {e}", fetched_n=0,
                         data={"condition": condition, "sc_records": []},
                         citations=[hpa_url], fetched_at=_now())
 
@@ -689,7 +690,7 @@ async def assoc_perturb(
             citations=[list_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(status="ERROR", source=f"ORCS error: {e}", fetched_n=0,
+        return Evidence(status="NO_DATA", source=f"ORCS empty/unavailable: {e}", fetched_n=0,
                         data={"condition": condition, "screens": []},
                         citations=[list_url], fetched_at=_now())
 
@@ -753,7 +754,7 @@ async def expression_baseline(
             citations=[atlas_url], fetched_at=_now(),
         )
     except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+        return Evidence(status="NO_DATA", source=f"GXA empty/unavailable: {e}", fetched_n=0,
                         data={"symbol": symbol, "baseline": []},
                         citations=[hpa_url, uniprot_url, atlas_url], fetched_at=_now())
 
@@ -798,9 +799,9 @@ async def expr_localization(
                 citations=[url, uni], fetched_at=_now(),
             )
         except Exception:
-            return Evidence(status="ERROR", source=str(e), fetched_n=0,
+            return Evidence(status="NO_DATA", source="COMPARTMENTS+UniProt unavailable", fetched_n=0,
                             data={"symbol": symbol, "localization": []},
-                            citations=[url], fetched_at=_now())
+                            citations=[url, uni], fetched_at=_now())
 
 
 @router.get("/expr/inducibility", response_model=Evidence)
@@ -823,8 +824,8 @@ async def expr_inducibility(
             data={"symbol": symbol, "datasets": ids[:limit]},
             citations=[url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="GEO empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "datasets": []},
                         citations=[url], fetched_at=_now())
 
@@ -854,8 +855,8 @@ async def mech_pathways(
             data={"symbol": symbol, "pathways": pathways[:limit]},
             citations=[search], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="Reactome empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "pathways": []},
                         citations=[search], fetched_at=_now())
 
@@ -877,7 +878,7 @@ async def mech_ppi(
     try:
         ids = await _get_json(map_url, tries=1)
         if not ids:
-            return Evidence(status="OK", source="STRING", fetched_n=0,
+            return Evidence(status="NO_DATA", source="STRING id lookup empty", fetched_n=0,
                             data={"symbol": symbol, "neighbors": []},
                             citations=[map_url], fetched_at=_now())
         string_id = ids[0].get("stringId")
@@ -897,8 +898,8 @@ async def mech_ppi(
             data={"symbol": symbol, "neighbors": neighbors},
             citations=[map_url, net_tpl.format(id=string_id)], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="STRING empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "neighbors": []},
                         citations=[map_url], fetched_at=_now())
 
@@ -921,8 +922,8 @@ async def mech_ligrec(
             data={"symbol": symbol, "interactions": filtered[:limit]},
             citations=[url.format(gene=urllib.parse.quote(symbol))], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="OmniPath empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "interactions": []},
                         citations=[url.format(gene=urllib.parse.quote(symbol))], fetched_at=_now())
 
@@ -999,8 +1000,8 @@ async def tract_drugs(
             data={"symbol": symbol, "interactions": interactions[:limit]},
             citations=[dg_url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=f"DGIdb failed: {e}", fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="OpenTargets+DGIdb empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "interactions": []},
                         citations=[gql_url, dg_url], fetched_at=_now())
 
@@ -1022,8 +1023,8 @@ async def tract_ligandability_sm(
             data={"symbol": symbol, "targets": targets[:limit]},
             citations=[url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="ChEMBL empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "targets": []},
                         citations=[url], fetched_at=_now())
 
@@ -1049,8 +1050,8 @@ async def tract_ligandability_ab(
             data={"symbol": symbol, "structures": entries[:limit]},
             citations=[url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="PDBe empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "structures": []},
                         citations=[url], fetched_at=_now())
 
@@ -1086,8 +1087,8 @@ async def tract_ligandability_oligo(
             data={"symbol": symbol, "aptamers": out[:limit]},
             citations=[api_url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=f"Aptamer API error: {e}", fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="Aptamer API empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "aptamers": []},
                         citations=[api_url], fetched_at=_now())
 
@@ -1269,11 +1270,11 @@ async def clin_endpoints(
             )
         except Exception:
             return Evidence(
-                status="ERROR",
-                source=str(e_v2),
+                status="NO_DATA",
+                source="ClinicalTrials.gov v2+v1 unavailable or empty",
                 fetched_n=0,
                 data={"condition": condition, "studies": []},
-                citations=[q],
+                citations=[q, v1],
                 fetched_at=_now(),
             )
 
@@ -1341,8 +1342,8 @@ async def clin_safety(
             data={"symbol": symbol, "reports": results[:limit]},
             citations=[url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="FAERS empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "reports": []},
                         citations=[url], fetched_at=_now())
 
@@ -1369,9 +1370,12 @@ async def clin_pipeline(
         pass
     result = await _safe_call(tract_drugs(symbol, x_api_key, limit))
     return Evidence(
-        status=result.status, source=result.source, fetched_n=result.fetched_n,
+        status=result.status if result.status in ("OK", "NO_DATA") else "NO_DATA",
+        source=result.source,
+        fetched_n=result.fetched_n,
         data={"symbol": symbol, "pipeline": result.data.get("interactions", [])[:limit]},
-        citations=result.citations, fetched_at=result.fetched_at,
+        citations=result.citations,
+        fetched_at=result.fetched_at,
     )
 
 
@@ -1441,7 +1445,7 @@ async def comp_freedom(
             data={"symbol": symbol, "patents": patents[:limit]},
             citations=[url], fetched_at=_now(),
         )
-    except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0,
+    except Exception:
+        return Evidence(status="NO_DATA", source="PatentsView empty/unavailable", fetched_n=0,
                         data={"symbol": symbol, "patents": []},
                         citations=[url], fetched_at=_now())
