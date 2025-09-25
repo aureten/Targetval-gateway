@@ -1696,11 +1696,12 @@ async def clin_rwe(
         f"search=(patient.reaction.reactionmeddrapt.exact:%22{urllib.parse.quote(condition)}%22"
         f"+OR+patient.drug.indication.exact:%22{urllib.parse.quote(condition)}%22)&limit={limit}"
     )
-    # CT: keep observational filter for RWE focus
-    ct_url = (
-        "https://clinicaltrials.gov/api/v2/studies"
-        f"?query.cond={urllib.parse.quote(condition)}&filter.studyType=Observational&pageSize={min(100, limit)}"
-    )
+   # CT: include all study types (observational + interventional)
+ct_url = (
+    "https://clinicaltrials.gov/api/v2/studies"
+    f"?query.cond={urllib.parse.quote(condition)}&pageSize={min(100, limit)}"
+)
+ 
 
     async def _faers():
         try:
