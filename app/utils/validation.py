@@ -61,3 +61,37 @@ def validate_condition(condition: Optional[str], field_name: str = "condition") 
             status_code=400,
             detail=f"Invalid {field_name}: value must be a non-empty string",
         )
+def normalize_gene_symbol(
+    symbol: Optional[str] = None,
+    gene: Optional[str] = None,
+    field_name: str = "symbol"
+) -> str:
+    """
+    Normalize gene input, accepting either `symbol` or `gene` as fallback.
+
+    Parameters
+    ----------
+    symbol : Optional[str]
+        Primary symbol field (e.g., used in most modules).
+    gene : Optional[str]
+        Alternate input key, often used in aggregate calls.
+    field_name : str
+        Used in error messages if neither is supplied.
+
+    Returns
+    -------
+    str
+        A normalized non-empty gene symbol string.
+
+    Raises
+    ------
+    HTTPException
+        If both `symbol` and `gene` are None or invalid.
+    """
+    value = symbol or gene
+    if value is None or not isinstance(value, str) or not value.strip():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {field_name}: value must be a non-empty string (gene or symbol)",
+        )
+    return value.strip()
