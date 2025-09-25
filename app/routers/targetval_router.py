@@ -1112,24 +1112,24 @@ async def expr_localization(
             f"query=gene_exact:{urllib.parse.quote(sym_norm)}+AND+organism_id:9606"
             "&fields=cc_subcellular_location&format=json&size=1"
         )
-        try:
-            uj = await _get_json(uni, tries=1)
-            locs = []
-            for r in (uj.get("results", []) or []):
-                for c in (r.get("comments", []) or []):
-                    if c.get("commentType") == "SUBCELLULAR LOCATION":
-                        locs.append(c)
-            return Evidence(
-                status="OK" if locs else "NO_DATA", source="UniProt (fallback)", fetched_n=len(locs),
-                data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": locs[:limit]},
-                citations=[url, uni], fetched_at=_now(),
-            )
-        except Exception:
-            return Evidence(
-                status="NO_DATA", source="COMPARTMENTS+UniProt unavailable", fetched_n=0,
-                data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": []},
-                citations=[url, uni], fetched_at=_now(),
-            )
+    try:
+        uj = await _get_json(uni, tries=1)
+        locs = []
+        for r in (uj.get("results", []) or []):
+            for c in (r.get("comments", []) or []):
+                if c.get("commentType") == "SUBCELLULAR LOCATION":
+                    locs.append(c)
+        return Evidence(
+            status="OK" if locs else "NO_DATA", source="UniProt (fallback)", fetched_n=len(locs),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": locs[:limit]},
+            citations=[url, uni], fetched_at=_now(),
+        )
+    except Exception:
+        return Evidence(
+            status="NO_DATA", source="COMPARTMENTS+UniProt unavailable", fetched_n=0,
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": []},
+            citations=[url, uni], fetched_at=_now(),
+        )
 
 
 @router.get("/expr/inducibility", response_model=Evidence)
@@ -1669,7 +1669,7 @@ async def clin_rwe(
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     """
-    RWE proxies: FAERS (openFDA) + ClinicalTrials.gov observational.
+    RWE proxies: FAERS (openFDA) + ClinicalTrials.gov.
     Both fetched concurrently with bounded retries.
     If input appears to be a gene symbol, either expand a known condition alias or return clean NO_DATA.
     """
@@ -1696,12 +1696,11 @@ async def clin_rwe(
         f"search=(patient.reaction.reactionmeddrapt.exact:%22{urllib.parse.quote(condition)}%22"
         f"+OR+patient.drug.indication.exact:%22{urllib.parse.quote(condition)}%22)&limit={limit}"
     )
-   # CT: include all study types (observational + interventional)
-ct_url = (
-    "https://clinicaltrials.gov/api/v2/studies"
-    f"?query.cond={urllib.parse.quote(condition)}&pageSize={min(100, limit)}"
-)
- 
+    # CT: include all study types (observational + interventional)
+    ct_url = (
+        "https://clinicaltrials.gov/api/v2/studies"
+        f"?query.cond={urllib.parse.quote(condition)}&pageSize={min(100, limit)}"
+    )
 
     async def _faers():
         try:
