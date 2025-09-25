@@ -22,6 +22,8 @@ import os
 import random
 import time
 import urllib.parse
+import gzip
+import io
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -91,7 +93,8 @@ async def _get_json(
     tries: int = OUTBOUND_TRIES,
     headers: Optional[Dict[str, str]] = None
 ) -> Any:
-    """HTTP GET → JSON with cache, bounded total time, limited retries, jittered backoff."""
+    """HTTP GET → JSON with cache, bounded total time, limited retries, jittered backoff.
+       More robust to content-encoding: attempts gzip decode if JSON parse fails."""
     cached = CACHE.get(url)
     if cached and (_now() - cached.get("timestamp", 0) < CACHE_TTL):
         return cached["data"]
@@ -113,7 +116,20 @@ async def _get_json(
                         await asyncio.sleep(backoff)
                         continue
                     resp.raise_for_status()
-                    data = resp.json()
+
+                    # Primary: try JSON directly
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        # Fallback: attempt to gunzip + json if server mislabels content-type
+                        try:
+                            buf = io.BytesIO(resp.content)
+                            with gzip.GzipFile(fileobj=buf) as gz:
+                                data = json.loads(gz.read().decode("utf-8"))
+                        except Exception as ge:
+                            last_err = ge
+                            raise
+
                     CACHE[url] = {"data": data, "timestamp": _now()}
                     return data
                 except Exception as e:
@@ -197,7 +213,7 @@ async def _safe_call(coro):
 
 
 # -----------------------------------------------------------------------------
-# Helpers for EFO resolution, filtering, structural hints, immunogenicity
+# Helpers for EFO resolution, identifiers, and simple heuristics
 # -----------------------------------------------------------------------------
 
 async def _resolve_efo(efo_id: str) -> Tuple[str, str, str, str]:
@@ -305,6 +321,83 @@ async def _iedb_counts(symbol: str, limit: int = 25) -> Tuple[int, int]:
     except Exception:
         pass
     return epi_n, tc_n
+
+
+# --- Identifier normalization & heuristics -----------------------------------
+
+# Minimal alias coverage for common cases; extend as needed
+_ALIAS_GENE_MAP: Dict[str, str] = {
+    "CB1": "CNR1",
+    "CB-1": "CNR1",
+    "CNR-1": "CNR1",
+    "TGFR2": "TGFBR2",
+}
+_COMMON_GENE_SET = {"CNR1", "IL6", "TGFBR2", "FAP"} | set(_ALIAS_GENE_MAP.keys()) | set(_ALIAS_GENE_MAP.values())
+
+_CONDITION_ALIAS_MAP: Dict[str, str] = {
+    # Ambiguous acronyms handled as diseases when explicitly intended
+    "FAP": "Familial adenomatous polyposis",
+    # Add more as needed, e.g., "COPD": "Chronic obstructive pulmonary disease"
+}
+
+def _looks_like_gene_token(s: str) -> bool:
+    """Heuristic: short uppercase token with no spaces; in known sets or alnum with digits."""
+    if not s:
+        return False
+    tok = s.strip()
+    if " " in tok:
+        return False
+    up = tok.upper()
+    if up in _COMMON_GENE_SET:
+        return True
+    # simple shape heuristics: 2-12 chars, alnum, often with a digit (e.g., IL6)
+    if 2 <= len(up) <= 12 and up.replace("-", "").isalnum():
+        if any(c.isdigit() for c in up) or up.isalpha():
+            return True
+    return False
+
+def _expand_condition_alias(cond: str) -> str:
+    up = (cond or "").strip().upper()
+    return _CONDITION_ALIAS_MAP.get(up, cond)
+
+async def _normalize_symbol(symbol: str) -> str:
+    """
+    Normalize gene 'symbol' to an official HGNC-like symbol when possible.
+    Fast path via alias map; slow path via UniProt gene field if needed.
+    """
+    if not symbol:
+        return symbol
+    up = symbol.strip().upper()
+    if up in _ALIAS_GENE_MAP:
+        return _ALIAS_GENE_MAP[up]
+    if up in _COMMON_GENE_SET:
+        return up
+
+    # Try UniProt: look for gene field to capture canonical geneName
+    url = (
+        "https://rest.uniprot.org/uniprotkb/search?"
+        f"query={urllib.parse.quote(symbol)}+AND+organism_id:9606&fields=genes&format=json&size=1"
+    )
+    try:
+        js = await _get_json(url, tries=1)
+        res = js.get("results", []) if isinstance(js, dict) else []
+        if res:
+            genes = res[0].get("genes") or []
+            # Prefer primary geneName if present
+            for g in genes:
+                gn = g.get("geneName", {}).get("value")
+                if gn:
+                    return gn.upper()
+            # Fallback: any synonym
+            for g in genes:
+                syns = g.get("synonyms") or []
+                for syn in syns:
+                    val = syn.get("value")
+                    if val:
+                        return val.upper()
+    except Exception:
+        pass
+    return up
 
 
 # -----------------------------------------------------------------------------
@@ -431,7 +524,7 @@ async def genetics_rare(
         js = await _get_json(clinvar_url, tries=1)
         ids = js.get("esearchresult", {}).get("idlist", [])
         return Evidence(
-            status="OK", source="ClinVar E-utilities", fetched_n=len(ids),
+            status="OK" if ids else "NO_DATA", source="ClinVar E-utilities", fetched_n=len(ids),
             data={"gene": gene, "variants": ids[:limit]},
             citations=[clinvar_url], fetched_at=_now(),
         )
@@ -452,7 +545,7 @@ async def genetics_rare(
         body = await _post_json(gql_url, query, tries=1)
         variants = (body.get("data", {}).get("gene", {}).get("variants", []) or [])
         return Evidence(
-            status="OK", source="gnomAD GraphQL", fetched_n=len(variants),
+            status="OK" if variants else "NO_DATA", source="gnomAD GraphQL", fetched_n=len(variants),
             data={"gene": gene, "variants": variants[:limit]},
             citations=[gql_url], fetched_at=_now(),
         )
@@ -561,7 +654,7 @@ async def genetics_lncrna(
         js = await _get_json(url, tries=1)
         results = js.get("results", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="RNAcentral", fetched_n=len(results),
+            status="OK" if results else "NO_DATA", source="RNAcentral", fetched_n=len(results),
             data={"gene": gene, "lncRNAs": results[:limit]},
             citations=[url], fetched_at=_now(),
         )
@@ -587,18 +680,19 @@ async def genetics_mirna(
     try:
         r = await _post_json(mirnet_url, payload, tries=1)
         rows = r.get("data", []) if isinstance(r, dict) else (r or [])
-        simplified = [{
-            "miRNA": it.get("miRNA") or it.get("mirna") or it.get("ID"),
-            "target": it.get("Target") or it.get("Gene") or gene,
-            "evidence": it.get("Category") or it.get("Evidence") or it.get("Source"),
-            "pmid": it.get("PMID") or it.get("PubMedID"),
-            "source_db": it.get("Source") or "miRNet"
-        } for it in rows[:limit]]
-        return Evidence(
-            status="OK", source="miRNet 2.0", fetched_n=len(rows),
-            data={"gene": gene, "interactions": simplified},
-            citations=[mirnet_url], fetched_at=_now(),
-        )
+        if rows:
+            simplified = [{
+                "miRNA": it.get("miRNA") or it.get("mirna") or it.get("ID"),
+                "target": it.get("Target") or it.get("Gene") or gene,
+                "evidence": it.get("Category") or it.get("Evidence") or it.get("Source"),
+                "pmid": it.get("PMID") or it.get("PubMedID"),
+                "source_db": it.get("Source") or "miRNet"
+            } for it in rows[:limit]]
+            return Evidence(
+                status="OK", source="miRNet 2.0", fetched_n=len(rows),
+                data={"gene": gene, "interactions": simplified},
+                citations=[mirnet_url], fetched_at=_now(),
+            )
     except Exception:
         pass
 
@@ -654,7 +748,7 @@ async def genetics_sqtl(
         js = await _get_json(url, tries=1)
         results = js.get("sqtls", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="eQTL Catalogue", fetched_n=len(results),
+            status="OK" if results else "NO_DATA", source="eQTL Catalogue", fetched_n=len(results),
             data={"gene": gene, "efo_id": efo_id or None, "sqtls": results[:limit]},
             citations=[url], fetched_at=_now(),
         )
@@ -684,7 +778,7 @@ async def genetics_epigenetics(
         js = await _get_json(search_url, tries=1)
         hits = js.get("@graph", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="ENCODE Search API", fetched_n=len(hits),
+            status="OK" if hits else "NO_DATA", source="ENCODE Search API", fetched_n=len(hits),
             data={"gene": gene, "efo_id": efo_id or None, "experiments": hits[:limit]},
             citations=[search_url], fetched_at=_now(),
         )
@@ -714,7 +808,7 @@ async def assoc_bulk_rna(
         js = await _get_json(url, tries=1)
         genes = js.get("genes", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="GTEx genesByTissue", fetched_n=len(genes),
+            status="OK" if genes else "NO_DATA", source="GTEx genesByTissue", fetched_n=len(genes),
             data={"condition": condition, "genes": genes[:limit]},
             citations=[url], fetched_at=_now(),
         )
@@ -764,7 +858,7 @@ async def assoc_bulk_prot(
         elif isinstance(js, list):
             records = js
         return Evidence(
-            status="OK", source="ProteomicsDB proteins search", fetched_n=len(records),
+            status="OK" if records else "NO_DATA", source="ProteomicsDB proteins search", fetched_n=len(records),
             data={"condition": condition, "proteins": records[:limit]},
             citations=[url], fetched_at=_now(),
         )
@@ -795,13 +889,20 @@ async def assoc_sc(
     x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """Single‑cell signal using Human Protein Atlas search API."""
+    """Single‑cell signal using Human Protein Atlas search API.
+       Accepts either a disease term or a gene-like token; if gene-like, normalizes and searches by gene."""
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
+    search_term = condition
+    normalized_symbol: Optional[str] = None
+    if _looks_like_gene_token(condition):
+        normalized_symbol = await _normalize_symbol(condition)
+        search_term = normalized_symbol
+
     hpa_url = (
         "https://www.proteinatlas.org/api/search_download.php"
-        f"?format=json&columns=ensembl,gene,cell_type,rna_cell_type,rna_tissue,rna_gtex&search={urllib.parse.quote(condition)}"
+        f"?format=json&columns=ensembl,gene,cell_type,rna_cell_type,rna_tissue,rna_gtex&search={urllib.parse.quote(search_term)}"
     )
     try:
         js = await _get_json(hpa_url, tries=1)
@@ -815,15 +916,22 @@ async def assoc_sc(
                     "rna_gtex": r.get("rna_gtex"),
                     "tissue": r.get("rna_tissue"),
                 })
+        status = "OK" if out else "NO_DATA"
+        payload = {"condition": condition, "sc_records": out[:limit]}
+        if normalized_symbol:
+            payload["normalized_symbol"] = normalized_symbol
         return Evidence(
-            status="OK", source="Human Protein Atlas (search_download)", fetched_n=len(out),
-            data={"condition": condition, "sc_records": out[:limit]},
+            status=status, source="Human Protein Atlas (search_download)", fetched_n=len(out),
+            data=payload,
             citations=[hpa_url], fetched_at=_now(),
         )
     except Exception as e:
+        payload = {"condition": condition, "sc_records": []}
+        if normalized_symbol:
+            payload["normalized_symbol"] = normalized_symbol
         return Evidence(
             status="NO_DATA", source=f"HPA search empty/unavailable: {e}", fetched_n=0,
-            data={"condition": condition, "sc_records": []},
+            data=payload,
             citations=[hpa_url], fetched_at=_now(),
         )
 
@@ -834,9 +942,21 @@ async def assoc_perturb(
     x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """CRISPR perturbation from BioGRID ORCS REST (requires ORCS_ACCESS_KEY)."""
+    """CRISPR perturbation from BioGRID ORCS REST (requires ORCS_ACCESS_KEY).
+       Skips gracefully if input appears to be a gene symbol rather than a condition."""
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
+
+    # If input looks like a gene symbol, do not query ORCS with a gene term; return clean NO_DATA
+    if _looks_like_gene_token(condition):
+        return Evidence(
+            status="NO_DATA",
+            source="assoc_perturb expects a disease/phenotype; input appears to be a gene symbol",
+            fetched_n=0,
+            data={"condition": condition, "screens": []},
+            citations=["https://orcsws.thebiogrid.org/"],
+            fetched_at=_now(),
+        )
 
     access_key = os.getenv("ORCS_ACCESS_KEY")
     if not access_key:
@@ -877,7 +997,7 @@ async def assoc_perturb(
                 continue
 
         return Evidence(
-            status="OK", source="BioGRID ORCS REST", fetched_n=len(hits_collected),
+            status="OK" if hits_collected else "NO_DATA", source="BioGRID ORCS REST", fetched_n=len(hits_collected),
             data={"condition": condition, "screens_n": len(screens_list), "hits": hits_collected[:limit]},
             citations=[list_url], fetched_at=_now(),
         )
@@ -895,17 +1015,22 @@ async def assoc_perturb(
 
 @router.get("/expr/baseline", response_model=Evidence)
 async def expression_baseline(
-    symbol: str,
+    symbol: Optional[str] = Query(None),
+    gene: Optional[str] = Query(None),  # accept both ?symbol= and ?gene=
     x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=500),
 ) -> Evidence:
+    """Baseline expression via HPA → UniProt → Expression Atlas.
+       Accepts both 'symbol' and 'gene' query parameters; normalizes aliases (e.g., CB1→CNR1)."""
     _require_key(x_api_key)
-    validate_symbol(symbol, field_name="symbol")
+    sym_in = symbol or gene
+    validate_symbol(sym_in, field_name="symbol")
+    sym_norm = await _normalize_symbol(sym_in)
 
-    # HPA → UniProt → GXA (UniProt is usually faster than GXA)
+    # 1) HPA
     hpa_url = (
         "https://www.proteinatlas.org/api/search_download.php"
-        f"?format=json&columns=ensembl,gene,cell_type,rna_cell_type,rna_tissue,rna_gtex&search={urllib.parse.quote(symbol)}"
+        f"?format=json&columns=ensembl,gene,cell_type,rna_cell_type,rna_tissue,rna_gtex&search={urllib.parse.quote(sym_norm)}"
     )
     try:
         js = await _get_json(hpa_url, tries=1)
@@ -913,15 +1038,16 @@ async def expression_baseline(
         if records:
             return Evidence(
                 status="OK", source="Human Protein Atlas search_download", fetched_n=len(records),
-                data={"symbol": symbol, "baseline": records[:limit]},
+                data={"symbol": sym_in, "normalized_symbol": sym_norm, "baseline": records[:limit]},
                 citations=[hpa_url], fetched_at=_now(),
             )
     except Exception:
         pass
 
+    # 2) UniProt (less specific, but quick presence / basic info)
     uniprot_url = (
         "https://rest.uniprot.org/uniprotkb/search?"
-        f"query={urllib.parse.quote(symbol)}&format=json&size={limit}"
+        f"query={urllib.parse.quote(sym_norm)}&format=json&size={limit}"
     )
     try:
         body = await _get_json(uniprot_url, tries=1)
@@ -929,13 +1055,14 @@ async def expression_baseline(
         if entries:
             return Evidence(
                 status="OK", source="UniProt search", fetched_n=len(entries),
-                data={"symbol": symbol, "baseline": entries[:limit]},
+                data={"symbol": sym_in, "normalized_symbol": sym_norm, "baseline": entries[:limit]},
                 citations=[uniprot_url], fetched_at=_now(),
             )
     except Exception:
         pass
 
-    atlas_url = f"https://www.ebi.ac.uk/gxa/genes/{urllib.parse.quote(symbol)}.json"
+    # 3) Expression Atlas
+    atlas_url = f"https://www.ebi.ac.uk/gxa/genes/{urllib.parse.quote(sym_norm)}.json"
     try:
         body = await _get_json(atlas_url, tries=1)
         results: List[Dict[str, Any]] = []
@@ -948,13 +1075,13 @@ async def expression_baseline(
                     })
         return Evidence(
             status="OK" if results else "NO_DATA", source="Expression Atlas (baseline)", fetched_n=len(results),
-            data={"symbol": symbol, "baseline": results[:limit]},
+            data={"symbol": sym_in, "normalized_symbol": sym_norm, "baseline": results[:limit]},
             citations=[atlas_url], fetched_at=_now(),
         )
     except Exception as e:
         return Evidence(
             status="NO_DATA", source=f"GXA empty/unavailable: {e}", fetched_n=0,
-            data={"symbol": symbol, "baseline": []},
+            data={"symbol": sym_in, "normalized_symbol": sym_norm, "baseline": []},
             citations=[hpa_url, uniprot_url, atlas_url], fetched_at=_now(),
         )
 
@@ -968,20 +1095,21 @@ async def expr_localization(
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
 
-    url = f"https://compartments.jensenlab.org/Service?gene_names={urllib.parse.quote(symbol)}&format=json"
+    sym_norm = await _normalize_symbol(symbol)
+    url = f"https://compartments.jensenlab.org/Service?gene_names={urllib.parse.quote(sym_norm)}&format=json"
     try:
         js = await _get_json(url, tries=1)
-        locs = js.get(symbol, []) if isinstance(js, dict) else []
+        locs = js.get(sym_norm, []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="COMPARTMENTS API", fetched_n=len(locs),
-            data={"symbol": symbol, "localization": locs[:limit]},
+            status="OK" if locs else "NO_DATA", source="COMPARTMENTS API", fetched_n=len(locs),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": locs[:limit]},
             citations=[url], fetched_at=_now(),
         )
     except Exception:
         # Fallback → UniProt subcellular location
         uni = (
             "https://rest.uniprot.org/uniprotkb/search?"
-            f"query=gene_exact:{urllib.parse.quote(symbol)}+AND+organism_id:9606"
+            f"query=gene_exact:{urllib.parse.quote(sym_norm)}+AND+organism_id:9606"
             "&fields=cc_subcellular_location&format=json&size=1"
         )
         try:
@@ -993,13 +1121,13 @@ async def expr_localization(
                         locs.append(c)
             return Evidence(
                 status="OK" if locs else "NO_DATA", source="UniProt (fallback)", fetched_n=len(locs),
-                data={"symbol": symbol, "localization": locs[:limit]},
+                data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": locs[:limit]},
                 citations=[url, uni], fetched_at=_now(),
             )
         except Exception:
             return Evidence(
                 status="NO_DATA", source="COMPARTMENTS+UniProt unavailable", fetched_n=0,
-                data={"symbol": symbol, "localization": []},
+                data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": []},
                 citations=[url, uni], fetched_at=_now(),
             )
 
@@ -1012,23 +1140,24 @@ async def expr_inducibility(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
     url = (
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-        f"?db=gds&term={urllib.parse.quote(symbol)}%5Bgene%5D&retmode=json"
+        f"?db=gds&term={urllib.parse.quote(sym_norm)}%5Bgene%5D&retmode=json"
     )
     try:
         js = await _get_json(url, tries=1)
         ids = js.get("esearchresult", {}).get("idlist", [])
         return Evidence(
-            status="OK", source="GEO E-utilities", fetched_n=len(ids),
-            data={"symbol": symbol, "datasets": ids[:limit]},
+            status="OK" if ids else "NO_DATA", source="GEO E-utilities", fetched_n=len(ids),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "datasets": ids[:limit]},
             citations=[url], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="GEO empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "datasets": []},
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "datasets": []},
             citations=[url], fetched_at=_now(),
         )
 
@@ -1045,8 +1174,9 @@ async def mech_pathways(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
-    search = f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(symbol)}&species=Homo%20sapiens"
+    search = f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(sym_norm)}&species=Homo%20sapiens"
     try:
         js = await _get_json(search, tries=1)
         hits = js.get("results", []) if isinstance(js, dict) else []
@@ -1055,14 +1185,14 @@ async def mech_pathways(
             if "Pathway" in (h.get("species") or "") or (h.get("stId", "") or "").startswith("R-HSA"):
                 pathways.append({"name": h.get("name"), "stId": h.get("stId"), "score": h.get("score")})
         return Evidence(
-            status="OK", source="Reactome ContentService", fetched_n=len(pathways),
-            data={"symbol": symbol, "pathways": pathways[:limit]},
+            status="OK" if pathways else "NO_DATA", source="Reactome ContentService", fetched_n=len(pathways),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "pathways": pathways[:limit]},
             citations=[search], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="Reactome empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "pathways": []},
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "pathways": []},
             citations=[search], fetched_at=_now(),
         )
 
@@ -1076,9 +1206,10 @@ async def mech_ppi(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
     map_url = "https://string-db.org/api/json/get_string_ids?identifiers={id}&species=9606".format(
-        id=urllib.parse.quote(symbol)
+        id=urllib.parse.quote(sym_norm)
     )
     net_tpl = "https://string-db.org/api/json/network?identifiers={id}&species=9606"
     try:
@@ -1086,7 +1217,7 @@ async def mech_ppi(
         if not ids:
             return Evidence(
                 status="NO_DATA", source="STRING id lookup empty", fetched_n=0,
-                data={"symbol": symbol, "neighbors": []}, citations=[map_url], fetched_at=_now()
+                data={"symbol": symbol, "normalized_symbol": sym_norm, "neighbors": []}, citations=[map_url], fetched_at=_now()
             )
         string_id = ids[0].get("stringId")
         net = await _get_json(net_tpl.format(id=string_id), tries=1)
@@ -1101,14 +1232,14 @@ async def mech_ppi(
                 })
         neighbors = neighbors[:limit]
         return Evidence(
-            status="OK", source="STRING REST", fetched_n=len(neighbors),
-            data={"symbol": symbol, "neighbors": neighbors},
+            status="OK" if neighbors else "NO_DATA", source="STRING REST", fetched_n=len(neighbors),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "neighbors": neighbors},
             citations=[map_url, net_tpl.format(id=string_id)], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="STRING empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "neighbors": []},
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "neighbors": []},
             citations=[map_url], fetched_at=_now(),
         )
 
@@ -1121,22 +1252,23 @@ async def mech_ligrec(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
     url = "https://omnipathdb.org/interactions?format=json&genes={gene}&substrate_only=false"
     try:
-        js = await _get_json(url.format(gene=urllib.parse.quote(symbol)), tries=1)
+        js = await _get_json(url.format(gene=urllib.parse.quote(sym_norm)), tries=1)
         interactions = js if isinstance(js, list) else []
-        filtered = [i for i in interactions if symbol in (i.get("source", ""), i.get("target", ""))]
+        filtered = [i for i in interactions if sym_norm in (i.get("source", ""), i.get("target", ""))]
         return Evidence(
-            status="OK", source="OmniPath interactions", fetched_n=len(filtered),
-            data={"symbol": symbol, "interactions": filtered[:limit]},
-            citations=[url.format(gene=urllib.parse.quote(symbol))], fetched_at=_now(),
+            status="OK" if filtered else "NO_DATA", source="OmniPath interactions", fetched_n=len(filtered),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": filtered[:limit]},
+            citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="OmniPath empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "interactions": []},
-            citations=[url.format(gene=urllib.parse.quote(symbol))], fetched_at=_now(),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": []},
+            citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now(),
         )
 
 
@@ -1153,6 +1285,7 @@ async def tract_drugs(
     """Known/experimental drugs for a target. OpenTargets first; DGIdb fallback."""
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
     gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
 
@@ -1164,7 +1297,7 @@ async def tract_drugs(
                 knownDrugs { rows { drugId drugName mechanismOfAction } count }
               }
             }""",
-        "variables": {"symbol": symbol},
+        "variables": {"symbol": sym_norm},
     }
     try:
         res = await _post_json(gql_url, query, tries=1)
@@ -1172,14 +1305,14 @@ async def tract_drugs(
         if rows:
             return Evidence(
                 status="OK", source="OpenTargets knownDrugs", fetched_n=len(rows),
-                data={"symbol": symbol, "interactions": rows[:limit]},
+                data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": rows[:limit]},
                 citations=[gql_url], fetched_at=_now(),
             )
     except Exception:
         pass
 
     # 2) DGIdb fallback
-    dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(symbol)}"
+    dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(sym_norm)}"
     try:
         body = await _get_json(dg_url, tries=1)
         matched = body.get("matchedTerms", []) if isinstance(body, dict) else []
@@ -1188,13 +1321,13 @@ async def tract_drugs(
             interactions.extend(term.get("interactions", []))
         return Evidence(
             status="OK" if interactions else "NO_DATA", source="DGIdb", fetched_n=len(interactions),
-            data={"symbol": symbol, "interactions": interactions[:limit]},
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": interactions[:limit]},
             citations=[dg_url], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="OpenTargets+DGIdb empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "interactions": []}, citations=[gql_url, dg_url], fetched_at=_now()
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": []}, citations=[gql_url, dg_url], fetched_at=_now()
         )
 
 
@@ -1206,19 +1339,21 @@ async def tract_ligandability_sm(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
-    url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(symbol)}&format=json"
+    sym_norm = await _normalize_symbol(symbol)
+
+    url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(sym_norm)}&format=json"
     try:
         js = await _get_json(url, tries=1)
         targets = js.get("targets", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="ChEMBL target search", fetched_n=len(targets),
-            data={"symbol": symbol, "targets": targets[:limit]},
+            status="OK" if targets else "NO_DATA", source="ChEMBL target search", fetched_n=len(targets),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": targets[:limit]},
             citations=[url], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="ChEMBL empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "targets": []},
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": []},
             citations=[url], fetched_at=_now(),
         )
 
@@ -1231,7 +1366,9 @@ async def tract_ligandability_ab(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
-    url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(symbol)}"
+    sym_norm = await _normalize_symbol(symbol)
+
+    url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(sym_norm)}"
     try:
         js = await _get_json(url, tries=1)
         entries: List[Any] = []
@@ -1240,14 +1377,14 @@ async def tract_ligandability_ab(
                 if isinstance(vals, list):
                     entries.extend(vals)
         return Evidence(
-            status="OK", source="PDBe proteins API", fetched_n=len(entries),
-            data={"symbol": symbol, "structures": entries[:limit]},
+            status="OK" if entries else "NO_DATA", source="PDBe proteins API", fetched_n=len(entries),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "structures": entries[:limit]},
             citations=[url], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="PDBe empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "structures": []},
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "structures": []},
             citations=[url], fetched_at=_now(),
         )
 
@@ -1261,15 +1398,16 @@ async def tract_ligandability_oligo(
     """Oligonucleotide ligandability via Ribocentre Aptamer API."""
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
-    api_url = f"https://aptamer.ribocentre.org/api/?search={urllib.parse.quote(symbol)}"
+    api_url = f"https://aptamer.ribocentre.org/api/?search={urllib.parse.quote(sym_norm)}"
     try:
         js = await _get_json(api_url, tries=1)
         items = js.get("results") or js.get("items") or js.get("data") or js.get("entries") or []
         out = []
         for it in items:
             ligand = (it.get("Ligand") or it.get("Target") or it.get("ligand") or "")
-            if isinstance(ligand, str) and symbol.lower() in ligand.lower():
+            if isinstance(ligand, str) and sym_norm.lower() in ligand.lower():
                 out.append({
                     "id": it.get("id") or it.get("Name") or it.get("Sequence Name") or it.get("name"),
                     "ligand": ligand,
@@ -1279,14 +1417,14 @@ async def tract_ligandability_oligo(
                     "ref": it.get("Article name") or it.get("reference"),
                 })
         return Evidence(
-            status="OK", source="Ribocentre Aptamer API", fetched_n=len(out),
-            data={"symbol": symbol, "aptamers": out[:limit]},
+            status="OK" if out else "NO_DATA", source="Ribocentre Aptamer API", fetched_n=len(out),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": out[:limit]},
             citations=[api_url], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="Aptamer API empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "aptamers": []},
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": []},
             citations=[api_url], fetched_at=_now(),
         )
 
@@ -1315,15 +1453,16 @@ async def tract_modality(
     """
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
-    comp_url = f"https://compartments.jensenlab.org/Service?gene_names={urllib.parse.quote(symbol)}&format=json"
-    chembl_url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(symbol)}&format=json"
-    pdbe_url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(symbol)}"
+    comp_url = f"https://compartments.jensenlab.org/Service?gene_names={urllib.parse.quote(sym_norm)}&format=json"
+    chembl_url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(sym_norm)}&format=json"
+    pdbe_url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(sym_norm)}"
 
     async def _get_comp():
         try:
             js = await _get_json(comp_url, tries=1)
-            return js.get(symbol, []) if isinstance(js, dict) else []
+            return js.get(sym_norm, []) if isinstance(js, dict) else []
         except Exception:
             return []
 
@@ -1356,9 +1495,9 @@ async def tract_modality(
     has_structure = len(pdberes) > 0
 
     # Extra features: extracellular domain length and immunogenicity counts
-    accession = await _uniprot_primary_accession(symbol)
+    accession = await _uniprot_primary_accession(sym_norm)
     extracellular_len = await _extracellular_len_from_uniprot(accession) if accession else 0
-    epi_n, tc_n = await _iedb_counts(symbol, limit=25)
+    epi_n, tc_n = await _iedb_counts(sym_norm, limit=25)
     immunogenicity_signal = min((epi_n + tc_n) / 50.0, 0.20)  # cap contribution at +0.20
 
     # Scoring (bounded and explainable); start from priors and nudge with evidence
@@ -1397,6 +1536,7 @@ async def tract_modality(
         fetched_n=len(recommendation),
         data={
             "symbol": symbol,
+            "normalized_symbol": sym_norm,
             "recommendation": recommendation,
             "rationale": {
                 "priors": {"sm": prior_sm, "ab": prior_ab, "oligo": prior_oligo},
@@ -1431,10 +1571,11 @@ async def tract_immunogenicity(
     """Immunogenicity via IEDB IQ‑API (epitope_search + tcell_search)."""
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
     base = "https://query-api.iedb.org"
-    epi_url = f"{base}/epitope_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
-    tc_url = f"{base}/tcell_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
+    epi_url = f"{base}/epitope_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(sym_norm)}%7D&limit={limit}"
+    tc_url = f"{base}/tcell_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(sym_norm)}%7D&limit={limit}"
 
     async def _epi():
         try:
@@ -1457,10 +1598,13 @@ async def tract_immunogenicity(
         if allele:
             hla_counts[allele] = hla_counts.get(allele, 0) + 1
 
+    total = len(epi_list) + len(tc_list)
+    status = "OK" if total > 0 else "NO_DATA"
     return Evidence(
-        status="OK", source="IEDB IQ‑API", fetched_n=len(epi_list) + len(tc_list),
+        status=status, source="IEDB IQ‑API", fetched_n=total,
         data={
             "symbol": symbol,
+            "normalized_symbol": sym_norm,
             "epitopes_n": len(epi_list),
             "tcell_assays_n": len(tc_list),
             "hla_breakdown": sorted([[k, v] for k, v in hla_counts.items()], key=lambda kv: kv[1], reverse=True)[:25],
@@ -1489,7 +1633,7 @@ async def clin_endpoints(
         js = await _get_json(q, tries=1)
         studies = js.get("studies", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="ClinicalTrials.gov v2", fetched_n=len(studies),
+            status="OK" if studies else "NO_DATA", source="ClinicalTrials.gov v2", fetched_n=len(studies),
             data={"condition": condition, "studies": studies[:limit]},
             citations=[q], fetched_at=_now(),
         )
@@ -1527,14 +1671,32 @@ async def clin_rwe(
     """
     RWE proxies: FAERS (openFDA) + ClinicalTrials.gov observational.
     Both fetched concurrently with bounded retries.
+    If input appears to be a gene symbol, either expand a known condition alias or return clean NO_DATA.
     """
     _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
+    # If user passed a gene-like token, try expanding to a known condition alias; otherwise skip with NO_DATA
+    if _looks_like_gene_token(condition):
+        expanded = _expand_condition_alias(condition)
+        if expanded == condition:
+            return Evidence(
+                status="NO_DATA",
+                source="clin_rwe expects a condition; input appears to be a gene symbol",
+                fetched_n=0,
+                data={"condition": condition, "faers_events": [], "observational_trials": []},
+                citations=["https://api.fda.gov/drug/event.json", "https://clinicaltrials.gov/api/v2/studies"],
+                fetched_at=_now(),
+            )
+        condition = expanded  # use expanded disease term
+
+    # FAERS: broadened to reaction OR indication; use exact phrase matching to avoid token splitting
     faers_url = (
-        "https://api.fda.gov/drug/event.json"
-        f"?search=patient.reaction.reactionmeddrapt.exact:%22{urllib.parse.quote(condition)}%22&limit={limit}"
+        "https://api.fda.gov/drug/event.json?"
+        f"search=(patient.reaction.reactionmeddrapt.exact:%22{urllib.parse.quote(condition)}%22"
+        f"+OR+patient.drug.indication.exact:%22{urllib.parse.quote(condition)}%22)&limit={limit}"
     )
+    # CT: keep observational filter for RWE focus
     ct_url = (
         "https://clinicaltrials.gov/api/v2/studies"
         f"?query.cond={urllib.parse.quote(condition)}&filter.studyType=Observational&pageSize={min(100, limit)}"
@@ -1555,8 +1717,11 @@ async def clin_rwe(
             return []
 
     faers_results, trials = await asyncio.gather(_faers(), _ct())
+    total = len(faers_results) + len(trials)
     return Evidence(
-        status="OK", source="openFDA FAERS + ClinicalTrials.gov v2", fetched_n=len(faers_results) + len(trials),
+        status="OK" if total > 0 else "NO_DATA",
+        source="openFDA FAERS + ClinicalTrials.gov v2",
+        fetched_n=total,
         data={"condition": condition, "faers_events": faers_results[:limit], "observational_trials": trials[:limit]},
         citations=[faers_url, ct_url], fetched_at=_now(),
     )
@@ -1570,23 +1735,24 @@ async def clin_safety(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
     url = (
         "https://api.fda.gov/drug/event.json?"
-        f"search=patient.drug.openfda.generic_name:{urllib.parse.quote(symbol)}&limit={limit}"
+        f"search=patient.drug.openfda.generic_name:{urllib.parse.quote(sym_norm)}&limit={limit}"
     )
     try:
         js = await _get_json(url, tries=1)
         results = js.get("results", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="openFDA FAERS", fetched_n=len(results),
-            data={"symbol": symbol, "reports": results[:limit]},
+            status="OK" if results else "NO_DATA", source="openFDA FAERS", fetched_n=len(results),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "reports": results[:limit]},
             citations=[url], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="FAERS empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "reports": []}, citations=[url], fetched_at=_now(),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "reports": []}, citations=[url], fetched_at=_now(),
         )
 
 
@@ -1598,15 +1764,16 @@ async def clin_pipeline(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
-    inx_url = f"https://drugs.ncats.io/api/v1/drugs?name={urllib.parse.quote(symbol)}"
+    inx_url = f"https://drugs.ncats.io/api/v1/drugs?name={urllib.parse.quote(sym_norm)}"
     try:
         js = await _get_json(inx_url, tries=1)
         items = js.get("content", []) if isinstance(js, dict) else []
         if items:
             return Evidence(
                 status="OK", source="Inxight Drugs", fetched_n=len(items),
-                data={"symbol": symbol, "pipeline": items[:limit]},
+                data={"symbol": symbol, "normalized_symbol": sym_norm, "pipeline": items[:limit]},
                 citations=[inx_url], fetched_at=_now(),
             )
     except Exception:
@@ -1635,10 +1802,11 @@ async def comp_intensity(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
     cond = condition or ""
     query = {"_and": [
-        {"_or": [{"patent_title": {"_text_any": symbol}}, {"patent_abstract": {"_text_any": symbol}}]},
+        {"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}]},
     ]}
     if cond:
         query["_and"].append({"_or": [{"patent_title": {"_text_any": cond}}, {"patent_abstract": {"_text_any": cond}}]})
@@ -1649,8 +1817,8 @@ async def comp_intensity(
         js = await _get_json(pat_url, tries=1)
         patents = js.get("patents", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="PatentsView query", fetched_n=len(patents),
-            data={"symbol": symbol, "condition": condition, "patents": patents[:limit]},
+            status="OK" if patents else "NO_DATA", source="PatentsView query", fetched_n=len(patents),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "condition": condition, "patents": patents[:limit]},
             citations=[pat_url], fetched_at=_now(),
         )
     except Exception:
@@ -1660,9 +1828,9 @@ async def comp_intensity(
     trial_res = await _safe_call(clin_endpoints(condition or symbol, x_api_key, limit))
     count = (drug_res.fetched_n if drug_res else 0) + (trial_res.fetched_n if trial_res else 0)
     return Evidence(
-        status="OK", source="Drugs+Trials fallback", fetched_n=count,
+        status="OK" if count > 0 else "NO_DATA", source="Drugs+Trials fallback", fetched_n=count,
         data={
-            "symbol": symbol, "condition": condition,
+            "symbol": symbol, "normalized_symbol": sym_norm, "condition": condition,
             "drugs_n": drug_res.fetched_n if drug_res else 0,
             "trials_n": trial_res.fetched_n if trial_res else 0
         },
@@ -1679,8 +1847,9 @@ async def comp_freedom(
 ) -> Evidence:
     _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
 
-    query = {"_or": [{"patent_title": {"_text_any": symbol}}, {"patent_abstract": {"_text_any": symbol}}]}
+    query = {"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}]}
     query_str = urllib.parse.quote(json.dumps(query))
     fields = urllib.parse.quote(json.dumps(["patent_id"]))
     url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
@@ -1688,12 +1857,12 @@ async def comp_freedom(
         js = await _get_json(url, tries=1)
         patents = js.get("patents", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK", source="PatentsView FTO query", fetched_n=len(patents),
-            data={"symbol": symbol, "patents": patents[:limit]},
+            status="OK" if patents else "NO_DATA", source="PatentsView FTO query", fetched_n=len(patents),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "patents": patents[:limit]},
             citations=[url], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="PatentsView empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "patents": []}, citations=[url], fetched_at=_now()
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "patents": []}, citations=[url], fetched_at=_now()
         )
