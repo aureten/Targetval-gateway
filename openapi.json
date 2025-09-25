@@ -1,23 +1,165 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "TARGETVAL Gateway",
-    "version": "0.3.0"
+    "title": "TargetVal Gateway",
+    "version": "1.0.0",
+    "description": "This OpenAPI specification reflects the live TargetVal gateway.  It consolidates all module endpoints, normalises parameter names (\"gene\" for any gene identifier and \"condition\" for diseases/tissues) and documents the aggregate and competition routes."
+  },
+  "servers": [
+    {
+      "url": "https://targetval-gateway.onrender.com",
+      "description": "Live deployment"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "Evidence": {
+        "type": "object",
+        "description": "Structured evidence returned by individual modules.",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["OK", "ERROR", "NO_DATA"],
+            "description": "Outcome of the module call.  OK when data is returned; NO_DATA when the upstream service had no records; ERROR when an upstream call failed."
+          },
+          "source": {
+            "type": "string",
+            "description": "Identifier of the upstream source or method used."
+          },
+          "fetched_n": {
+            "type": "integer",
+            "description": "Number of items fetched before the limit was applied."
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Moduleâspecific payload.  The structure varies by module."
+          },
+          "citations": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of URLs used to retrieve the data.  Helpful for attribution and debugging."
+          },
+          "fetched_at": {
+            "type": "number",
+            "description": "Unix timestamp (seconds) when the data was fetched."
+          }
+        },
+        "required": ["status"]
+      },
+      "AggregateResponse": {
+        "type": "object",
+        "description": "Map of module identifiers to Evidence objects returned by the /aggregate endpoint in RAW mode.",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/Evidence"
+        }
+      },
+      "BucketScore": {
+        "type": "object",
+        "description": "Score for a single evidence bucket when /aggregate is called in SCORE mode.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": ["B1", "B2", "B3", "B4", "B5", "B6", "B7"],
+            "description": "Bucket identifier.  B1âB6 are quantitative; B7 is qualitative."
+          },
+          "name": {
+            "type": "string",
+            "description": "Humanâreadable bucket name."
+          },
+          "score": {
+            "oneOf": [
+              { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+              { "type": "null" }
+            ],
+            "description": "Score between 0 and 1 for B1âB6.  Null for B7 (qualitative only)."
+          },
+          "notes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Anchor hits, adjustments and qualitative comments informing the score."
+          }
+        },
+        "required": ["id", "name"]
+      },
+      "ScoreReport": {
+        "type": "object",
+        "description": "Report returned by /aggregate in SCORE mode containing bucket scores and final score.",
+        "properties": {
+          "gene": { "type": "string", "description": "Gene symbol or identifier used in the query." },
+          "condition": { "type": "string", "description": "Condition or disease used in the query." },
+          "efo": { "type": "string", "description": "EFO ID used if provided." },
+          "final_score": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Overall score across all buckets." },
+          "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Confidence in the final score (0â1)." },
+          "bucket_scores": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/BucketScore" },
+            "description": "Scores for each evidence bucket."
+          },
+          "positives": { "type": "array", "items": { "type": "string" }, "description": "Key positive findings influencing the score." },
+          "negatives": { "type": "array", "items": { "type": "string" }, "description": "Key negative findings influencing the score." },
+          "evidence": { "$ref": "#/components/schemas/AggregateResponse", "description": "Raw evidence per module used to compute the score." }
+        },
+        "required": ["gene", "condition", "final_score", "bucket_scores"]
+      }
+    },
+    "parameters": {
+      "GeneParam": {
+        "in": "query",
+        "name": "gene",
+        "required": true,
+        "schema": { "type": "string" },
+        "description": "Gene symbol or identifier.  Accepts HGNC symbols, Ensembl IDs (ENSGâ¦) or NCBI Gene IDs (NCBIGene:â¦), and will be normalised by the service."
+      },
+      "ConditionParam": {
+        "in": "query",
+        "name": "condition",
+        "required": true,
+        "schema": { "type": "string" },
+        "description": "Condition, disease or tissue name.  Free text is allowed and will be resolved to an EFO ID if possible."
+      },
+      "LimitParam": {
+        "in": "query",
+        "name": "limit",
+        "schema": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 500
+        },
+        "required": false,
+        "description": "Maximum number of items to return.  Defaults to 50; 1â500 allowed."
+      },
+      "MetricParam": {
+        "in": "query",
+        "name": "metric",
+        "schema": {
+          "type": "string",
+          "enum": ["intensity", "freedom"]
+        },
+        "required": true,
+        "description": "Competition metric: 'intensity' (competition intensity) or 'freedom' (freedomâtoâoperate)."
+      }
+    }
   },
   "paths": {
-    "/v1/health": {
+    "/healthz": {
       "get": {
-        "summary": "Health",
-        "operationId": "health_v1_health_get",
+        "summary": "Health check",
+        "description": "Simple health endpoint returning availability and number of modules.",
+        "operationId": "healthz",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Service is up",
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response Health V1 Health Get",
                   "type": "object",
-                  "additionalProperties": { "type": "number" }
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "modules": { "type": "integer" }
+                  },
+                    "required": ["ok", "modules"]
                 }
               }
             }
@@ -25,218 +167,19 @@
         }
       }
     },
-    "/clinical/ctgov": {
+    "/modules": {
       "get": {
-        "summary": "Ctgov",
-        "operationId": "ctgov_clinical_ctgov_get",
-        "parameters": [
-          {
-            "name": "condition",
-            "in": "query",
-            "required": true,
-            "schema": { "type": "string", "title": "Condition" }
-          }
-        ],
+        "summary": "List available module identifiers",
+        "operationId": "list_modules",
         "responses": {
           "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/Evidence" }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/github/commits": {
-      "get": {
-        "summary": "Github Commits",
-        "operationId": "github_commits_v1_github_commits_get",
-        "parameters": [
-          {
-            "name": "owner",
-            "in": "query",
-            "required": true,
-            "schema": { "type": "string", "title": "Owner" }
-          },
-          {
-            "name": "repo",
-            "in": "query",
-            "required": true,
-            "schema": { "type": "string", "title": "Repo" }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": { "schema": {} }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/github/issues": {
-      "get": {
-        "summary": "Github Issues",
-        "operationId": "github_issues_v1_github_issues_get",
-        "parameters": [
-          {
-            "name": "owner",
-            "in": "query",
-            "required": true,
-            "schema": { "type": "string", "title": "Owner" }
-          },
-          {
-            "name": "repo",
-            "in": "query",
-            "required": true,
-            "schema": { "type": "string", "title": "Repo" }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": { "schema": {} }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/github/releases": {
-      "get": {
-        "summary": "Github Releases",
-        "operationId": "github_releases_v1_github_releases_get",
-        "parameters": [
-          {
-            "name": "owner",
-            "in": "query",
-            "required": true,
-            "schema": { "type": "string", "title": "Owner" }
-          },
-          {
-            "name": "repo",
-            "in": "query",
-            "required": true,
-            "schema": { "type": "string", "title": "Repo" }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": { "schema": {} }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/targetval": {
-      "get": {
-        "summary": "Targetval",
-        "operationId": "targetval_v1_targetval_get",
-        "parameters": [
-          {
-            "name": "symbol",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "title": "Symbol",
-              "anyOf": [
-                { "type": "string" },
-                { "type": "null" }
-              ]
-            }
-          },
-          {
-            "name": "ensembl_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "title": "Ensembl Id",
-              "anyOf": [
-                { "type": "string" },
-                { "type": "null" }
-              ]
-            }
-          },
-          {
-            "name": "condition",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "title": "Condition",
-              "anyOf": [
-                { "type": "string" },
-                { "type": "null" }
-              ]
-            }
-          },
-          {
-            "name": "efo_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "title": "Efo Id",
-              "anyOf": [
-                { "type": "string" },
-                { "type": "null" }
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
+            "description": "Array of module identifiers",
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response Targetval V1 Targetval Get",
-                  "type": "object",
-                  "additionalProperties": true
+                  "type": "array",
+                  "items": { "type": "string" }
                 }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
               }
             }
           }
@@ -245,8 +188,9 @@
     },
     "/aggregate": {
       "post": {
-        "summary": "Aggregate all evidence modules",
+        "summary": "Aggregate evidence across modules or compute a TargetVal score",
         "operationId": "aggregate",
+        "description": "Aggregates results from multiple evidence modules.  In RAW mode, returns raw evidence for each module.  In SCORE mode, computes bucket scores and a final composite score.  When 'modules' is omitted, all modules are run.",
         "requestBody": {
           "required": true,
           "content": {
@@ -254,10 +198,13 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "gene": { "type": "string" },
-                  "condition": { "type": "string" },
-                  "efo": { "type": "string" },
-                  "limit": { "type": "integer" }
+                  "gene": { "type": "string", "description": "Gene symbol or identifier." },
+                  "condition": { "type": "string", "description": "Condition, disease or tissue." },
+                  "efo": { "type": "string", "description": "Optional EFO ID if already known." },
+                  "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Maximum number of records per module." },
+                  "mode": { "type": "string", "enum": ["RAW", "SCORE"], "default": "RAW", "description": "Whether to return raw evidence (RAW) or compute a score (SCORE)." },
+                  "modules": { "type": "array", "items": { "type": "string" }, "description": "Optional list of module identifiers to run.  If absent, all modules run." },
+                  "include_evidence": { "type": "boolean", "default": true, "description": "When computing a score, also return the raw evidence per module." }
                 },
                 "required": ["gene", "condition"]
               }
@@ -266,81 +213,277 @@
         },
         "responses": {
           "200": {
-            "description": "Aggregated module results",
+            "description": "Aggregate or score response",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/AggregateResponse" },
+                    { "$ref": "#/components/schemas/ScoreReport" }
+                  ]
                 }
               }
             }
           }
         }
       }
-    }
-  },
-  "components": {
-    "schemas": {
-      "Evidence": {
-        "title": "Evidence",
-        "type": "object",
-        "required": [
-          "status",
-          "source",
-          "fetched_n",
-          "data",
-          "citations",
-          "fetched_at"
+    },
+    "/comp": {
+      "get": {
+        "summary": "Competition and IP information",
+        "operationId": "comp",
+        "description": "Returns qualitative information about the competitive landscape or freedom to operate for a condition.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ConditionParam" },
+          { "$ref": "#/components/parameters/MetricParam" },
+          { "$ref": "#/components/parameters/LimitParam" }
         ],
-        "properties": {
-          "status": { "title": "Status", "type": "string" },
-          "source": { "title": "Source", "type": "string" },
-          "fetched_n": { "title": "Fetched N", "type": "integer" },
-          "data": {
-            "title": "Data",
-            "type": "object",
-            "additionalProperties": true
-          },
-          "citations": {
-            "title": "Citations",
-            "type": "array",
-            "items": { "type": "string" }
-          },
-          "fetched_at": { "title": "Fetched At", "type": "number" }
-        }
-      },
-      "HTTPValidationError": {
-        "title": "HTTPValidationError",
-        "type": "object",
-        "properties": {
-          "detail": {
-            "title": "Detail",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Evidence" }
+              }
             }
           }
         }
-      },
-      "ValidationError": {
-        "title": "ValidationError",
-        "type": "object",
-        "required": ["loc", "msg", "type"],
-        "properties": {
-          "loc": {
-            "title": "Location",
-            "type": "array",
-            "items": {
-              "anyOf": [
-                { "type": "string" },
-                { "type": "integer" }
-              ]
-            }
-          },
-          "msg": { "title": "Message", "type": "string" },
-          "type": { "title": "Error Type", "type": "string" }
-        }
+      }
+    },
+
+    /* Genetics modules */
+    "/genetics/l2g": {
+      "get": {
+        "summary": "Locusâtoâgene inference",
+        "operationId": "genetics_l2g",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/genetics/rare": {
+      "get": {
+        "summary": "Rare variant associations",
+        "operationId": "genetics_rare",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/genetics/mendelian": {
+      "get": {
+        "summary": "Mendelian disease associations",
+        "operationId": "genetics_mendelian",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/genetics/mr": {
+      "get": {
+        "summary": "Mendelian randomisation (placeholder)",
+        "operationId": "genetics_mr",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/genetics/lncrna": {
+      "get": {
+        "summary": "Long nonâcoding RNA associations",
+        "operationId": "genetics_lncrna",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/genetics/mirna": {
+      "get": {
+        "summary": "miRNAâgene interactions",
+        "operationId": "genetics_mirna",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/genetics/sqtl": {
+      "get": {
+        "summary": "splicing QTL associations",
+        "operationId": "genetics_sqtl",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/genetics/epigenetics": {
+      "get": {
+        "summary": "Epigenetic track associations",
+        "operationId": "genetics_epigenetics",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+
+    /* Association modules */
+    "/assoc/bulk-rna": {
+      "get": {
+        "summary": "Bulk RNA associations (tissue expression)",
+        "operationId": "assoc_bulk_rna",
+        "parameters": [ { "$ref": "#/components/parameters/ConditionParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/assoc/bulk-prot": {
+      "get": {
+        "summary": "Bulk protein associations",
+        "operationId": "assoc_bulk_prot",
+        "parameters": [ { "$ref": "#/components/parameters/ConditionParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/assoc/sc": {
+      "get": {
+        "summary": "Singleâcell associations",
+        "operationId": "assoc_sc",
+        "parameters": [ { "$ref": "#/components/parameters/ConditionParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/assoc/perturb": {
+      "get": {
+        "summary": "Perturbation associations (CRISPR screens)",
+        "operationId": "assoc_perturb",
+        "parameters": [ { "$ref": "#/components/parameters/ConditionParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+
+    /* Expression modules */
+    "/expr/baseline": {
+      "get": {
+        "summary": "Baseline gene expression",
+        "operationId": "expr_baseline",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/expr/localization": {
+      "get": {
+        "summary": "Subcellular localization",
+        "operationId": "expr_localization",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/expr/inducibility": {
+      "get": {
+        "summary": "Expression inducibility",
+        "operationId": "expr_inducibility",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+
+    /* Mechanistic wiring */
+    "/mech/pathways": {
+      "get": {
+        "summary": "Pathway memberships",
+        "operationId": "mech_pathways",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/mech/ppi": {
+      "get": {
+        "summary": "Proteinâprotein interactions",
+        "operationId": "mech_ppi",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/mech/ligrec": {
+      "get": {
+        "summary": "Ligandâreceptor interactions",
+        "operationId": "mech_ligrec",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+
+    /* Tractability modules */
+    "/tract/drugs": {
+      "get": {
+        "summary": "Known drugs targeting the gene",
+        "operationId": "tract_drugs",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/tract/ligandability-sm": {
+      "get": {
+        "summary": "Smallâmolecule ligandability",
+        "operationId": "tract_ligandability_sm",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/tract/ligandability-ab": {
+      "get": {
+        "summary": "Antibody ligandability",
+        "operationId": "tract_ligandability_ab",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/tract/ligandability-oligo": {
+      "get": {
+        "summary": "Oligonucleotide ligandability",
+        "operationId": "tract_ligandability_oligo",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/tract/modality": {
+      "get": {
+        "summary": "Modality scoring heuristic",
+        "operationId": "tract_modality",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/tract/immunogenicity": {
+      "get": {
+        "summary": "Immunogenicity signal from IEDB",
+        "operationId": "tract_immunogenicity",
+        "parameters": [ { "$ref": "#/components/parameters/GeneParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+
+    /* Clinical modules */
+    "/clin/endpoints": {
+      "get": {
+        "summary": "Clinical endpoints",
+        "operationId": "clin_endpoints",
+        "parameters": [ { "$ref": "#/components/parameters/ConditionParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/clin/rwe": {
+      "get": {
+        "summary": "Realâworld evidence",
+        "operationId": "clin_rwe",
+        "parameters": [ { "$ref": "#/components/parameters/ConditionParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/clin/safety": {
+      "get": {
+        "summary": "Drug safety signals",
+        "operationId": "clin_safety",
+        "parameters": [ { "$ref": "#/components/parameters/ConditionParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
+      }
+    },
+    "/clin/pipeline": {
+      "get": {
+        "summary": "Clinical pipeline status",
+        "operationId": "clin_pipeline",
+        "parameters": [ { "$ref": "#/components/parameters/ConditionParam" }, { "$ref": "#/components/parameters/LimitParam" } ],
+        "responses": { "200": { "description": "Evidence response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } } } }
       }
     }
   }
