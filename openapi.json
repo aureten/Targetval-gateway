@@ -2,10 +2,14 @@
   "openapi": "3.1.0",
   "info": {
     "title": "TARGETVAL Gateway",
-    "version": "1.0.1",
-    "description": "Spec matched to the live TargetVal FastAPI: mixed gene/symbol params by module, genetics require gene and prefer EFO; condition may be resolved to EFO if enabled."
+    "version": "1.2.1",
+    "description": "Public spec matched to the live TargetVal FastAPI. Genetics endpoints use 'gene'; expression/mechanistic/tractability use 'symbol'; association/clinical use 'condition'. PPI advertises 'species' and 'cutoff'. /aggregate returns envelope {query, results} and accepts optional species/cutoff broadcast."
   },
-  "servers": [{ "url": "https://targetval-gateway.onrender.com" }],
+  "servers": [
+    {
+      "url": "https://targetval-gateway.onrender.com"
+    }
+  ],
   "paths": {
     "/healthz": {
       "get": {
@@ -14,7 +18,21 @@
         "responses": {
           "200": {
             "description": "OK",
-            "content": { "application/json": { "schema": { "type": "object", "properties": { "ok": { "type": "boolean" }, "modules": { "type": "integer" } } } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "modules": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -26,25 +44,43 @@
         "responses": {
           "200": {
             "description": "OK",
-            "content": { "application/json": { "schema": { "type": "array", "items": { "type": "string" } } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
           }
         }
       }
     },
-
-    /* ----------------------- GENETICS (require gene) ----------------------- */
-
     "/genetics/l2g": {
       "get": {
         "operationId": "genetics_l2g",
         "summary": "Locus-to-Gene (GWAS Catalog / enriched target)",
         "parameters": [
-          { "$ref": "#/components/parameters/GeneRequired" },
-          { "$ref": "#/components/parameters/EfoOptional" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/GeneRequired"
+          },
+          {
+            "$ref": "#/components/parameters/EfoOptional"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/genetics/rare": {
@@ -52,25 +88,49 @@
         "operationId": "genetics_rare",
         "summary": "Rare disease genetics (Monarch / HGNC/NCBI IDs)",
         "parameters": [
-          { "$ref": "#/components/parameters/GeneRequired" },
-          { "$ref": "#/components/parameters/EfoOptional" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/GeneRequired"
+          },
+          {
+            "$ref": "#/components/parameters/EfoOptional"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/genetics/mendelian": {
       "get": {
         "operationId": "genetics_mendelian",
-        "summary": "Mendelian (ClinVar/OT GQL; NCBI Gene IDs allowed)",
+        "summary": "Mendelian (ClinVar/OpenTargets; NCBI Gene IDs allowed)",
         "parameters": [
-          { "$ref": "#/components/parameters/GeneRequired" },
-          { "$ref": "#/components/parameters/EfoOptional" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/GeneRequired"
+          },
+          {
+            "$ref": "#/components/parameters/EfoOptional"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/genetics/mr": {
@@ -78,12 +138,24 @@
         "operationId": "genetics_mr",
         "summary": "Mendelian randomization (placeholder wiring)",
         "parameters": [
-          { "$ref": "#/components/parameters/GeneRequired" },
-          { "$ref": "#/components/parameters/EfoOptional" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/GeneRequired"
+          },
+          {
+            "$ref": "#/components/parameters/EfoOptional"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/genetics/lncrna": {
@@ -91,12 +163,24 @@
         "operationId": "genetics_lncrna",
         "summary": "lncRNA associations",
         "parameters": [
-          { "$ref": "#/components/parameters/GeneRequired" },
-          { "$ref": "#/components/parameters/EfoOptional" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/GeneRequired"
+          },
+          {
+            "$ref": "#/components/parameters/EfoOptional"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/genetics/mirna": {
@@ -104,12 +188,24 @@
         "operationId": "genetics_mirna",
         "summary": "miRNA interactions (ENCORI/MirNet)",
         "parameters": [
-          { "$ref": "#/components/parameters/GeneRequired" },
-          { "$ref": "#/components/parameters/EfoOptional" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/GeneRequired"
+          },
+          {
+            "$ref": "#/components/parameters/EfoOptional"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/genetics/sqtl": {
@@ -117,12 +213,24 @@
         "operationId": "genetics_sqtl",
         "summary": "sQTL (Ensembl gene IDs work best)",
         "parameters": [
-          { "$ref": "#/components/parameters/GeneRequired" },
-          { "$ref": "#/components/parameters/EfoOptional" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/GeneRequired"
+          },
+          {
+            "$ref": "#/components/parameters/EfoOptional"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/genetics/epigenetics": {
@@ -130,26 +238,43 @@
         "operationId": "genetics_epigenetics",
         "summary": "ENCODE/epigenetics (prefer Ensembl gene IDs)",
         "parameters": [
-          { "$ref": "#/components/parameters/GeneRequired" },
-          { "$ref": "#/components/parameters/EfoOptional" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/GeneRequired"
+          },
+          {
+            "$ref": "#/components/parameters/EfoOptional"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
-
-    /* -------------------- ASSOCIATION (require condition) ------------------- */
-
     "/assoc/bulk-rna": {
       "get": {
         "operationId": "assoc_bulk_rna",
         "summary": "Bulk RNA by tissue/disease",
         "parameters": [
-          { "$ref": "#/components/parameters/ConditionRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/ConditionRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/assoc/bulk-prot": {
@@ -157,10 +282,18 @@
         "operationId": "assoc_bulk_prot",
         "summary": "Bulk protein (ProteomicsDB/PRIDE)",
         "parameters": [
-          { "$ref": "#/components/parameters/ConditionRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/ConditionRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/assoc/sc": {
@@ -168,10 +301,18 @@
         "operationId": "assoc_sc",
         "summary": "Single-cell signal (HPA etc.)",
         "parameters": [
-          { "$ref": "#/components/parameters/ConditionRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/ConditionRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/assoc/perturb": {
@@ -179,24 +320,37 @@
         "operationId": "assoc_perturb",
         "summary": "Perturbation datasets (best-effort)",
         "parameters": [
-          { "$ref": "#/components/parameters/ConditionRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/ConditionRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
-
-    /* --------------- EXPRESSION / LOCALIZATION (use symbol) ---------------- */
-
     "/expr/baseline": {
       "get": {
         "operationId": "expr_baseline",
         "summary": "Baseline expression",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/expr/localization": {
@@ -204,10 +358,18 @@
         "operationId": "expr_localization",
         "summary": "Subcellular localization",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/expr/inducibility": {
@@ -215,60 +377,100 @@
         "operationId": "expr_inducibility",
         "summary": "Inducibility",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
-
-    /* ---------------- MECHANISTIC (use symbol) ---------------- */
-
     "/mech/pathways": {
       "get": {
         "operationId": "mech_pathways",
         "summary": "Pathway membership (Reactome)",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/mech/ppi": {
       "get": {
         "operationId": "mech_ppi",
-        "summary": "Protein–protein interactions",
+        "summary": "Proteinâprotein interactions (STRING; supports species and cutoff)",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/SpeciesOptional"
+          },
+          {
+            "$ref": "#/components/parameters/CutoffOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/mech/ligrec": {
       "get": {
         "operationId": "mech_ligrec",
-        "summary": "Ligand–receptor interactions",
+        "summary": "Ligandâreceptor interactions",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
-
-    /* ---------------- TRACTABILITY (use symbol) ---------------- */
-
     "/tract/drugs": {
       "get": {
         "operationId": "tract_drugs",
         "summary": "Known drug interactions",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/tract/ligandability-sm": {
@@ -276,10 +478,18 @@
         "operationId": "tract_ligandability_sm",
         "summary": "Small-molecule ligandability",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/tract/ligandability-ab": {
@@ -287,10 +497,18 @@
         "operationId": "tract_ligandability_ab",
         "summary": "Antibody ligandability",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/tract/ligandability-oligo": {
@@ -298,10 +516,18 @@
         "operationId": "tract_ligandability_oligo",
         "summary": "Oligo ligandability",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/tract/immunogenicity": {
@@ -309,10 +535,18 @@
         "operationId": "tract_immunogenicity",
         "summary": "IEDB epitope/t-cell assay counts (heuristic)",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/tract/modality": {
@@ -320,77 +554,191 @@
         "operationId": "tract_modality",
         "summary": "Heuristic modality scorer (SM/AB/OLIGO) with tunable priors",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "in": "query", "name": "prior_sm", "schema": { "type": "number", "default": 0.55, "minimum": 0, "maximum": 1 } },
-          { "in": "query", "name": "prior_ab", "schema": { "type": "number", "default": 0.50, "minimum": 0, "maximum": 1 } },
-          { "in": "query", "name": "prior_oligo", "schema": { "type": "number", "default": 0.35, "minimum": 0, "maximum": 1 } },
-          { "in": "query", "name": "w_sm", "schema": { "type": "number", "minimum": 0, "maximum": 1, "nullable": true } },
-          { "in": "query", "name": "w_ab", "schema": { "type": "number", "minimum": 0, "maximum": 1, "nullable": true } },
-          { "in": "query", "name": "w_oligo", "schema": { "type": "number", "minimum": 0, "maximum": 1, "nullable": true } }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "in": "query",
+            "name": "prior_sm",
+            "schema": {
+              "type": "number",
+              "default": 0.55,
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "prior_ab",
+            "schema": {
+              "type": "number",
+              "default": 0.5,
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "prior_oligo",
+            "schema": {
+              "type": "number",
+              "default": 0.35,
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "w_sm",
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "w_ab",
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "w_oligo",
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
-
-    /* ---------------------- CLINICAL (mixed) ---------------------- */
-
     "/clin/endpoints": {
       "get": {
         "operationId": "clin_endpoints",
         "summary": "Clinical endpoints (Ct.Gov v2 + v1)",
         "parameters": [
-          { "$ref": "#/components/parameters/ConditionRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/ConditionRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/clin/rwe": {
       "get": {
         "operationId": "clin_rwe",
-        "summary": "Real-world evidence (FAERS + obs CTs)",
+        "summary": "Real-world evidence (FAERS + observational trials)",
         "parameters": [
-          { "$ref": "#/components/parameters/ConditionRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/ConditionRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/clin/safety": {
       "get": {
         "operationId": "clin_safety",
-        "summary": "Safety signals (FAERS) — drug symbol",
+        "summary": "Safety signals (FAERS) â drug symbol",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/clin/pipeline": {
       "get": {
         "operationId": "clin_pipeline",
-        "summary": "Pipeline (Inxight etc.) — target symbol",
+        "summary": "Pipeline (Inxight etc.) â target symbol",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
-
-    /* ---------------------- COMPETITION (two routes) ---------------------- */
-
     "/comp/intensity": {
       "get": {
         "operationId": "comp_intensity",
         "summary": "Competition intensity (qualitative)",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
     "/comp/freedom": {
@@ -398,20 +746,27 @@
         "operationId": "comp_freedom",
         "summary": "Freedom-to-operate (qualitative)",
         "parameters": [
-          { "$ref": "#/components/parameters/SymbolRequired" },
-          { "$ref": "#/components/parameters/ConditionOptional" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/SymbolRequired"
+          },
+          {
+            "$ref": "#/components/parameters/ConditionOptional"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/EvidenceResponse" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EvidenceResponse"
+          }
+        }
       }
     },
-
-    /* ---------------------- AGGREGATE (fan-out) ---------------------- */
-
     "/aggregate": {
       "post": {
         "operationId": "aggregate",
-        "summary": "Run multiple modules and return map of module->Evidence OR a score report",
+        "summary": "Run multiple modules and return { query, results }",
         "requestBody": {
           "required": true,
           "content": {
@@ -419,30 +774,56 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "gene": { "type": "string", "description": "Gene identifier (HGNC symbol, Ensembl, or NCBI). If omitted but symbol is provided, server will substitute." },
-                  "symbol": { "type": "string", "description": "Gene symbol (shorthand). If gene supplied, server uses that to fill symbol." },
-                  "condition": { "type": "string", "description": "Free text disease/tissue; may be resolved to EFO if configured." },
-                  "efo": { "type": "string", "description": "EFO disease ID (preferred for genetics)." },
-                  "limit": { "type": "integer", "default": 50, "minimum": 1, "maximum": 1000 },
-                  "modules": { "type": "array", "items": { "type": "string" } },
-                  "mode": { "type": "string", "enum": ["RAW", "SCORE"], "default": "RAW" },
-                  "include_evidence": { "type": "boolean", "default": true }
-                },
-                "required": []
+                  "gene": {
+                    "type": "string"
+                  },
+                  "symbol": {
+                    "type": "string"
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "efo": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "default": 50,
+                    "minimum": 1,
+                    "maximum": 1000
+                  },
+                  "modules": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "species": {
+                    "type": "integer",
+                    "description": "Optional species for modules that use it (e.g., STRING)."
+                  },
+                  "cutoff": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Optional interaction confidence cutoff used by some modules."
+                  },
+                  "extra": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "RAW -> map of Evidence; SCORE -> ScoreReport",
+            "description": "Aggregate results with original query echoed back",
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
-                    { "$ref": "#/components/schemas/AggregateResponse" },
-                    { "$ref": "#/components/schemas/ScoreReport" }
-                  ]
+                  "$ref": "#/components/schemas/AggregateEnvelope"
                 }
               }
             }
@@ -453,60 +834,244 @@
   },
   "components": {
     "parameters": {
-      "GeneRequired": { "in": "query", "name": "gene", "required": true, "schema": { "type": "string" }, "description": "HGNC symbol or stable ID (Ensembl/NCBI)." },
-      "EfoOptional": { "in": "query", "name": "efo", "required": false, "schema": { "type": "string" }, "description": "EFO disease ID (e.g., EFO_0001073 for obesity)." },
-      "ConditionOptional": { "in": "query", "name": "condition", "required": false, "schema": { "type": "string" }, "description": "Free-text disease/tissue; may be mapped to EFO if enabled." },
-      "ConditionRequired": { "in": "query", "name": "condition", "required": true, "schema": { "type": "string" } },
-      "SymbolRequired": { "in": "query", "name": "symbol", "required": true, "schema": { "type": "string" } },
-      "Limit": { "in": "query", "name": "limit", "required": false, "schema": { "type": "integer", "default": 50, "minimum": 1, "maximum": 500 } }
+      "GeneRequired": {
+        "in": "query",
+        "name": "gene",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "HGNC symbol or stable ID (Ensembl/NCBI)."
+      },
+      "EfoOptional": {
+        "in": "query",
+        "name": "efo",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "EFO disease ID (e.g., EFO_0001073)."
+      },
+      "ConditionOptional": {
+        "in": "query",
+        "name": "condition",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Free-text disease/tissue; may be mapped to EFO if enabled."
+      },
+      "ConditionRequired": {
+        "in": "query",
+        "name": "condition",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SymbolRequired": {
+        "in": "query",
+        "name": "symbol",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SpeciesOptional": {
+        "in": "query",
+        "name": "species",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "default": 9606
+        },
+        "description": "NCBI Taxonomy ID (default 9606=human)."
+      },
+      "CutoffOptional": {
+        "in": "query",
+        "name": "cutoff",
+        "required": false,
+        "schema": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.7
+        },
+        "description": "Interaction confidence cutoff (e.g., STRING combined_score normalized)."
+      },
+      "Limit": {
+        "in": "query",
+        "name": "limit",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 500
+        }
+      }
     },
     "schemas": {
       "Evidence": {
         "type": "object",
         "properties": {
-          "status": { "type": "string", "enum": ["OK", "ERROR", "NO_DATA"] },
-          "source": { "type": "string" },
-          "fetched_n": { "type": "integer" },
-          "data": { "type": "object", "additionalProperties": true },
-          "citations": { "type": "array", "items": { "type": "string" } },
-          "fetched_at": { "type": "number" }
+          "status": {
+            "type": "string",
+            "enum": [
+              "OK",
+              "ERROR",
+              "NO_DATA"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "fetched_n": {
+            "type": "integer"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "citations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fetched_at": {
+            "type": "number"
+          }
         },
-        "required": ["status"]
+        "required": [
+          "status"
+        ]
       },
       "AggregateResponse": {
         "type": "object",
-        "additionalProperties": { "$ref": "#/components/schemas/Evidence" }
+        "additionalProperties": {
+          "$ref": "#/components/schemas/Evidence"
+        }
       },
       "BucketScore": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "enum": ["B1","B2","B3","B4","B5","B6","B7"] },
-          "name": { "type": "string" },
-          "score": { "oneOf": [{ "type": "number", "minimum": 0, "maximum": 1 }, { "type": "null" }] },
-          "notes": { "type": "array", "items": { "type": "string" } }
+          "id": {
+            "type": "string",
+            "enum": [
+              "B1",
+              "B2",
+              "B3",
+              "B4",
+              "B5",
+              "B6",
+              "B7"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "score": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
-        "required": ["id","name"]
+        "required": [
+          "id",
+          "name"
+        ]
       },
       "ScoreReport": {
         "type": "object",
         "properties": {
-          "gene": { "type": "string" },
-          "condition": { "type": "string" },
-          "efo": { "type": "string" },
-          "final_score": { "type": "number", "minimum": 0, "maximum": 1 },
-          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-          "bucket_scores": { "type": "array", "items": { "$ref": "#/components/schemas/BucketScore" } },
-          "positives": { "type": "array", "items": { "type": "string" } },
-          "negatives": { "type": "array", "items": { "type": "string" } },
-          "evidence": { "$ref": "#/components/schemas/AggregateResponse" }
+          "gene": {
+            "type": "string"
+          },
+          "condition": {
+            "type": "string"
+          },
+          "efo": {
+            "type": "string"
+          },
+          "final_score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "bucket_scores": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BucketScore"
+            }
+          },
+          "positives": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "negatives": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/AggregateResponse"
+          }
         },
-        "required": ["gene","condition","final_score","bucket_scores"]
+        "required": [
+          "gene",
+          "condition",
+          "final_score",
+          "bucket_scores"
+        ]
+      },
+      "AggregateEnvelope": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "results": {
+            "$ref": "#/components/schemas/AggregateResponse"
+          }
+        },
+        "required": [
+          "results"
+        ]
       }
     },
     "responses": {
       "EvidenceResponse": {
         "description": "Evidence payload",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Evidence" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Evidence"
+            }
+          }
+        }
       }
     }
   }
