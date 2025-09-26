@@ -12,6 +12,7 @@ Key implementation notes:
 * Slow/fragile upstreams run with tries=1 and have pragmatic fallbacks.
 * Benign upstream misses return status="NO_DATA" (not "ERROR").
 * All endpoints return a structured Evidence payload and never propagate errors.
+* PUBLIC GATEWAY: no API key required anywhere.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ import io
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.utils.validation import validate_symbol, validate_condition
@@ -75,11 +76,6 @@ MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "8"))
 _semaphore: asyncio.Semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
-def _require_key(x_api_key: Optional[str]) -> None:
-    """Wire API key middleware here if needed."""
-    return
-
-
 def _now() -> float:
     return time.time()
 
@@ -93,7 +89,7 @@ async def _get_json(
     tries: int = OUTBOUND_TRIES,
     headers: Optional[Dict[str, str]] = None
 ) -> Any:
-    """HTTP GET → JSON with cache, bounded total time, limited retries, jittered backoff.
+    """HTTP GET â JSON with cache, bounded total time, limited retries, jittered backoff.
        More robust to content-encoding: attempts gzip decode if JSON parse fails."""
     cached = CACHE.get(url)
     if cached and (_now() - cached.get("timestamp", 0) < CACHE_TTL):
@@ -144,7 +140,7 @@ async def _get_text(
     tries: int = OUTBOUND_TRIES,
     headers: Optional[Dict[str, str]] = None
 ) -> str:
-    """HTTP GET → text with bounded total time, limited retries, jittered backoff."""
+    """HTTP GET â text with bounded total time, limited retries, jittered backoff."""
     last_err: Optional[Exception] = None
     t0 = _now()
     async with _semaphore:
@@ -176,7 +172,7 @@ async def _post_json(
     tries: int = OUTBOUND_TRIES,
     headers: Optional[Dict[str, str]] = None,
 ) -> Any:
-    """HTTP POST → JSON with bounded total time, limited retries, jittered backoff."""
+    """HTTP POST â JSON with bounded total time, limited retries, jittered backoff."""
     last_err: Optional[Exception] = None
     t0 = _now()
     async with _semaphore:
@@ -427,23 +423,21 @@ def status() -> Dict[str, Any]:
 
 
 # -----------------------------------------------------------------------------
-# BUCKET 1 – Human Genetics & Causality
+# BUCKET 1 â Human Genetics & Causality
 # -----------------------------------------------------------------------------
 
 @router.get("/genetics/l2g", response_model=Evidence)
 async def genetics_l2g(
     gene: str,
     efo_id: str = Query(..., alias="efo"),
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     """
     Locus-to-gene / association proxy:
-      * Resolve EFO → label & URI.
+      * Resolve EFO â label & URI.
       * Query GWAS Catalog by gene, then FILTER to the requested EFO (URI/id/label).
       * Fallbacks retain disease specificity (filter by label).
     """
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo_id, field_name="efo")
 
@@ -510,10 +504,8 @@ async def genetics_l2g(
 @router.get("/genetics/rare", response_model=Evidence)
 async def genetics_rare(
     gene: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
 
     clinvar_url = (
@@ -561,13 +553,11 @@ async def genetics_rare(
 async def genetics_mendelian(
     gene: str,
     efo_id: Optional[str] = Query(None, alias="efo"),
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     """
     Mendelian links (Monarch). If EFO is supplied, filter diseases by that EFO (URI/id/label).
     """
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
 
     efo_id_norm, efo_uri, disease_label, map_url = ("", "", "", "")
@@ -603,11 +593,9 @@ async def genetics_mendelian(
 async def genetics_mr(
     gene: str,
     efo_id: str = Query(..., alias="efo"),
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    """EpiGraphDB xQTL multi‑SNP MR, outcome filtered by EFO."""
-    _require_key(x_api_key)
+    """EpiGraphDB xQTL multiâSNP MR, outcome filtered by EFO."""
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo_id, field_name="efo")
 
@@ -621,7 +609,7 @@ async def genetics_mr(
         rows = mr.get("results", []) if isinstance(mr, dict) else (mr or [])
         return Evidence(
             status="OK" if rows else "NO_DATA",
-            source="EpiGraphDB xQTL multi‑SNP MR",
+            source="EpiGraphDB xQTL multiâSNP MR",
             fetched_n=len(rows),
             data={
                 "gene": gene,
@@ -644,10 +632,8 @@ async def genetics_mr(
 @router.get("/genetics/lncrna", response_model=Evidence)
 async def genetics_lncrna(
     gene: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     url = f"https://rnacentral.org/api/v1/rna?q={urllib.parse.quote(gene)}&page_size={limit}"
     try:
@@ -668,11 +654,9 @@ async def genetics_lncrna(
 @router.get("/genetics/mirna", response_model=Evidence)
 async def genetics_mirna(
     gene: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """miRNA–gene interactions: miRNet (primary), ENCORI (fallback)."""
-    _require_key(x_api_key)
+    """miRNAâgene interactions: miRNet (primary), ENCORI (fallback)."""
     validate_symbol(gene, field_name="gene")
 
     mirnet_url = "https://api.mirnet.ca/table/gene"
@@ -738,10 +722,8 @@ async def genetics_mirna(
 async def genetics_sqtl(
     gene: str,
     efo_id: Optional[str] = Query(None, alias="efo"),
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
     url = f"https://www.ebi.ac.uk/eqtl/api/genes/{urllib.parse.quote(gene)}/sqtls"
     try:
@@ -764,10 +746,8 @@ async def genetics_sqtl(
 async def genetics_epigenetics(
     gene: str,
     efo_id: Optional[str] = Query(None, alias="efo"),
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(gene, field_name="gene")
 
     search_url = (
@@ -791,16 +771,14 @@ async def genetics_epigenetics(
 
 
 # -----------------------------------------------------------------------------
-# BUCKET 2 – Disease Association & Perturbation
+# BUCKET 2 â Disease Association & Perturbation
 # -----------------------------------------------------------------------------
 
 @router.get("/assoc/bulk-rna", response_model=Evidence)
 async def assoc_bulk_rna(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
     url = f"https://gtexportal.org/api/v2/association/genesByTissue?tissueSiteDetail={urllib.parse.quote(condition)}"
@@ -813,7 +791,7 @@ async def assoc_bulk_rna(
             citations=[url], fetched_at=_now(),
         )
     except Exception:
-        # Fallback → HPA search with rna_gtex hints
+        # Fallback â HPA search with rna_gtex hints
         hpa = (
             "https://www.proteinatlas.org/api/search_download.php"
             f"?format=json&columns=gene,rna_gtex,rna_tissue&search={urllib.parse.quote(condition)}"
@@ -840,10 +818,8 @@ async def assoc_bulk_rna(
 @router.get("/assoc/bulk-prot", response_model=Evidence)
 async def assoc_bulk_prot(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
     url = (
@@ -863,7 +839,7 @@ async def assoc_bulk_prot(
             citations=[url], fetched_at=_now(),
         )
     except Exception:
-        # Fallback → PRIDE project list as a proxy
+        # Fallback â PRIDE project list as a proxy
         pride = f"https://www.ebi.ac.uk/pride/ws/archive/project/list?keyword={urllib.parse.quote(condition)}"
         try:
             pj = await _get_json(pride, tries=1)
@@ -886,12 +862,10 @@ async def assoc_bulk_prot(
 @router.get("/assoc/sc", response_model=Evidence)
 async def assoc_sc(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """Single‑cell signal using Human Protein Atlas search API.
+    """Singleâcell signal using Human Protein Atlas search API.
        Accepts either a disease term or a gene-like token; if gene-like, normalizes and searches by gene."""
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
     search_term = condition
@@ -939,12 +913,10 @@ async def assoc_sc(
 @router.get("/assoc/perturb", response_model=Evidence)
 async def assoc_perturb(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
     """CRISPR perturbation from BioGRID ORCS REST (requires ORCS_ACCESS_KEY).
        Skips gracefully if input appears to be a gene symbol rather than a condition."""
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
     # If input looks like a gene symbol, do not query ORCS with a gene term; return clean NO_DATA
@@ -1010,19 +982,17 @@ async def assoc_perturb(
 
 
 # -----------------------------------------------------------------------------
-# BUCKET 3 – Expression, Specificity & Localization
+# BUCKET 3 â Expression, Specificity & Localization
 # -----------------------------------------------------------------------------
 
 @router.get("/expr/baseline", response_model=Evidence)
 async def expression_baseline(
     symbol: Optional[str] = Query(None),
     gene: Optional[str] = Query(None),  # accept both ?symbol= and ?gene=
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=500),
 ) -> Evidence:
-    """Baseline expression via HPA → UniProt → Expression Atlas.
-       Accepts both 'symbol' and 'gene' query parameters; normalizes aliases (e.g., CB1→CNR1)."""
-    _require_key(x_api_key)
+    """Baseline expression via HPA â UniProt â Expression Atlas.
+       Accepts both 'symbol' and 'gene' query parameters; normalizes aliases (e.g., CB1âCNR1)."""
     sym_in = symbol or gene
     validate_symbol(sym_in, field_name="symbol")
     sym_norm = await _normalize_symbol(sym_in)
@@ -1089,29 +1059,30 @@ async def expression_baseline(
 @router.get("/expr/localization", response_model=Evidence)
 async def expr_localization(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
 
     sym_norm = await _normalize_symbol(symbol)
     url = f"https://compartments.jensenlab.org/Service?gene_names={urllib.parse.quote(sym_norm)}&format=json"
+    uni = (
+        "https://rest.uniprot.org/uniprotkb/search?"
+        f"query=gene_exact:{urllib.parse.quote(sym_norm)}+AND+organism_id:9606"
+        "&fields=cc_subcellular_location&format=json&size=1"
+    )
     try:
         js = await _get_json(url, tries=1)
         locs = js.get(sym_norm, []) if isinstance(js, dict) else []
-        return Evidence(
-            status="OK" if locs else "NO_DATA", source="COMPARTMENTS API", fetched_n=len(locs),
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": locs[:limit]},
-            citations=[url], fetched_at=_now(),
-        )
+        if locs:
+            return Evidence(
+                status="OK", source="COMPARTMENTS API", fetched_n=len(locs),
+                data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": locs[:limit]},
+                citations=[url], fetched_at=_now(),
+            )
     except Exception:
-        # Fallback → UniProt subcellular location
-        uni = (
-            "https://rest.uniprot.org/uniprotkb/search?"
-            f"query=gene_exact:{urllib.parse.quote(sym_norm)}+AND+organism_id:9606"
-            "&fields=cc_subcellular_location&format=json&size=1"
-        )
+        pass
+
+    # Fallback â UniProt subcellular location (runs if COMPARTMENTS failed or returned no data)
     try:
         uj = await _get_json(uni, tries=1)
         locs = []
@@ -1135,10 +1106,8 @@ async def expr_localization(
 @router.get("/expr/inducibility", response_model=Evidence)
 async def expr_inducibility(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1163,16 +1132,14 @@ async def expr_inducibility(
 
 
 # -----------------------------------------------------------------------------
-# BUCKET 4 – Mechanistic Wiring & Networks
+# BUCKET 4 â Mechanistic Wiring & Networks
 # -----------------------------------------------------------------------------
 
 @router.get("/mech/pathways", response_model=Evidence)
 async def mech_pathways(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1182,7 +1149,7 @@ async def mech_pathways(
         hits = js.get("results", []) if isinstance(js, dict) else []
         pathways = []
         for h in hits:
-            if "Pathway" in (h.get("species") or "") or (h.get("stId", "") or "").startswith("R-HSA"):
+            if (h.get("stId", "") or "").startswith("R-HSA") or (h.get("species") in ("Homo sapiens", "Pathway")):
                 pathways.append({"name": h.get("name"), "stId": h.get("stId"), "score": h.get("score")})
         return Evidence(
             status="OK" if pathways else "NO_DATA", source="Reactome ContentService", fetched_n=len(pathways),
@@ -1200,18 +1167,17 @@ async def mech_pathways(
 @router.get("/mech/ppi", response_model=Evidence)
 async def mech_ppi(
     symbol: str,
+    species: int = Query(9606, ge=1),
     cutoff: float = Query(0.9, ge=0.0, le=1.0),
     limit: int = Query(50, ge=1, le=200),
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
-    map_url = "https://string-db.org/api/json/get_string_ids?identifiers={id}&species=9606".format(
-        id=urllib.parse.quote(sym_norm)
+    map_url = "https://string-db.org/api/json/get_string_ids?identifiers={id}&species={sp}".format(
+        id=urllib.parse.quote(sym_norm), sp=int(species)
     )
-    net_tpl = "https://string-db.org/api/json/network?identifiers={id}&species=9606"
+    net_tpl = "https://string-db.org/api/json/network?identifiers={id}&species={sp}"
     try:
         ids = await _get_json(map_url, tries=1)
         if not ids:
@@ -1220,7 +1186,7 @@ async def mech_ppi(
                 data={"symbol": symbol, "normalized_symbol": sym_norm, "neighbors": []}, citations=[map_url], fetched_at=_now()
             )
         string_id = ids[0].get("stringId")
-        net = await _get_json(net_tpl.format(id=string_id), tries=1)
+        net = await _get_json(net_tpl.format(id=string_id, sp=int(species)), tries=1)
         neighbors: List[Dict[str, Any]] = []
         for edge in net:
             score = edge.get("score") or edge.get("combined_score")
@@ -1233,13 +1199,13 @@ async def mech_ppi(
         neighbors = neighbors[:limit]
         return Evidence(
             status="OK" if neighbors else "NO_DATA", source="STRING REST", fetched_n=len(neighbors),
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "neighbors": neighbors},
-            citations=[map_url, net_tpl.format(id=string_id)], fetched_at=_now(),
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "species": species, "neighbors": neighbors},
+            citations=[map_url, net_tpl.format(id=string_id, sp=int(species))], fetched_at=_now(),
         )
     except Exception:
         return Evidence(
             status="NO_DATA", source="STRING empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "neighbors": []},
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "species": species, "neighbors": []},
             citations=[map_url], fetched_at=_now(),
         )
 
@@ -1247,10 +1213,8 @@ async def mech_ppi(
 @router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1273,17 +1237,15 @@ async def mech_ligrec(
 
 
 # -----------------------------------------------------------------------------
-# BUCKET 5 – Tractability & Modality
+# BUCKET 5 â Tractability & Modality
 # -----------------------------------------------------------------------------
 
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
     """Known/experimental drugs for a target. OpenTargets first; DGIdb fallback."""
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1334,10 +1296,8 @@ async def tract_drugs(
 @router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1361,10 +1321,8 @@ async def tract_ligandability_sm(
 @router.get("/tract/ligandability-ab", response_model=Evidence)
 async def tract_ligandability_ab(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1392,11 +1350,9 @@ async def tract_ligandability_ab(
 @router.get("/tract/ligandability-oligo", response_model=Evidence)
 async def tract_ligandability_oligo(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
     """Oligonucleotide ligandability via Ribocentre Aptamer API."""
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1440,7 +1396,6 @@ async def tract_modality(
     w_sm: Optional[float] = Query(None, ge=0.0, le=1.0),
     w_ab: Optional[float] = Query(None, ge=0.0, le=1.0),
     w_oligo: Optional[float] = Query(None, ge=0.0, le=1.0),
-    x_api_key: Optional[str] = Header(default=None),
 ) -> Evidence:
     """
     Enhanced heuristic modality assessment using COMPARTMENTS + ChEMBL + PDBe + UniProt + IEDB.
@@ -1451,7 +1406,6 @@ async def tract_modality(
       * Immunogenicity signal from IEDB (epitopes / T-cell assays).
       * User can override the resulting per-modality scores with w_* query params.
     """
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1501,6 +1455,9 @@ async def tract_modality(
     immunogenicity_signal = min((epi_n + tc_n) / 50.0, 0.20)  # cap contribution at +0.20
 
     # Scoring (bounded and explainable); start from priors and nudge with evidence
+    def clamp(x: float) -> float:
+        return max(0.0, min(1.0, round(x, 3)))
+
     sm_score = prior_sm
     sm_score += 0.15 if has_chembl else 0.0
     sm_score += 0.10 if has_structure else 0.0
@@ -1510,15 +1467,12 @@ async def tract_modality(
     ab_score += 0.20 if (is_membrane or is_extracellular) else 0.0
     ab_score += 0.10 if has_structure else 0.0
     ab_score += 0.10 if extracellular_len >= 100 else 0.0
-    ab_score += immunogenicity_signal  # more epitopes / assays → more amenable for biologics
+    ab_score += immunogenicity_signal  # more epitopes / assays â more amenable for biologics
 
     oligo_score = prior_oligo
     oligo_score += 0.10 if in_nucleus_or_cytosol else 0.0
     oligo_score += 0.10 if has_structure else 0.0
     oligo_score += 0.05 if has_chembl else 0.0  # weak positive if there's chemical precedent
-
-    def clamp(x: float) -> float:
-        return max(0.0, min(1.0, round(x, 3)))
 
     # Apply user overrides if provided
     sm_score = clamp(w_sm) if (w_sm is not None) else clamp(sm_score)
@@ -1565,11 +1519,9 @@ async def tract_modality(
 @router.get("/tract/immunogenicity", response_model=Evidence)
 async def tract_immunogenicity(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    """Immunogenicity via IEDB IQ‑API (epitope_search + tcell_search)."""
-    _require_key(x_api_key)
+    """Immunogenicity via IEDB IQâAPI (epitope_search + tcell_search)."""
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1601,7 +1553,7 @@ async def tract_immunogenicity(
     total = len(epi_list) + len(tc_list)
     status = "OK" if total > 0 else "NO_DATA"
     return Evidence(
-        status=status, source="IEDB IQ‑API", fetched_n=total,
+        status=status, source="IEDB IQâAPI", fetched_n=total,
         data={
             "symbol": symbol,
             "normalized_symbol": sym_norm,
@@ -1615,16 +1567,14 @@ async def tract_immunogenicity(
 
 
 # -----------------------------------------------------------------------------
-# BUCKET 6 – Clinical Translation & Safety
+# BUCKET 6 â Clinical Translation & Safety
 # -----------------------------------------------------------------------------
 
 @router.get("/clin/endpoints", response_model=Evidence)
 async def clin_endpoints(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(3, ge=1, le=100),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
     base = "https://clinicaltrials.gov/api/v2/studies"
@@ -1665,7 +1615,6 @@ async def clin_endpoints(
 @router.get("/clin/rwe", response_model=Evidence)
 async def clin_rwe(
     condition: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     """
@@ -1673,7 +1622,6 @@ async def clin_rwe(
     Both fetched concurrently with bounded retries.
     If input appears to be a gene symbol, either expand a known condition alias or return clean NO_DATA.
     """
-    _require_key(x_api_key)
     validate_condition(condition, field_name="condition")
 
     # If user passed a gene-like token, try expanding to a known condition alias; otherwise skip with NO_DATA
@@ -1730,10 +1678,8 @@ async def clin_rwe(
 @router.get("/clin/safety", response_model=Evidence)
 async def clin_safety(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=500),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1759,10 +1705,8 @@ async def clin_safety(
 @router.get("/clin/pipeline", response_model=Evidence)
 async def clin_pipeline(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(50, ge=1, le=500),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1779,7 +1723,7 @@ async def clin_pipeline(
     except Exception:
         pass
 
-    result = await _safe_call(tract_drugs(symbol, x_api_key, limit))
+    result = await _safe_call(tract_drugs(symbol, limit=limit))
     return Evidence(
         status=result.status if result.status in ("OK", "NO_DATA") else "NO_DATA",
         source=result.source,
@@ -1790,17 +1734,15 @@ async def clin_pipeline(
 
 
 # -----------------------------------------------------------------------------
-# BUCKET 7 – Competition & IP
+# BUCKET 7 â Competition & IP
 # -----------------------------------------------------------------------------
 
 @router.get("/comp/intensity", response_model=Evidence)
 async def comp_intensity(
     symbol: str,
     condition: Optional[str] = None,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=1000),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
@@ -1824,8 +1766,8 @@ async def comp_intensity(
     except Exception:
         pass
 
-    drug_res = await _safe_call(tract_drugs(symbol, x_api_key, limit))
-    trial_res = await _safe_call(clin_endpoints(condition or symbol, x_api_key, limit))
+    drug_res = await _safe_call(tract_drugs(symbol, limit=limit))
+    trial_res = await _safe_call(clin_endpoints(condition or symbol, limit=limit))
     count = (drug_res.fetched_n if drug_res else 0) + (trial_res.fetched_n if trial_res else 0)
     return Evidence(
         status="OK" if count > 0 else "NO_DATA", source="Drugs+Trials fallback", fetched_n=count,
@@ -1842,10 +1784,8 @@ async def comp_intensity(
 @router.get("/comp/freedom", response_model=Evidence)
 async def comp_freedom(
     symbol: str,
-    x_api_key: Optional[str] = Header(default=None),
     limit: int = Query(100, ge=1, le=1000),
 ) -> Evidence:
-    _require_key(x_api_key)
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
