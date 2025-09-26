@@ -1,13 +1,16 @@
-# app/main.py — consolidated, matching targetval_router.py
-
+# app/main.py — public gateway, passthrough extras, proxy-aware, request-id
 import os
 import inspect
 import asyncio
+import uuid
+import re
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Header, Query, Depends
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.routers import targetval_router
 from app.routers.targetval_router import Evidence  # for isinstance checks
@@ -16,7 +19,7 @@ from app.routers.targetval_router import Evidence  # for isinstance checks
 # FastAPI app & CORS
 # -----------------------------------------------------------------------------
 
-app = FastAPI(title="TARGETVAL Gateway", version="1.2.0")
+app = FastAPI(title="TARGETVAL Gateway", version="1.2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,30 +29,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount all 30 module endpoints under their existing routes
+# Honor X-Forwarded-* from Render/ingress
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+# Request ID middleware for traceability
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        rid = request.headers.get("X-Request-ID") or os.getenv("REQUEST_ID_PREFIX","") + str(uuid.uuid4())
+        resp = await call_next(request)
+        resp.headers["X-Request-ID"] = rid
+        return resp
+
+app.add_middleware(RequestIDMiddleware)
+
+# Mount all module endpoints from router
 app.include_router(targetval_router.router)
-
-# -----------------------------------------------------------------------------
-# Optional gateway-level API key enforcement
-# -----------------------------------------------------------------------------
-
-GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY")
-
-def _check_gateway_key(header_key: Optional[str], query_key: Optional[str]):
-    """If GATEWAY_API_KEY is set, require it via header or query param."""
-    if not GATEWAY_API_KEY:
-        return
-    provided = header_key or query_key
-    if provided != GATEWAY_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
-
-async def require_gateway_key(
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-    api_key: Optional[str] = Query(default=None),
-):
-    _check_gateway_key(x_api_key, api_key)
-    # Return the provided key so we can forward it to module functions, if present
-    return x_api_key or api_key
 
 # -----------------------------------------------------------------------------
 # Modules registry (string → function) for programmatic calls
@@ -106,19 +100,32 @@ class AggregateRequest(BaseModel):
     condition: Optional[str] = None
     modules: Optional[List[str]] = None
     limit: Optional[int] = 50
+    # Common passthroughs used by specific modules
+    species: Optional[int] = None
+    cutoff: Optional[float] = None
     # catch-all for forward-compat extras (silently ignored by funcs that don't accept them)
     extra: Optional[Dict[str, Any]] = None
 
+# crude heuristic to tell if a string "looks like" an HGNC symbol (not an Ensembl/NCBI/curie)
+SYMBOLISH = re.compile(r"^[A-Za-z0-9-]+$")
+
+def _looks_like_symbol(s: str) -> bool:
+    if not s:
+        return False
+    up = s.upper()
+    if up.startswith("ENSG") or ":" in up or "_" in up:
+        return False
+    return bool(SYMBOLISH.match(up))
+
 def _bind_kwargs(func: Any, provided: Dict[str, Any]) -> Dict[str, Any]:
-    """Return only the kwargs that the target function actually accepts."""
+    """Return only the kwargs that the target function actually accepts.""" 
     sig = inspect.signature(func)
     allowed = set(sig.parameters.keys())
-    return {k: v for k, v in provided.items() if k in allowed}
+    return {k: v for k, v in provided.items() if k in allowed and v is not None}
 
 async def _run_module(
     name: str,
     func: Any,
-    provided_key: Optional[str],
     gene: Optional[str],
     symbol: Optional[str],
     efo: Optional[str],
@@ -126,9 +133,10 @@ async def _run_module(
     limit: Optional[int],
     extra: Optional[Dict[str, Any]],
 ):
-    """Invoke a single module function safely and return (name, result_dict)."""
-    # Default symbol to gene if only one is provided
-    symbol_effective = symbol or gene
+    """Invoke a single module function safely and return (name, result_dict).""" 
+    # Safer fallback: only use gene as symbol if it looks like an HGNC symbol
+    symbol_effective = symbol if symbol else (gene if _looks_like_symbol(gene or "") else None)
+
     kwargs_all: Dict[str, Any] = {
         "gene": gene,
         "symbol": symbol_effective,
@@ -136,10 +144,9 @@ async def _run_module(
         "condition": condition,
         "disease": condition,   # some functions use 'disease' as the param name
         "limit": limit,
-        "x_api_key": provided_key,
     }
+
     if extra:
-        # allow extras, but bind will filter
         kwargs_all.update(extra)
 
     kwargs = _bind_kwargs(func, kwargs_all)
@@ -148,9 +155,12 @@ async def _run_module(
         result = func(**kwargs)
         if asyncio.iscoroutine(result):
             result = await result
-        # Coerce Evidence Pydantic model to plain dict
+        # Coerce Evidence Pydantic model (v1 or v2) to plain dict
         if isinstance(result, Evidence):
-            return name, result.dict()
+            if hasattr(result, "dict"):
+                return name, result.dict()
+            if hasattr(result, "model_dump"):
+                return name, result.model_dump()
         if isinstance(result, dict):
             return name, result
         # Unexpected type; wrap
@@ -182,7 +192,7 @@ async def _run_module(
         }
 
 # -----------------------------------------------------------------------------
-# Convenience service endpoints
+# Convenience service endpoints (public)
 # -----------------------------------------------------------------------------
 
 @app.get("/healthz")
@@ -195,68 +205,79 @@ async def list_modules():
 
 @app.get("/module/{name}")
 async def run_single_module(
+    request: Request,
     name: str,
     gene: Optional[str] = Query(default=None),
     symbol: Optional[str] = Query(default=None),
     efo: Optional[str] = Query(default=None),
     condition: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=1000),
-    provided_key: Optional[str] = Depends(require_gateway_key),
 ):
     func = MODULE_MAP.get(name)
     if not func:
         raise HTTPException(status_code=404, detail=f"Unknown module: {name}")
+    # Pass through any extra query params (species, cutoff, tissue, cell_type, etc.)
+    known = {"gene", "symbol", "efo", "condition", "limit"}
+    extras: Dict[str, Any] = {k: v for k, v in request.query_params.items() if k not in known}
+
     _, res = await _run_module(
         name=name,
         func=func,
-        provided_key=provided_key,
         gene=gene,
         symbol=symbol,
         efo=efo,
         condition=condition,
         limit=limit,
-        extra=None,
+        extra=extras or None,
     )
     return res
 
-@app.post("/aggregate")
-async def aggregate(
-    body: AggregateRequest,
-    provided_key: Optional[str] = Depends(require_gateway_key),
-):
-    # Determine which modules to run
-    modules = body.modules or list(MODULE_MAP.keys())
+# Aggregate fan-out with optional concurrency cap
+AGG_LIMIT = int(os.getenv("AGG_CONCURRENCY", "8"))
 
-    # Validate module names early
+@app.post("/aggregate")
+async def aggregate(body: AggregateRequest):
+    modules = body.modules or list(MODULE_MAP.keys())
     unknown = [m for m in modules if m not in MODULE_MAP]
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unknown modules: {', '.join(unknown)}")
 
-    # Fan-out with backpressure handled in router helpers
-    tasks = [
-        _run_module(
-            name=m,
-            func=MODULE_MAP[m],
-            provided_key=provided_key,
-            gene=body.gene,
-            symbol=body.symbol,
-            efo=body.efo,
-            condition=body.condition,
-            limit=body.limit or 50,
-            extra=body.extra,
-        )
-        for m in modules
-    ]
-    results = await asyncio.gather(*tasks)
+    # Build a shared extras dict from common passthroughs + explicit extra
+    extras: Dict[str, Any] = {}
+    if body.species is not None:
+        extras["species"] = body.species
+    if body.cutoff is not None:
+        extras["cutoff"] = body.cutoff
+    if body.extra:
+        extras.update(body.extra)
+
+    sem = asyncio.Semaphore(AGG_LIMIT)
+
+    async def _guarded(mname: str, mfunc: Any):
+        async with sem:
+            return await _run_module(
+                name=mname,
+                func=mfunc,
+                gene=body.gene,
+                symbol=body.symbol,
+                efo=body.efo,
+                condition=body.condition,
+                limit=body.limit or 50,
+                extra=extras or None,
+            )
+
+    results = await asyncio.gather(*[_guarded(m, MODULE_MAP[m]) for m in modules])
 
     return {
         "query": {
             "gene": body.gene,
-            "symbol": body.symbol or body.gene,
+            "symbol": body.symbol if body.symbol else (body.gene if (body.gene and re.match(r"^[A-Za-z0-9-]+$", body.gene) and not body.gene.upper().startswith("ENSG") and ":" not in body.gene and "_" not in body.gene) else None),
             "efo": body.efo,
             "condition": body.condition,
             "limit": body.limit or 50,
             "modules": modules,
+            "species": body.species,
+            "cutoff": body.cutoff,
         },
         "results": {name: res for name, res in results},
     }
