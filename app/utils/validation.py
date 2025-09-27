@@ -1,97 +1,59 @@
 """Validation helpers for TARGETVAL inputs.
 
-These functions perform simple sanity checks on incoming request
-parameters, raising HTTP exceptions when values are missing or
-ill-formed.  The goal is to provide clear error messages early in
-request processing.
-
-As the gateway evolves, additional checks (e.g. regex matching for
-gene symbols, length limits) can be implemented here.  The current
-validators simply ensure that values are non-empty strings.  See
-``app/main.py`` for normalisation routines that map synonyms to
-canonical identifiers.
+These functions perform sanity checks on incoming request parameters,
+raising HTTP exceptions when values are missing or ill-formed.
 """
 
+import re
 from typing import Optional
 
 from fastapi import HTTPException
 
+# Regex patterns (conservative defaults)
+HGNC_REGEX = re.compile(r"^[A-Z0-9\-]+$")
+EFO_REGEX = re.compile(r"^EFO_\d+$")
+
 
 def validate_symbol(symbol: Optional[str], field_name: str = "symbol") -> None:
-    """Validate that a gene symbol or identifier is present and non-empty.
-
-    Parameters
-    ----------
-    symbol : Optional[str]
-        The gene symbol, Ensembl ID or other identifier to validate.
-    field_name : str, optional
-        The name of the field in the incoming request.  Used for error
-        messages.
-
-    Raises
-    ------
-    HTTPException
-        If the symbol is None or an empty/whitespace-only string.
-    """
+    """Validate that a gene symbol or identifier is present and well-formed."""
     if symbol is None or not isinstance(symbol, str) or not symbol.strip():
         raise HTTPException(
             status_code=400,
             detail=f"Invalid {field_name}: value must be a non-empty string",
         )
+    value = symbol.strip()
+    # Optional HGNC regex check (skip if it's an Ensembl/other ID)
+    if not (HGNC_REGEX.match(value) or value.startswith("ENSG") or value.startswith("ENSP")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {field_name}: '{value}' does not look like a valid gene symbol or Ensembl ID",
+        )
 
 
 def validate_condition(condition: Optional[str], field_name: str = "condition") -> None:
-    """Validate that a condition or disease name is present and non-empty.
-
-    Parameters
-    ----------
-    condition : Optional[str]
-        The condition name, EFO ID or other disease identifier to validate.
-    field_name : str, optional
-        The name of the field in the incoming request.  Used for error
-        messages.
-
-    Raises
-    ------
-    HTTPException
-        If the condition is None or an empty/whitespace-only string.
-    """
+    """Validate that a condition or disease name is present and non-empty."""
     if condition is None or not isinstance(condition, str) or not condition.strip():
         raise HTTPException(
             status_code=400,
             detail=f"Invalid {field_name}: value must be a non-empty string",
         )
+    value = condition.strip()
+    # Optional regex check if condition is already an EFO ID
+    if value.upper().startswith("EFO") and not EFO_REGEX.match(value.upper()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {field_name}: '{value}' does not look like a valid EFO identifier",
+        )
+
+
 def normalize_gene_symbol(
     symbol: Optional[str] = None,
     gene: Optional[str] = None,
-    field_name: str = "symbol"
+    field_name: str = "symbol",
 ) -> str:
     """
     Normalize gene input, accepting either `symbol` or `gene` as fallback.
-
-    Parameters
-    ----------
-    symbol : Optional[str]
-        Primary symbol field (e.g., used in most modules).
-    gene : Optional[str]
-        Alternate input key, often used in aggregate calls.
-    field_name : str
-        Used in error messages if neither is supplied.
-
-    Returns
-    -------
-    str
-        A normalized non-empty gene symbol string.
-
-    Raises
-    ------
-    HTTPException
-        If both `symbol` and `gene` are None or invalid.
     """
     value = symbol or gene
-    if value is None or not isinstance(value, str) or not value.strip():
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid {field_name}: value must be a non-empty string (gene or symbol)",
-        )
+    validate_symbol(value, field_name=field_name)
     return value.strip()
