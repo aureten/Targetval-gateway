@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "TargetVal Gateway (Public)",
-    "version": "1.4.0",
-    "description": "Public OpenAPI for the TargetVal Gateway aligned to the September 2025 router/main refresh. Genetics endpoints use Open Targets Platform v4 and expect Ensembl + EFO identifiers."
+    "version": "1.5.0",
+    "description": "Public OpenAPI aligned to the September 2025 router/main refresh.\nGenetics Bucket B1 upstreams now use: GWAS Catalog (l2g), ClinGen/OMIM (mendelian), OpenGWAS (mr), GTEx Portal (sqtl), and Roadmap/BLUEPRINT (epigenetics). Unchanged: ClinVar (rare), RNAcentral (lncrna), ENCORI (mirna)."
   },
   "servers": [
     {
@@ -131,10 +131,218 @@
     }
   },
   "paths": {
+    "/": {
+      "get": {
+        "operationId": "root",
+        "summary": "Service root",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "summary": "Service health",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "modules": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/modules": {
+      "get": {
+        "operationId": "list_modules",
+        "summary": "List module ids",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/module/{name}": {
+      "get": {
+        "operationId": "run_single_module",
+        "summary": "Run a single module by id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown module"
+          }
+        }
+      }
+    },
+    "/aggregate": {
+      "post": {
+        "operationId": "aggregate",
+        "summary": "Run multiple modules and return results",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "gene": {
+                    "type": "string"
+                  },
+                  "symbol": {
+                    "type": "string"
+                  },
+                  "ensembl_id": {
+                    "type": "string"
+                  },
+                  "efo": {
+                    "type": "string"
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "default": 50,
+                    "minimum": 1,
+                    "maximum": 1000
+                  },
+                  "modules": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "species": {
+                    "type": "integer"
+                  },
+                  "cutoff": {
+                    "type": "number"
+                  },
+                  "extra": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": []
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AggregateEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/genetics/l2g": {
       "get": {
         "operationId": "genetics_l2g",
-        "summary": "Locus-to-Gene via Open Targets Platform (gwas_credible_sets)",
+        "summary": "Locus-to-Gene via NHGRI-EBI GWAS Catalog (credible sets)",
         "parameters": [
           {
             "in": "query",
@@ -143,7 +351,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Gene symbol or Ensembl gene id (ENSG\u2026)"
+            "description": "Gene symbol or Ensembl gene id (ENSG\u2026 )"
           },
           {
             "in": "query",
@@ -152,7 +360,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "EFO disease/trait id; free-text is resolved to EFO on server"
+            "description": "EFO disease/trait id; free-text resolved on server"
           },
           {
             "in": "query",
@@ -161,7 +369,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Explicit Ensembl gene id override (ENSG\u2026)"
+            "description": "Explicit Ensembl gene id override (ENSG\u2026 )"
           },
           {
             "in": "query",
@@ -231,7 +439,7 @@
     "/genetics/mendelian": {
       "get": {
         "operationId": "genetics_mendelian",
-        "summary": "Mendelian/rare via Open Targets Platform (EVA, burdens, GEL, ClinGen, Orphanet)",
+        "summary": "Mendelian/rare (ClinGen validity; optional OMIM enrichment)",
         "parameters": [
           {
             "in": "query",
@@ -249,7 +457,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "EFO disease id (optional). If omitted, aggregates across top associated diseases."
+            "description": "EFO disease id (optional)"
           },
           {
             "in": "query",
@@ -289,7 +497,7 @@
     "/genetics/mr": {
       "get": {
         "operationId": "genetics_mr",
-        "summary": "EpiGraphDB xQTL multi-SNP MR (outcome filtered by EFO)",
+        "summary": "Mendelian randomization (OpenGWAS search + MR endpoints)",
         "parameters": [
           {
             "in": "query",
@@ -375,7 +583,7 @@
     "/genetics/mirna": {
       "get": {
         "operationId": "genetics_mirna",
-        "summary": "miRNA interactions (miRNet primary; ENCORI fallback)",
+        "summary": "miRNA interactions (ENCORI/starBase)",
         "parameters": [
           {
             "in": "query",
@@ -414,7 +622,7 @@
     "/genetics/sqtl": {
       "get": {
         "operationId": "genetics_sqtl",
-        "summary": "Splicing QTLs (eQTL Catalogue)",
+        "summary": "Splicing QTLs (GTEx Portal; independent eQTL fallback)",
         "parameters": [
           {
             "in": "query",
@@ -461,7 +669,7 @@
     "/genetics/epigenetics": {
       "get": {
         "operationId": "genetics_epigenetics",
-        "summary": "ENCODE experiments for gene",
+        "summary": "Epigenetic support (Roadmap + BLUEPRINT curated links)",
         "parameters": [
           {
             "in": "query",
@@ -1438,203 +1646,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/healthz": {
-      "get": {
-        "operationId": "healthz",
-        "summary": "Service health",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    },
-                    "modules": {
-                      "type": "integer"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/modules": {
-      "get": {
-        "operationId": "list_modules",
-        "summary": "List module ids",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/module/{name}": {
-      "get": {
-        "operationId": "run_single_module",
-        "summary": "Run a single module by id",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "gene",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "symbol",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "ensembl",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "efo",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1000,
-              "default": 50
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Unknown module"
-          }
-        }
-      }
-    },
-    "/aggregate": {
-      "post": {
-        "operationId": "aggregate",
-        "summary": "Run multiple modules and return results",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "gene": {
-                    "type": "string"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "ensembl_id": {
-                    "type": "string"
-                  },
-                  "efo": {
-                    "type": "string"
-                  },
-                  "condition": {
-                    "type": "string"
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "default": 50,
-                    "minimum": 1,
-                    "maximum": 1000
-                  },
-                  "modules": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "species": {
-                    "type": "integer"
-                  },
-                  "cutoff": {
-                    "type": "number"
-                  },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true
-                  }
-                },
-                "required": []
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AggregateEnvelope"
                 }
               }
             }
