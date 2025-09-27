@@ -83,6 +83,7 @@ MODULE_MAP: Dict[str, Any] = {
     "clin_rwe": targetval_router.clin_rwe,
     "clin_safety": targetval_router.clin_safety,
     "clin_pipeline": targetval_router.clin_pipeline,
+    "clin_biomarker_fit": targetval_router.clin_biomarker_fit,
     # Bucket 7 – Competition & IP
     "comp_intensity": targetval_router.comp_intensity,
     "comp_freedom": targetval_router.comp_freedom,
