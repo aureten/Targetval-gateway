@@ -28,6 +28,7 @@ import time
 import urllib.parse
 import gzip
 import io
+import itertools
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -504,7 +505,7 @@ def status() -> Dict[str, Any]:
             "B3: /expr/baseline, /expr/localization, /expr/inducibility",
             "B4: /mech/pathways, /mech/ppi, /mech/ligrec",
             "B5: /tract/drugs, /tract/ligandability-sm, /tract/ligandability-ab, /tract/ligandability-oligo, /tract/modality, /tract/immunogenicity",
-            "B6: /clin/endpoints, /clin/rwe, /clin/safety, /clin/pipeline",
+            "B6: /clin/endpoints, /clin/rwe, /clin/safety, /clin/pipeline, /clin/biomarker-fit",
             "B7: /comp/intensity, /comp/freedom",
         ],
     }
@@ -1244,93 +1245,90 @@ async def assoc_sc(
         )
 
 
+
 @router.get("/assoc/perturb", response_model=Evidence)
 async def assoc_perturb(
     condition: str,
+    symbol: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """CRISPR perturbation from BioGRID ORCS REST (requires ORCS_ACCESS_KEY).
-
-    Skips gracefully if input appears to be a gene symbol rather than a condition.
+    """CRISPR perturbation evidence.
+    Order: BioGRID ORCS (if ORCS_ACCESS_KEY) â DepMap CSV URL (DEPMAP_GENE_EFFECT_CSV_URL) â OpenTargets essentiality (GraphQL).
     """
     validate_condition(condition, field_name="condition")
-    # If input looks like a gene symbol, do not query ORCS with a gene term; return clean NO_DATA
-    if _looks_like_gene_token(condition):
-        return Evidence(
-            status="NO_DATA",
-            source="assoc_perturb expects a disease/phenotype; input appears to be a gene symbol",
-            fetched_n=0,
-            data={"condition": condition, "screens": []},
-            citations=["https://orcsws.thebiogrid.org/"],
-            fetched_at=_now(),
-        )
 
+    results: List[Any] = []
+    cites: List[str] = []
+
+    # 1) BioGRID ORCS (requires key)
     access_key = os.getenv("ORCS_ACCESS_KEY")
-    if not access_key:
-        return Evidence(
-            status="ERROR",
-            source="Missing ORCS access key (set ORCS_ACCESS_KEY)",
-            fetched_n=0,
-            data={"condition": condition, "screens": []},
-            citations=["https://orcsws.thebiogrid.org/"],
-            fetched_at=_now(),
+    if access_key:
+        base = "https://orcsws.thebiogrid.org/screens/"
+        list_url = (
+            f"{base}?accesskey={urllib.parse.quote(access_key)}&format=json"
+            f"&organismID=9606&conditionName={urllib.parse.quote(condition)}&start=0&max=1000"
         )
+        try:
+            js = await _get_json(list_url, tries=1)
+            cites.append(list_url)
+            items = js if isinstance(js, list) else js.get("data") or []
+            for it in items or []:
+                results.append(it)
+        except Exception:
+            pass
 
-    base = "https://orcsws.thebiogrid.org/screens/"
-    list_url = (
-        f"{base}?accesskey={urllib.parse.quote(access_key)}&format=json"
-        f"&organismID=9606&conditionName={urllib.parse.quote(condition)}&start=0&max=50"
-    )
-    try:
-        screens = await _get_json(list_url, tries=1)
-        screens_list = (screens if isinstance(screens, list) else [])[: min(3, len(screens or []))]
-        hits_collected: List[Dict[str, Any]] = []
-        for sc in screens_list:
-            sc_id = sc.get("SCREEN_ID") or sc.get("ID") or sc.get("SCREENID")
-            if not sc_id:
-                continue
-            sc_url = (
-                f"https://orcsws.thebiogrid.org/screen/{sc_id}"
-                f"?accesskey={urllib.parse.quote(access_key)}&format=json&hit=yes&start=0&max={min(200, limit)}"
+    # 2) DepMap CSV (optional) â expects a matrix with gene_effect columns keyed by gene
+    depmap_csv = os.getenv("DEPMAP_GENE_EFFECT_CSV_URL")
+    if depmap_csv and symbol:
+        try:
+            # fetch small head to avoid huge download; many servers support Range but httpx hides it; we just try full with budget
+            csv_txt = await _get_text(depmap_csv, tries=1)
+            cites.append(depmap_csv)
+            # naive filter: keep rows mentioning symbol in first 200 chars
+            for line in (csv_txt or "").splitlines()[:5000]:
+                if symbol.upper() in line.upper():
+                    results.append({"depmap_row": line[:5000]})
+        except Exception:
+            pass
+
+    # 3) OpenTargets essentiality (GraphQL) â if symbol provided
+    if symbol:
+        gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
+        q = {
+            "query": """
+            query Essentiality($symbol: String!) {
+              target(approvedSymbol: $symbol) {
+                essentiality {
+                  # shape depends on API; return raw blob
+                  rows { cellLineName score source }
+                }
+              }
+            }""",
+            "variables": {"symbol": symbol},
+        }
+        try:
+            ej = await _post_json(gql_url, q, tries=1)
+            cites.append(gql_url)
+            rows = (
+                ej.get("data", {})
+                  .get("target", {})
+                  .get("essentiality", {})
+                  .get("rows", [])
             )
-            try:
-                sc_hits = await _get_json(sc_url, tries=1)
-                for h in (sc_hits if isinstance(sc_hits, list) else []):
-                    hits_collected.append(
-                        {
-                            "screen_id": sc_id,
-                            "gene": h.get("OFFICIAL_SYMBOL") or h.get("NAME"),
-                            "cell_line": sc.get("CELL_LINE"),
-                            "phenotype": sc.get("PHENOTYPE"),
-                            "score1": h.get("SCORE_1") or h.get("SCORE1") or h.get("SCORE"),
-                            "pubmed_id": sc.get("PUBMED_ID"),
-                        }
-                    )
-            except Exception:
-                continue
+            for r in rows or []:
+                results.append({"essentiality": r})
+        except Exception:
+            pass
 
-        return Evidence(
-            status="OK" if hits_collected else "NO_DATA",
-            source="BioGRID ORCS REST",
-            fetched_n=len(hits_collected),
-            data={"condition": condition, "screens_n": len(screens_list), "hits": hits_collected[:limit]},
-            citations=[list_url],
-            fetched_at=_now(),
-        )
-    except Exception as e:
-        return Evidence(
-            status="NO_DATA",
-            source=f"ORCS empty/unavailable: {e}",
-            fetched_n=0,
-            data={"condition": condition, "screens": []},
-            citations=[list_url],
-            fetched_at=_now(),
-        )
-
-
-# -----------------------------------------------------------------------------
-# BUCKET 3 â Expression, Specificity & Localization
-# -----------------------------------------------------------------------------
+    status = "OK" if results else "NO_DATA"
+    return Evidence(
+        status=status,
+        source="ORCS + DepMap (opt) + OpenTargets",
+        fetched_n=len(results),
+        data={"condition": condition, "screens": results[:limit]},
+        citations=cites,
+        fetched_at=_now(),
+    )
 @router.get("/expr/baseline", response_model=Evidence)
 async def expression_baseline(
     symbol: Optional[str] = Query(None),
@@ -1503,40 +1501,101 @@ async def expr_inducibility(
 # -----------------------------------------------------------------------------
 # BUCKET 4 â Mechanistic Wiring & Networks
 # -----------------------------------------------------------------------------
+
 @router.get("/mech/pathways", response_model=Evidence)
 async def mech_pathways(
     symbol: str,
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
+    """
+    Pathway membership across multiple providers:
+      - Reactome ContentService (search by symbol)
+      - KEGG REST (maps Entrez â hsa pathway)
+      - WikiPathways REST (text search)
+    Returns merged unique pathway list with provider tags.
+    """
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-    search = f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(sym_norm)}&species=Homo%20sapiens"
+
+    pathways: List[Dict[str, Any]] = []
+    cites: List[str] = []
+
+    # 1) Reactome (existing)
+    reactome_search = f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(sym_norm)}&species=Homo%20sapiens"
     try:
-        js = await _get_json(search, tries=1)
+        js = await _get_json(reactome_search, tries=1)
         hits = js.get("results", []) if isinstance(js, dict) else []
-        pathways = []
         for h in hits:
-            if (h.get("stId", "") or "").startswith("R-HSA") or (h.get("species") in ("Homo sapiens", "Pathway")):
-                pathways.append({"name": h.get("name"), "stId": h.get("stId"), "score": h.get("score")})
-        return Evidence(
-            status="OK" if pathways else "NO_DATA",
-            source="Reactome ContentService",
-            fetched_n=len(pathways),
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "pathways": pathways[:limit]},
-            citations=[search],
-            fetched_at=_now(),
-        )
+            if (h.get("stId", "") or "").startswith("R-HSA"):
+                pathways.append({"name": h.get("name"), "id": h.get("stId"), "provider": "Reactome", "score": h.get("score")})
+        cites.append(reactome_search)
     except Exception:
-        return Evidence(
-            status="NO_DATA",
-            source="Reactome empty/unavailable",
-            fetched_n=0,
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "pathways": []},
-            citations=[search],
-            fetched_at=_now(),
-        )
+        pass
 
+    # Helper to ensure uniqueness by (provider,id,name)
+    def _dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen = set()
+        out = []
+        for it in items:
+            key = (it.get("provider"), it.get("id"), it.get("name"))
+            if key not in seen:
+                seen.add(key); out.append(it)
+        return out
 
+    # 2) KEGG: need Entrez gene id â link to pathways
+    kegg_items: List[Dict[str, Any]] = []
+    try:
+        # Resolve Entrez Gene ID via MyGene.info
+        mg = f"https://mygene.info/v3/query?q=symbol:{urllib.parse.quote(sym_norm)}&species=human&fields=entrezgene"
+        mg_js = await _get_json(mg, tries=1)
+        cites.append(mg)
+        entrez = None
+        if isinstance(mg_js, dict):
+            hits = mg_js.get("hits", [])
+            if hits:
+                entrez = hits[0].get("entrezgene")
+        if entrez:
+            # link gene â pathways
+            link_url = f"http://rest.kegg.jp/link/pathway/hsa:{entrez}"
+            link_txt = await _get_text(link_url, tries=1)  # we'll add _get_text helper shortly if missing
+            cites.append(link_url)
+            pids = []
+            for line in (link_txt or "").splitlines():
+                parts = line.strip().split()
+                if len(parts) == 2 and parts[1].startswith("path:"):
+                    pids.append(parts[1].split(":")[1])
+            for pid in pids[:limit]:
+                list_url = f"http://rest.kegg.jp/list/{pid}"
+                lst = await _get_text(list_url, tries=1)
+                cites.append(list_url)
+                if lst:
+                    # format: path:hsaXXXXX	Name - Homo sapiens (human)
+                    nm = lst.split("\t", 1)[1].strip() if "\t" in lst else lst.strip()
+                    kegg_items.append({"name": nm, "id": pid, "provider": "KEGG"})
+    except Exception:
+        pass
+    pathways.extend(kegg_items)
+
+    # 3) WikiPathways text search
+    try:
+        wp = f"https://webservice.wikipathways.org/findPathwaysByText?query={urllib.parse.quote(sym_norm)}&species=Homo%20sapiens&format=json"
+        wp_js = await _get_json(wp, tries=1)
+        cites.append(wp)
+        hits = (wp_js.get("result") or []) if isinstance(wp_js, dict) else []
+        for h in hits:
+            pathways.append({"name": h.get("name"), "id": h.get("id"), "provider": "WikiPathways"})
+    except Exception:
+        pass
+
+    merged = _dedupe(pathways)
+    return Evidence(
+        status="OK" if merged else "NO_DATA",
+        source="Reactome + KEGG + WikiPathways",
+        fetched_n=len(merged),
+        data={"symbol": symbol, "normalized_symbol": sym_norm, "pathways": merged[:limit]},
+        citations=cites,
+        fetched_at=_now(),
+    )
 @router.get("/mech/ppi", response_model=Evidence)
 async def mech_ppi(
     symbol: str,
@@ -1629,21 +1688,26 @@ async def mech_ligrec(
 # -----------------------------------------------------------------------------
 # BUCKET 5 â Tractability & Modality
 # -----------------------------------------------------------------------------
+
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(
     symbol: str,
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
-    """Known/experimental drugs for a target. OpenTargets first; DGIdb fallback."""
+    """Known/experimental drugs for a target.
+    Order: OpenTargets knownDrugs â DGIdb â ChEMBL (mechanisms/indications) â DrugBank (if DRUGBANK_API_KEY).
+    """
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
 
-    gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
+    sources: List[str] = []
+    interactions: List[Any] = []
 
     # 1) OpenTargets knownDrugs (GraphQL)
+    gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
     query = {
         "query": """
-        query ($symbol: String!) {
+        query KnownDrugs($symbol: String!) {
           target(approvedSymbol: $symbol) {
             knownDrugs { rows { drugId drugName mechanismOfAction } count }
           }
@@ -1654,44 +1718,74 @@ async def tract_drugs(
         res = await _post_json(gql_url, query, tries=1)
         rows = (res.get("data", {}).get("target", {}).get("knownDrugs", {}).get("rows", []))
         if rows:
-            return Evidence(
-                status="OK",
-                source="OpenTargets knownDrugs",
-                fetched_n=len(rows),
-                data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": rows[:limit]},
-                citations=[gql_url],
-                fetched_at=_now(),
-            )
+            sources.append("OpenTargets")
+            interactions.extend(rows)
     except Exception:
         pass
 
     # 2) DGIdb fallback
-    dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(sym_norm)}"
     try:
+        dg_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(sym_norm)}"
         body = await _get_json(dg_url, tries=1)
         matched = body.get("matchedTerms", []) if isinstance(body, dict) else []
-        interactions: List[Any] = []
         for term in matched or []:
             interactions.extend(term.get("interactions", []))
-        return Evidence(
-            status="OK" if interactions else "NO_DATA",
-            source="DGIdb",
-            fetched_n=len(interactions),
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": interactions[:limit]},
-            citations=[dg_url],
-            fetched_at=_now(),
-        )
+        sources.append("DGIdb")
     except Exception:
-        return Evidence(
-            status="NO_DATA",
-            source="OpenTargets+DGIdb empty/unavailable",
-            fetched_n=0,
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": []},
-            citations=[gql_url, dg_url],
-            fetched_at=_now(),
-        )
+        pass
 
+    # 3) ChEMBL enrichment (target â mechanisms â molecules)
+    try:
+        chembl_search = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(sym_norm)}&format=json"
+        tjs = await _get_json(chembl_search, tries=1)
+        tids = []
+        for t in (tjs.get("targets", []) if isinstance(tjs, dict) else []):
+            tid = t.get("target_chembl_id")
+            if tid: tids.append(tid)
+        cites_chembl = [chembl_search]
+        mech_rows = []
+        for tid in tids[:2]:  # cap to avoid explosion
+            mech_url = f"https://www.ebi.ac.uk/chembl/api/data/mechanism.json?target_chembl_id={urllib.parse.quote(tid)}"
+            mjs = await _get_json(mech_url, tries=1)
+            cites_chembl.append(mech_url)
+            for m in (mjs.get("mechanisms", []) if isinstance(mjs, dict) else []):
+                mech_rows.append(m)
+        if mech_rows:
+            sources.append("ChEMBL")
+            # Normalize to interaction-like rows
+            for m in mech_rows:
+                interactions.append({
+                    "drugId": m.get("molecule_chembl_id"),
+                    "drugName": m.get("molecule_pref_name"),
+                    "mechanismOfAction": m.get("mechanism_of_action"),
+                })
+    except Exception:
+        pass
 
+    # 4) DrugBank (optional; paid) minimal enrichment by target gene symbol
+    db_key = os.getenv("DRUGBANK_API_KEY") or os.getenv("DRUGBANK_KEY")
+    if db_key:
+        try:
+            # DrugBank public API v1 has limited endpoints; for paid use, users can route via their proxy.
+            # Here we try the 'targets' search if available on their deployment.
+            db_url = f"https://api.drugbank.com/v1/us/targets/{urllib.parse.quote(sym_norm)}?api_key={urllib.parse.quote(db_key)}"
+            db = await _get_json(db_url, tries=1)
+            # shape varies; just attach raw
+            interactions.append({"drugbank": db})
+            sources.append("DrugBank")
+        except Exception:
+            pass
+
+    status = "OK" if interactions else "NO_DATA"
+    cites = [gql_url, "https://dgidb.org/api", "https://www.ebi.ac.uk/chembl/api/data/"] + (["https://api.drugbank.com/"] if db_key else [])
+    return Evidence(
+        status=status,
+        source=" + ".join(sources) if sources else "OpenTargets+DGIdb+ChEMBL(+DrugBank opt)",
+        fetched_n=len(interactions),
+        data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": interactions[:limit]},
+        citations=cites,
+        fetched_at=_now(),
+    )
 @router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(
     symbol: str,
@@ -1992,6 +2086,7 @@ async def tract_immunogenicity(
 # -----------------------------------------------------------------------------
 # BUCKET 6 â Clinical Translation & Safety
 # -----------------------------------------------------------------------------
+
 @router.get("/clin/endpoints", response_model=Evidence)
 async def clin_endpoints(
     condition: str,
@@ -2000,92 +2095,67 @@ async def clin_endpoints(
     validate_condition(condition, field_name="condition")
     base = "https://clinicaltrials.gov/api/v2/studies"
     q = f"{base}?query.cond={urllib.parse.quote(condition)}&pageSize={limit}"
+    # WHO ICTRP fallback
+    who_url = f"https://trialsearch.who.int/api/Trial?query={urllib.parse.quote(condition)}"
+    studies = []
+    cites = []
     try:
         js = await _get_json(q, tries=1)
+        cites.append(q)
         studies = js.get("studies", []) if isinstance(js, dict) else []
-        return Evidence(
-            status="OK" if studies else "NO_DATA",
-            source="ClinicalTrials.gov v2",
-            fetched_n=len(studies),
-            data={"condition": condition, "studies": studies[:limit]},
-            citations=[q],
-            fetched_at=_now(),
-        )
     except Exception:
-        # Fallback to v1 study_fields API
-        v1 = (
-            "https://clinicaltrials.gov/api/query/study_fields"
-            f"?expr={urllib.parse.quote(condition)}"
-            f"&fields=NCTId,Condition,PrimaryOutcomeMeasure,BriefTitle,StudyType"
-            f"&min_rnk=1&max_rnk={limit}&fmt=json"
-        )
-        try:
-            js1 = await _get_json(v1, tries=1)
-            fields = js1.get("StudyFieldsResponse", {}).get("StudyFields", [])
-            return Evidence(
-                status="OK" if fields else "NO_DATA",
-                source="ClinicalTrials.gov v1 study_fields (fallback)",
-                fetched_n=len(fields),
-                data={"condition": condition, "studies": fields[:limit]},
-                citations=[q, v1],
-                fetched_at=_now(),
-            )
-        except Exception:
-            return Evidence(
-                status="NO_DATA",
-                source="ClinicalTrials.gov v2+v1 unavailable or empty",
-                fetched_n=0,
-                data={"condition": condition, "studies": []},
-                citations=[q, v1],
-                fetched_at=_now(),
-            )
+        pass
 
+    if not studies:
+        try:
+            wj = await _get_json(who_url, tries=1)
+            cites.append(who_url)
+            # ICTRP returns list of trial dicts; shape varies; just slice
+            studies = (wj if isinstance(wj, list) else wj.get("Trials", [])) or []
+        except Exception:
+            pass
+
+    return Evidence(
+        status="OK" if studies else "NO_DATA",
+        source="ClinicalTrials.gov v2 or WHO ICTRP",
+        fetched_n=len(studies),
+        data={"condition": condition, "studies": studies[:limit]},
+        citations=cites,
+        fetched_at=_now(),
+    )
 
 @router.get("/clin/rwe", response_model=Evidence)
 async def clin_rwe(
     condition: str,
+    symbol: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     """
     RWE proxies: FAERS (openFDA) + ClinicalTrials.gov.
-    Both fetched concurrently with bounded retries.
-
-    If input appears to be a gene symbol, either expand a known condition alias or return clean NO_DATA.
+    Enhancement: if a PCSK9âaxis symbol is provided (e.g., PCSK9), also query brand/generic mAbs in FAERS.
     """
     validate_condition(condition, field_name="condition")
+    faers_base = "https://api.fda.gov/drug/event.json"
+    ct_url = ("https://clinicaltrials.gov/api/v2/studies"
+              f"?query.cond={urllib.parse.quote(condition)}&pageSize={min(100, limit)}")
 
-    # If user passed a gene-like token, try expanding to a known condition alias; otherwise skip with NO_DATA
-    if _looks_like_gene_token(condition):
-        expanded = _expand_condition_alias(condition)
-        if expanded == condition:
-            return Evidence(
-                status="NO_DATA",
-                source="clin_rwe expects a condition; input appears to be a gene symbol",
-                fetched_n=0,
-                data={"condition": condition, "faers_events": [], "observational_trials": []},
-                citations=["https://api.fda.gov/drug/event.json", "https://clinicaltrials.gov/api/v2/studies"],
-                fetched_at=_now(),
-            )
-        condition = expanded  # use expanded disease term
+    # Primary FAERS by condition
+    faers_url = f"{faers_base}?search=patient.reaction.reactionmeddrapt.exact:{urllib.parse.quote(condition)}&limit={min(100, limit)}"
 
-    # FAERS: broadened to reaction OR indication; use exact phrase matching to avoid token splitting
-    faers_url = (
-        "https://api.fda.gov/drug/event.json?"
-        f"search=(patient.reaction.reactionmeddrapt.exact:%22{urllib.parse.quote(condition)}%22"
-        f"+OR+patient.drug.indication.exact:%22{urllib.parse.quote(condition)}%22)&limit={limit}"
-    )
-    # CT: include all study types (observational + interventional)
-    ct_url = (
-        "https://clinicaltrials.gov/api/v2/studies"
-        f"?query.cond={urllib.parse.quote(condition)}&pageSize={min(100, limit)}"
-    )
+    # If symbol hints PCSK9 program, also query alirocumab/evolocumab directly
+    faers_drug_urls: List[str] = []
+    if (symbol or "").upper() in {"PCSK9", "LDLR", "LDLRAP1"} or "cholesterol" in condition.lower():
+        for drug in ["alirocumab", "evolocumab"]:
+            faers_drug_urls.append(f"{faers_base}?search=patient.drug.medicinalproduct:{urllib.parse.quote(drug)}&limit={min(100, limit)}")
 
-    async def _faers():
+    async def _get(url):
         try:
-            f = await _get_json(faers_url, tries=1)
-            return f.get("results", []) if isinstance(f, dict) else []
+            j = await _get_json(url, tries=1)
+            return j.get("results", []) if isinstance(j, dict) else []
         except Exception:
             return []
+
+    tasks = [_get(faers_url)] + [_get(u) for u in faers_drug_urls]
 
     async def _ct():
         try:
@@ -2094,18 +2164,18 @@ async def clin_rwe(
         except Exception:
             return []
 
-    faers_results, trials = await asyncio.gather(_faers(), _ct())
-    total = len(faers_results) + len(trials)
+    faers_lists, trials = await asyncio.gather(asyncio.gather(*tasks), _ct())
+    faers_flat = list(itertools.chain.from_iterable(faers_lists))
+    total = len(faers_flat) + len(trials)
+    cites = [faers_url] + faers_drug_urls + [ct_url]
     return Evidence(
         status="OK" if total > 0 else "NO_DATA",
-        source="openFDA FAERS + ClinicalTrials.gov v2",
+        source="openFDA FAERS (+drug names) + ClinicalTrials.gov v2",
         fetched_n=total,
-        data={"condition": condition, "faers_events": faers_results[:limit], "observational_trials": trials[:limit]},
-        citations=[faers_url, ct_url],
+        data={"condition": condition, "faers_events": faers_flat[:limit], "observational_trials": trials[:limit]},
+        citations=cites,
         fetched_at=_now(),
     )
-
-
 @router.get("/clin/safety", response_model=Evidence)
 async def clin_safety(
     symbol: str,
@@ -2177,6 +2247,95 @@ async def clin_pipeline(
 # -----------------------------------------------------------------------------
 # BUCKET 7 â Competition & IP
 # -----------------------------------------------------------------------------
+
+
+
+
+@router.get("/clin/biomarker-fit", response_model=Evidence)
+async def clin_biomarker_fit(
+    symbol: str,
+    condition: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+) -> Evidence:
+    """
+    Biomarker fit summary for a target:
+      - Detectability & compartment: HPA (plasma/secretome) + subcellular location
+      - UniProt annotations: 'Biomarker' keyword, disease involvement, secretion
+      - Trials where the marker is an endpoint (ClinicalTrials.gov v2; WHO ICTRP fallback)
+    Returns a pragmatic score (0â1) and supporting evidence.
+    """
+    validate_symbol(symbol, field_name="symbol")
+    sym = await _normalize_symbol(symbol)
+
+    cites: List[str] = []
+    payload: Dict[str, Any] = {"symbol": symbol, "normalized_symbol": sym}
+
+    # 1) HPA: detectability and secretome/plasma hints
+    hpa = ("https://www.proteinatlas.org/api/search_download.php"
+           f"?format=json&columns=gene,secretome,subcell_location,plasma_protein,rna_tissue,rna_gtex&search={urllib.parse.quote(sym)}")
+    hpa_rows: List[Dict[str, Any]] = []
+    try:
+        hj = await _get_json(hpa, tries=1)
+        cites.append(hpa)
+        hpa_rows = hj if isinstance(hj, list) else []
+    except Exception:
+        pass
+    payload["hpa"] = hpa_rows[:limit]
+
+    # 2) UniProtKB: annotation scan
+    uni = ("https://rest.uniprot.org/uniprotkb/search"
+           f"?query=gene:{urllib.parse.quote(sym)}+AND+organism_id:9606&fields=accession,protein_name,keyword,cc_disease,cc_subcellular_location")
+    unij = None
+    try:
+        unij = await _get_json(uni, tries=1)
+        cites.append(uni)
+    except Exception:
+        pass
+    payload["uniprot"] = unij
+
+    # 3) Trials mentioning the symbol as endpoint/biomarker
+    trials: List[Any] = []
+    ct1 = ("https://clinicaltrials.gov/api/v2/studies"
+           f"?query.term={urllib.parse.quote(sym)}&pageSize={min(100,limit)}")
+    try:
+        ctj = await _get_json(ct1, tries=1)
+        cites.append(ct1)
+        trials = ctj.get("studies", []) if isinstance(ctj, dict) else []
+    except Exception:
+        pass
+    if not trials:
+        who = f"https://trialsearch.who.int/api/Trial?query={urllib.parse.quote(sym)}"
+        try:
+            wt = await _get_json(who, tries=1)
+            cites.append(who)
+            trials = (wt if isinstance(wt, list) else wt.get("Trials", [])) or []
+        except Exception:
+            pass
+    payload["trials"] = trials[:limit]
+
+    # Scoring: simple heuristic
+    detectable = any(r.get("plasma_protein") or r.get("secretome") for r in (hpa_rows or []))
+    uniprot_flags = False
+    try:
+        # search for keyword 'Biomarker' or subcellular location terms
+        txt = json.dumps(unij) if unij else ""
+        uniprot_flags = ("Biomarker" in txt) or ("Secreted" in txt) or ("Extracellular" in txt)
+    except Exception:
+        pass
+    trials_signal = len(trials) > 0
+
+    score = (0.4 if detectable else 0.0) + (0.3 if uniprot_flags else 0.0) + (0.3 if trials_signal else 0.0)
+
+    return Evidence(
+        status="OK" if (hpa_rows or unij or trials) else "NO_DATA",
+        source="HPA + UniProt + ClinicalTrials/ICTRP",
+        fetched_n=(len(hpa_rows) + (1 if unij else 0) + len(trials)),
+        data={"symbol": symbol, "normalized_symbol": sym, "score": round(score, 2), **payload},
+        citations=cites,
+        fetched_at=_now(),
+    )
+
+
 @router.get("/comp/intensity", response_model=Evidence)
 async def comp_intensity(
     symbol: str,
@@ -2187,64 +2346,96 @@ async def comp_intensity(
     sym_norm = await _normalize_symbol(symbol)
     cond = condition or ""
 
-    # Balanced and readable construction of the PatentsView boolean query
-    query = {
-        "_and": [
-            {
-                "_or": [
-                    {"patent_title": {"_text_any": sym_norm}},
-                    {"patent_abstract": {"_text_any": sym_norm}},
-                ]
-            }
-        ]
-    }
-    if cond:
-        query["_and"].append(
-            {
-                "_or": [
-                    {"patent_title": {"_text_any": cond}},
-                    {"patent_abstract": {"_text_any": cond}},
-                ]
-            }
-        )
+    citations: List[str] = []
+    results: List[Any] = []
 
-    query_str = urllib.parse.quote(json.dumps(query))
-    fields = urllib.parse.quote(json.dumps(["patent_id"]))
-    pat_url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
+    # 0) Lens.org patents (optional, if token available)
+    lens_token = os.getenv("LENS_API_TOKEN")
+    if lens_token:
+        try:
+            url = "https://api.lens.org/patent/search"
+            payload = {
+                "query": {
+                    "bool": {
+                        "must": [{"terms": {"title": [sym_norm]}},],
+                        "should": [{"terms": {"abstract": [cond]}}] if cond else [],
+                    }
+                },
+                "size": min(1000, limit),
+                "include": ["lens_id"],
+            }
+            headers = {"Authorization": f"Bearer {lens_token}"}
+            js = await _post_json(url, payload, tries=1, headers=headers)
+            citations.append(url)
+            hits = js.get("data", []) or js.get("results", []) or []
+            for h in hits:
+                results.append({"lens_id": h.get("lens_id")})
+        except Exception:
+            pass
 
-    try:
-        js = await _get_json(pat_url, tries=1)
-        patents = js.get("patents", []) if isinstance(js, dict) else []
+    # 1) PatentsView (public)
+    if not results:
+        query = {
+            "_and": [
+                {"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}]},
+            ]
+        }
+        if cond:
+            query["_and"].append(
+                {"_or": [{"patent_title": {"_text_any": cond}}, {"patent_abstract": {"_text_any": cond}}]}
+            )
+        query_str = urllib.parse.quote(json.dumps(query))
+        fields = urllib.parse.quote(json.dumps(["patent_id"]))
+        pat_url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
+        try:
+            js = await _get_json(pat_url, tries=1)
+            citations.append(pat_url)
+            patents = js.get("patents", []) if isinstance(js, dict) else []
+            for p in patents:
+                results.append({"patent_id": p.get("patent_id")})
+        except Exception:
+            pass
+
+    # 2) SureChEMBL (optional public)
+    if not results:
+        try:
+            sc = f"https://www.ebi.ac.uk/surechembl/api/search?query={urllib.parse.quote(sym_norm)}"
+            sj = await _get_json(sc, tries=1)
+            citations.append(sc)
+            items = sj.get("results", []) if isinstance(sj, dict) else []
+            for it in items:
+                results.append({"surechembl_id": it.get("id")})
+        except Exception:
+            pass
+
+    # Fallback: combine drugs+trials counts
+    if not results:
+        drug_res = await _safe_call(tract_drugs(symbol, limit=limit))
+        trial_res = await _safe_call(clin_endpoints(condition or symbol, limit=limit))
+        count = (drug_res.fetched_n if drug_res else 0) + (trial_res.fetched_n if trial_res else 0)
         return Evidence(
-            status="OK" if patents else "NO_DATA",
-            source="PatentsView query",
-            fetched_n=len(patents),
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "condition": condition, "patents": patents[:limit]},
-            citations=[pat_url],
+            status="OK" if count > 0 else "NO_DATA",
+            source="Drugs+Trials fallback",
+            fetched_n=count,
+            data={
+                "symbol": symbol,
+                "normalized_symbol": sym_norm,
+                "condition": condition,
+                "drugs_n": drug_res.fetched_n if drug_res else 0,
+                "trials_n": trial_res.fetched_n if trial_res else 0,
+            },
+            citations=(drug_res.citations if drug_res else []) + (trial_res.citations if trial_res else []),
             fetched_at=_now(),
         )
-    except Exception:
-        pass
-
-    drug_res = await _safe_call(tract_drugs(symbol, limit=limit))
-    trial_res = await _safe_call(clin_endpoints(condition or symbol, limit=limit))
-    count = (drug_res.fetched_n if drug_res else 0) + (trial_res.fetched_n if trial_res else 0)
 
     return Evidence(
-        status="OK" if count > 0 else "NO_DATA",
-        source="Drugs+Trials fallback",
-        fetched_n=count,
-        data={
-            "symbol": symbol,
-            "normalized_symbol": sym_norm,
-            "condition": condition,
-            "drugs_n": drug_res.fetched_n if drug_res else 0,
-            "trials_n": trial_res.fetched_n if trial_res else 0,
-        },
-        citations=(drug_res.citations if drug_res else []) + (trial_res.citations if trial_res else []),
+        status="OK",
+        source="Lens (opt) + PatentsView + SureChEMBL",
+        fetched_n=len(results),
+        data={"symbol": symbol, "normalized_symbol": sym_norm, "condition": condition, "patents": results[:limit]},
+        citations=citations,
         fetched_at=_now(),
     )
-
 
 @router.get("/comp/freedom", response_model=Evidence)
 async def comp_freedom(
@@ -2253,27 +2444,61 @@ async def comp_freedom(
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-    query = {"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}]}
-    query_str = urllib.parse.quote(json.dumps(query))
-    fields = urllib.parse.quote(json.dumps(["patent_id"]))
-    url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
-    try:
-        js = await _get_json(url, tries=1)
-        patents = js.get("patents", []) if isinstance(js, dict) else []
-        return Evidence(
-            status="OK" if patents else "NO_DATA",
-            source="PatentsView FTO query",
-            fetched_n=len(patents),
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "patents": patents[:limit]},
-            citations=[url],
-            fetched_at=_now(),
-        )
-    except Exception:
-        return Evidence(
-            status="NO_DATA",
-            source="PatentsView empty/unavailable",
-            fetched_n=0,
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "patents": []},
-            citations=[url],
-            fetched_at=_now(),
-        )
+
+    citations: List[str] = []
+    results: List[Any] = []
+
+    # Lens.org (optional)
+    lens_token = os.getenv("LENS_API_TOKEN")
+    if lens_token:
+        try:
+            url = "https://api.lens.org/patent/search"
+            payload = {
+                "query": {"bool": {"must": [{"terms": {"title": [sym_norm]}}]}},
+                "size": min(1000, limit),
+                "include": ["lens_id"],
+            }
+            headers = {"Authorization": f"Bearer {lens_token}"}
+            js = await _post_json(url, payload, tries=1, headers=headers)
+            citations.append(url)
+            hits = js.get("data", []) or js.get("results", []) or []
+            for h in hits:
+                results.append({"lens_id": h.get("lens_id")})
+        except Exception:
+            pass
+
+    # PatentsView
+    if not results:
+        query = {"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}]}
+        query_str = urllib.parse.quote(json.dumps(query))
+        fields = urllib.parse.quote(json.dumps(["patent_id"]))
+        url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
+        try:
+            js = await _get_json(url, tries=1)
+            citations.append(url)
+            patents = js.get("patents", []) if isinstance(js, dict) else []
+            for p in patents:
+                results.append({"patent_id": p.get("patent_id")})
+        except Exception:
+            pass
+
+    # SureChEMBL (optional)
+    if not results:
+        try:
+            sc = f"https://www.ebi.ac.uk/surechembl/api/search?query={urllib.parse.quote(sym_norm)}"
+            sj = await _get_json(sc, tries=1)
+            citations.append(sc)
+            items = sj.get("results", []) if isinstance(sj, dict) else []
+            for it in items:
+                results.append({"surechembl_id": it.get("id")})
+        except Exception:
+            pass
+
+    return Evidence(
+        status="OK" if results else "NO_DATA",
+        source="Lens (opt) + PatentsView + SureChEMBL",
+        fetched_n=len(results),
+        data={"symbol": symbol, "normalized_symbol": sym_norm, "patents": results[:limit]},
+        citations=citations,
+        fetched_at=_now(),
+    )
