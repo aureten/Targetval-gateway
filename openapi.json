@@ -1,916 +1,16 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "TARGETVAL Gateway",
-    "version": "1.2.1",
-    "description": "Public spec matched to the live TargetVal FastAPI. Genetics endpoints use 'gene'; expression/mechanistic/tractability use 'symbol'; association/clinical use 'condition'. PPI advertises 'species' and 'cutoff'. /aggregate returns envelope {query, results} and accepts optional species/cutoff broadcast."
+    "title": "TargetVal Gateway (Aggregate + Modules + Scoring)",
+    "version": "1.3.3",
+    "description": "OpenAPI spec exposing 29 module endpoints, /aggregate for raw evidence, and a new /score endpoint that returns bucket-level, anchor-based scores and the final TargetVal score. Compatible with ChatGPT Actions. Consolidated /comp endpoints into a single /comp with 'metric' query parameter. Fixed inline parameters and AggregateResponse.properties for strict Actions validators."
   },
   "servers": [
     {
       "url": "https://targetval-gateway.onrender.com"
     }
   ],
-  "paths": {
-    "/healthz": {
-      "get": {
-        "summary": "Liveness/Modules count",
-        "operationId": "healthz",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    },
-                    "modules": {
-                      "type": "integer"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/modules": {
-      "get": {
-        "summary": "List available modules",
-        "operationId": "modules",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/genetics/l2g": {
-      "get": {
-        "operationId": "genetics_l2g",
-        "summary": "Locus-to-Gene (GWAS Catalog / enriched target)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/GeneRequired"
-          },
-          {
-            "$ref": "#/components/parameters/EfoOptional"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/genetics/rare": {
-      "get": {
-        "operationId": "genetics_rare",
-        "summary": "Rare disease genetics (Monarch / HGNC/NCBI IDs)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/GeneRequired"
-          },
-          {
-            "$ref": "#/components/parameters/EfoOptional"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/genetics/mendelian": {
-      "get": {
-        "operationId": "genetics_mendelian",
-        "summary": "Mendelian (ClinVar/OpenTargets; NCBI Gene IDs allowed)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/GeneRequired"
-          },
-          {
-            "$ref": "#/components/parameters/EfoOptional"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/genetics/mr": {
-      "get": {
-        "operationId": "genetics_mr",
-        "summary": "Mendelian randomization (placeholder wiring)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/GeneRequired"
-          },
-          {
-            "$ref": "#/components/parameters/EfoOptional"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/genetics/lncrna": {
-      "get": {
-        "operationId": "genetics_lncrna",
-        "summary": "lncRNA associations",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/GeneRequired"
-          },
-          {
-            "$ref": "#/components/parameters/EfoOptional"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/genetics/mirna": {
-      "get": {
-        "operationId": "genetics_mirna",
-        "summary": "miRNA interactions (ENCORI/MirNet)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/GeneRequired"
-          },
-          {
-            "$ref": "#/components/parameters/EfoOptional"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/genetics/sqtl": {
-      "get": {
-        "operationId": "genetics_sqtl",
-        "summary": "sQTL (Ensembl gene IDs work best)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/GeneRequired"
-          },
-          {
-            "$ref": "#/components/parameters/EfoOptional"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/genetics/epigenetics": {
-      "get": {
-        "operationId": "genetics_epigenetics",
-        "summary": "ENCODE/epigenetics (prefer Ensembl gene IDs)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/GeneRequired"
-          },
-          {
-            "$ref": "#/components/parameters/EfoOptional"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/assoc/bulk-rna": {
-      "get": {
-        "operationId": "assoc_bulk_rna",
-        "summary": "Bulk RNA by tissue/disease",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ConditionRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/assoc/bulk-prot": {
-      "get": {
-        "operationId": "assoc_bulk_prot",
-        "summary": "Bulk protein (ProteomicsDB/PRIDE)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ConditionRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/assoc/sc": {
-      "get": {
-        "operationId": "assoc_sc",
-        "summary": "Single-cell signal (HPA etc.)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ConditionRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/assoc/perturb": {
-      "get": {
-        "operationId": "assoc_perturb",
-        "summary": "Perturbation datasets (best-effort)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ConditionRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/expr/baseline": {
-      "get": {
-        "operationId": "expr_baseline",
-        "summary": "Baseline expression",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/expr/localization": {
-      "get": {
-        "operationId": "expr_localization",
-        "summary": "Subcellular localization",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/expr/inducibility": {
-      "get": {
-        "operationId": "expr_inducibility",
-        "summary": "Inducibility",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/mech/pathways": {
-      "get": {
-        "operationId": "mech_pathways",
-        "summary": "Pathway membership (Reactome)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/mech/ppi": {
-      "get": {
-        "operationId": "mech_ppi",
-        "summary": "Proteinâprotein interactions (STRING; supports species and cutoff)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/SpeciesOptional"
-          },
-          {
-            "$ref": "#/components/parameters/CutoffOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/mech/ligrec": {
-      "get": {
-        "operationId": "mech_ligrec",
-        "summary": "Ligandâreceptor interactions",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/tract/drugs": {
-      "get": {
-        "operationId": "tract_drugs",
-        "summary": "Known drug interactions",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/tract/ligandability-sm": {
-      "get": {
-        "operationId": "tract_ligandability_sm",
-        "summary": "Small-molecule ligandability",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/tract/ligandability-ab": {
-      "get": {
-        "operationId": "tract_ligandability_ab",
-        "summary": "Antibody ligandability",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/tract/ligandability-oligo": {
-      "get": {
-        "operationId": "tract_ligandability_oligo",
-        "summary": "Oligo ligandability",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/tract/immunogenicity": {
-      "get": {
-        "operationId": "tract_immunogenicity",
-        "summary": "IEDB epitope/t-cell assay counts (heuristic)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/tract/modality": {
-      "get": {
-        "operationId": "tract_modality",
-        "summary": "Heuristic modality scorer (SM/AB/OLIGO) with tunable priors",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "in": "query",
-            "name": "prior_sm",
-            "schema": {
-              "type": "number",
-              "default": 0.55,
-              "minimum": 0,
-              "maximum": 1
-            }
-          },
-          {
-            "in": "query",
-            "name": "prior_ab",
-            "schema": {
-              "type": "number",
-              "default": 0.5,
-              "minimum": 0,
-              "maximum": 1
-            }
-          },
-          {
-            "in": "query",
-            "name": "prior_oligo",
-            "schema": {
-              "type": "number",
-              "default": 0.35,
-              "minimum": 0,
-              "maximum": 1
-            }
-          },
-          {
-            "in": "query",
-            "name": "w_sm",
-            "schema": {
-              "oneOf": [
-                {
-                  "type": "number",
-                  "minimum": 0,
-                  "maximum": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          {
-            "in": "query",
-            "name": "w_ab",
-            "schema": {
-              "oneOf": [
-                {
-                  "type": "number",
-                  "minimum": 0,
-                  "maximum": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          {
-            "in": "query",
-            "name": "w_oligo",
-            "schema": {
-              "oneOf": [
-                {
-                  "type": "number",
-                  "minimum": 0,
-                  "maximum": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/clin/endpoints": {
-      "get": {
-        "operationId": "clin_endpoints",
-        "summary": "Clinical endpoints (Ct.Gov v2 + v1)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ConditionRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/clin/rwe": {
-      "get": {
-        "operationId": "clin_rwe",
-        "summary": "Real-world evidence (FAERS + observational trials)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ConditionRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/clin/safety": {
-      "get": {
-        "operationId": "clin_safety",
-        "summary": "Safety signals (FAERS) â drug symbol",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/clin/pipeline": {
-      "get": {
-        "operationId": "clin_pipeline",
-        "summary": "Pipeline (Inxight etc.) â target symbol",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/comp/intensity": {
-      "get": {
-        "operationId": "comp_intensity",
-        "summary": "Competition intensity (qualitative)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/comp/freedom": {
-      "get": {
-        "operationId": "comp_freedom",
-        "summary": "Freedom-to-operate (qualitative)",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SymbolRequired"
-          },
-          {
-            "$ref": "#/components/parameters/ConditionOptional"
-          },
-          {
-            "$ref": "#/components/parameters/Limit"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/EvidenceResponse"
-          }
-        }
-      }
-    },
-    "/aggregate": {
-      "post": {
-        "operationId": "aggregate",
-        "summary": "Run multiple modules and return { query, results }",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "gene": {
-                    "type": "string"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "condition": {
-                    "type": "string"
-                  },
-                  "efo": {
-                    "type": "string"
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "default": 50,
-                    "minimum": 1,
-                    "maximum": 1000
-                  },
-                  "modules": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "species": {
-                    "type": "integer",
-                    "description": "Optional species for modules that use it (e.g., STRING)."
-                  },
-                  "cutoff": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1,
-                    "description": "Optional interaction confidence cutoff used by some modules."
-                  },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Aggregate results with original query echoed back",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AggregateEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  },
   "components": {
-    "parameters": {
-      "GeneRequired": {
-        "in": "query",
-        "name": "gene",
-        "required": true,
-        "schema": {
-          "type": "string"
-        },
-        "description": "HGNC symbol or stable ID (Ensembl/NCBI)."
-      },
-      "EfoOptional": {
-        "in": "query",
-        "name": "efo",
-        "required": false,
-        "schema": {
-          "type": "string"
-        },
-        "description": "EFO disease ID (e.g., EFO_0001073)."
-      },
-      "ConditionOptional": {
-        "in": "query",
-        "name": "condition",
-        "required": false,
-        "schema": {
-          "type": "string"
-        },
-        "description": "Free-text disease/tissue; may be mapped to EFO if enabled."
-      },
-      "ConditionRequired": {
-        "in": "query",
-        "name": "condition",
-        "required": true,
-        "schema": {
-          "type": "string"
-        }
-      },
-      "SymbolRequired": {
-        "in": "query",
-        "name": "symbol",
-        "required": true,
-        "schema": {
-          "type": "string"
-        }
-      },
-      "SpeciesOptional": {
-        "in": "query",
-        "name": "species",
-        "required": false,
-        "schema": {
-          "type": "integer",
-          "default": 9606
-        },
-        "description": "NCBI Taxonomy ID (default 9606=human)."
-      },
-      "CutoffOptional": {
-        "in": "query",
-        "name": "cutoff",
-        "required": false,
-        "schema": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.7
-        },
-        "description": "Interaction confidence cutoff (e.g., STRING combined_score normalized)."
-      },
-      "Limit": {
-        "in": "query",
-        "name": "limit",
-        "required": false,
-        "schema": {
-          "type": "integer",
-          "default": 50,
-          "minimum": 1,
-          "maximum": 500
-        }
-      }
-    },
     "schemas": {
       "Evidence": {
         "type": "object",
@@ -949,6 +49,8 @@
       },
       "AggregateResponse": {
         "type": "object",
+        "description": "Map of module_id -> Evidence",
+        "properties": {},
         "additionalProperties": {
           "$ref": "#/components/schemas/Evidence"
         }
@@ -975,19 +77,21 @@
             "oneOf": [
               {
                 "type": "number",
-                "minimum": 0,
-                "maximum": 1
+                "minimum": 0.0,
+                "maximum": 1.0
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "0\u20131 for B1\u2013B6; null for B7 (qualitative only)."
           },
           "notes": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Anchor hits, adjustments, qualitative comments."
           }
         },
         "required": [
@@ -1009,13 +113,13 @@
           },
           "final_score": {
             "type": "number",
-            "minimum": 0,
-            "maximum": 1
+            "minimum": 0.0,
+            "maximum": 1.0
           },
           "confidence": {
             "type": "number",
-            "minimum": 0,
-            "maximum": 1
+            "minimum": 0.0,
+            "maximum": 1.0
           },
           "bucket_scores": {
             "type": "array",
@@ -1045,30 +149,1256 @@
           "final_score",
           "bucket_scores"
         ]
-      },
-      "AggregateEnvelope": {
-        "type": "object",
-        "properties": {
-          "query": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "results": {
-            "$ref": "#/components/schemas/AggregateResponse"
-          }
-        },
-        "required": [
-          "results"
-        ]
       }
     },
-    "responses": {
-      "EvidenceResponse": {
-        "description": "Evidence payload",
-        "content": {
-          "application/json": {
+    "parameters": {
+      "GeneParam": {
+        "in": "query",
+        "name": "gene",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ConditionParam": {
+        "in": "query",
+        "name": "condition",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "LimitParam": {
+        "in": "query",
+        "name": "limit",
+        "schema": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 500
+        }
+      },
+      "CompMetricParam": {
+        "in": "query",
+        "name": "metric",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "intensity",
+            "freedom"
+          ]
+        },
+        "description": "Choose 'intensity' (competition intensity) or 'freedom' (freedom-to-operate). Qualitative only; not numerically scored."
+      }
+    }
+  },
+  "paths": {
+    "/genetics/l2g": {
+      "get": {
+        "operationId": "genetics_l2g",
+        "summary": "genetics_l2g",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
             "schema": {
-              "$ref": "#/components/schemas/Evidence"
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/rare": {
+      "get": {
+        "operationId": "genetics_rare",
+        "summary": "genetics_rare",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/mendelian": {
+      "get": {
+        "operationId": "genetics_mendelian",
+        "summary": "genetics_mendelian",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/mr": {
+      "get": {
+        "operationId": "genetics_mr",
+        "summary": "genetics_mr (placeholder: no MR yet)",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/lncrna": {
+      "get": {
+        "operationId": "genetics_lncrna",
+        "summary": "genetics_lncrna",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/mirna": {
+      "get": {
+        "operationId": "genetics_mirna",
+        "summary": "genetics_mirna",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/sqtl": {
+      "get": {
+        "operationId": "genetics_sqtl",
+        "summary": "genetics_sqtl",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/epigenetics": {
+      "get": {
+        "operationId": "genetics_epigenetics",
+        "summary": "genetics_epigenetics",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/assoc/bulk-rna": {
+      "get": {
+        "operationId": "assoc_bulk_rna",
+        "summary": "assoc_bulk_rna",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/assoc/bulk-prot": {
+      "get": {
+        "operationId": "assoc_bulk_prot",
+        "summary": "assoc_bulk_prot",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/assoc/sc": {
+      "get": {
+        "operationId": "assoc_sc",
+        "summary": "assoc_sc",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/assoc/perturb": {
+      "get": {
+        "operationId": "assoc_perturb",
+        "summary": "assoc_perturb",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/expr/baseline": {
+      "get": {
+        "operationId": "expr_baseline",
+        "summary": "expr_baseline",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/expr/localization": {
+      "get": {
+        "operationId": "expr_localization",
+        "summary": "expr_localization",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/expr/inducibility": {
+      "get": {
+        "operationId": "expr_inducibility",
+        "summary": "expr_inducibility",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mech/pathways": {
+      "get": {
+        "operationId": "mech_pathways",
+        "summary": "mech_pathways",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mech/ppi": {
+      "get": {
+        "operationId": "mech_ppi",
+        "summary": "mech_ppi",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mech/ligrec": {
+      "get": {
+        "operationId": "mech_ligrec",
+        "summary": "mech_ligrec",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tract/drugs": {
+      "get": {
+        "operationId": "tract_drugs",
+        "summary": "tract_drugs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tract/ligandability-sm": {
+      "get": {
+        "operationId": "tract_ligandability_sm",
+        "summary": "tract_ligandability_sm",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tract/ligandability-ab": {
+      "get": {
+        "operationId": "tract_ligandability_ab",
+        "summary": "tract_ligandability_ab",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tract/ligandability-oligo": {
+      "get": {
+        "operationId": "tract_ligandability_oligo",
+        "summary": "tract_ligandability_oligo",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tract/modality": {
+      "get": {
+        "operationId": "tract_modality",
+        "summary": "tract_modality",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tract/immunogenicity": {
+      "get": {
+        "operationId": "tract_immunogenicity",
+        "summary": "tract_immunogenicity",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clin/endpoints": {
+      "get": {
+        "operationId": "clin_endpoints",
+        "summary": "clin_endpoints",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clin/rwe": {
+      "get": {
+        "operationId": "clin_rwe",
+        "summary": "clin_rwe",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clin/safety": {
+      "get": {
+        "operationId": "clin_safety",
+        "summary": "clin_safety",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clin/pipeline": {
+      "get": {
+        "operationId": "clin_pipeline",
+        "summary": "clin_pipeline",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/aggregate": {
+      "post": {
+        "operationId": "aggregate",
+        "summary": "Aggregate evidence modules (RAW) or return anchor-based SCORE report",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "gene": {
+                    "type": "string"
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "efo": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "RAW",
+                      "SCORE"
+                    ],
+                    "default": "RAW"
+                  },
+                  "include_evidence": {
+                    "type": "boolean",
+                    "default": true
+                  }
+                },
+                "required": [
+                  "gene",
+                  "condition"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "RAW mode -> AggregateResponse; SCORE mode -> ScoreReport",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AggregateResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ScoreReport"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Mode RAW: returns raw evidence per module (module_id -> Evidence). Mode SCORE: runs modules and returns bucket-level anchor scores, final_score, and confidence."
+      }
+    },
+    "/comp": {
+      "get": {
+        "operationId": "comp",
+        "summary": "Competition (qualitative; not numerically scored)",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "metric",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "intensity",
+                "freedom"
+              ]
+            },
+            "description": "Choose 'intensity' (competition intensity) or 'freedom' (freedom-to-operate). Qualitative only."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
             }
           }
         }
