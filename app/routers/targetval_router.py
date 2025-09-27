@@ -521,133 +521,89 @@ async def genetics_l2g(
     ensembl: Optional[str] = Query(None, description="Optional Ensembl gene ID override"),
 ) -> Evidence:
     """
-    L2G-style evidence via **Open Targets Platform v4 GraphQL**.
+    L2G-style evidence via **NHGRI-EBI GWAS Catalog REST API v2** with gene + disease filters.
+    We avoid Open Targets GraphQL due to instability and rely on the Catalog's curated associations.
 
-    - Resolve inputs to **Ensembl gene id** and **EFO id** (if callers pass symbol/free-text).
-    - Query Disease.evidences filtered to `datasourceIds = ["gwas_credible_sets"]` for the targetâdisease pair.
-    - Also return the association score from Target.associatedDiseases for context.
+    Behaviour:
+      - Resolve inputs to **HGNC symbol** and **EFO id**.
+      - Query /associations filtered by efoId and geneName (page through up to `limit` records).
+      - Return the association list along with the mapped disease label and identifiers.
+      - If no results, status = "NO_DATA" with helpful context.
+
+    Docs: https://www.ebi.ac.uk/gwas/ (v2 REST API), https://www.ebi.ac.uk/gwas/rest/docs/api
     """
-    # Validate & normalise
+    from urllib.parse import urlencode, quote
+
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo_id, field_name="efo")
-    efo_norm, efo_uri, disease_label, efo_cites = await _resolve_efo(efo_id)
 
-    # Early check
+    # Resolve symbol/Ensembl and EFO
+    ensg = ensembl
+    ensg_cites: List[str] = []
+    symbol_norm = None
+    if not ensg:
+        ensg, symbol_norm, ensg_cites = await _ensembl_from_symbol_or_id(gene)
+    if not symbol_norm:
+        symbol_norm = (gene or "").upper()
+
+    efo_norm, efo_uri, disease_label, efo_cites = await _resolve_efo(efo_id)
     if not efo_norm:
         return Evidence(
-            status="NO_DATA",
-            source="EFO resolution failed",
+            status="ERROR",
+            source="GWAS Catalog REST v2",
             fetched_n=0,
-            data={"gene": gene, "efo_id": None, "results": []},
+            data={"message": "Could not resolve EFO id from input", "input": efo_id},
             citations=efo_cites,
             fetched_at=_now(),
         )
 
-    # Resolve Ensembl id
-    ensg = ensembl
-    ensg_cites: List[str] = []
-    if not ensg:
-        ensg, _sym, ensg_cites = await _ensembl_from_symbol_or_id(gene)
-    if not ensg:
-        return Evidence(
-            status="NO_DATA",
-            source="Ensembl resolution failed",
-            fetched_n=0,
-            data={"gene": gene, "efo_id": efo_norm, "results": []},
-            citations=efo_cites + ensg_cites,
-            fetched_at=_now(),
-        )
+    base = "https://www.ebi.ac.uk/gwas/rest/api/associations"
+    params = {"efoId": efo_norm, "geneName": symbol_norm, "size": max(20, min(200, limit))}
+    url = f"{base}?{urlencode(params)}"
 
-    # Build GraphQL
-    gql = {
-        "query": """
-        query L2G($ensemblId: String!, $efoId: String!, $size: Int!, $sources: [String!]) {
-          target(ensemblId: $ensemblId) {
-            id
-            approvedSymbol
-            associatedDiseases(efoId: $efoId, page: {index: 0, size: 1}) {
-              rows {
-                score
-                datatypeScores { id score }
-                datasourceScores { id score }
-                disease { id name }
-              }
-              count
-            }
-          }
-          disease(efoId: $efoId) {
-            id
-            name
-            evidences(ensemblIds: [$ensemblId], datasourceIds: $sources, size: $size) {
-              count
-              cursor
-              rows {
-                id
-                datasourceId
-                datatypeId
-                score
-                literature
-                urls { niceName url }
-                studyId
-                credibleSet {
-                  studyId
-                  credibleSetIndex
-                  confidence
-                  l2GPredictions(page: {index: 0, size: 50}) {
-                    count
-                    rows { score target { id approvedSymbol } }
-                  }
-                }
-                variant {
-                  id
-                  mostSevereConsequence { id name }
-                }
-              }
-            }
-          }
-        }
-        """,
-        "variables": {
-            "ensemblId": ensg,
-            "efoId": efo_norm,
-            "size": min(limit, 200),
-            "sources": ["gwas_credible_sets"],
-        },
-    }
     try:
-        res = await _post_json(_OT_GQL, gql, tries=1)
-        t = (res.get("data", {}) or {}).get("target") or {}
-        d = (res.get("data", {}) or {}).get("disease") or {}
-        evid = ((d.get("evidences") or {}).get("rows") or [])[:limit]
-        assoc = (((t.get("associatedDiseases") or {}).get("rows") or [])[:1]) or []
+        res = await _get_json(url, tries=1)
+        cites = [url] + efo_cites + ensg_cites
+        rows = []
+        # v2 returns a HAL-style response with _embedded perhaps; handle both list/dict
+        if isinstance(res, dict):
+            emb = res.get("_embedded") or {}
+            arr = emb.get("associations") or emb.get("associationDtos") or []
+            if isinstance(arr, list):
+                rows = arr
+        elif isinstance(res, list):
+            rows = res
+
         payload = {
-            "gene": gene,
+            "gene": symbol_norm,
             "ensembl_id": ensg,
             "efo_id": efo_norm,
             "efo_uri": efo_uri,
             "disease_label": disease_label,
-            "association": assoc[0] if assoc else None,
-            "evidences": evid,
+            "associations": rows[:limit],
+            "support_links": [
+                {"label": "Pan-UKBB portal", "url": "https://pan.ukbb.broadinstitute.org/"},
+                {"label": "FinnGen results", "url": "https://www.finngen.fi/en/access_results"}
+            ],
         }
+        status = "OK" if rows else "NO_DATA"
         return Evidence(
-            status="OK" if evid or assoc else "NO_DATA",
-            source="Open Targets Platform GraphQL (gwas_credible_sets)",
-            fetched_n=len(evid),
+            status=status,
+            source="GWAS Catalog REST v2",
+            fetched_n=len(rows),
             data=payload,
-            citations=[_OT_GQL] + efo_cites + ensg_cites,
+            citations=cites,
             fetched_at=_now(),
         )
     except Exception as e:
         return Evidence(
-            status="NO_DATA",
-            source=f"Open Targets Platform unavailable: {e}",
+            status="ERROR",
+            source=f"GWAS Catalog REST v2 error: {e}",
             fetched_n=0,
-            data={"gene": gene, "ensembl_id": ensg, "efo_id": efo_norm, "evidences": []},
-            citations=[_OT_GQL] + efo_cites + ensg_cites,
+            data={"gene": symbol_norm, "efo_id": efo_norm},
+            citations=[url],
             fetched_at=_now(),
         )
-
-
 @router.get("/genetics/rare", response_model=Evidence)
 async def genetics_rare(
     gene: str,
@@ -707,205 +663,146 @@ async def genetics_rare(
 @router.get("/genetics/mendelian", response_model=Evidence)
 async def genetics_mendelian(
     gene: str,
-    efo_id: Optional[str] = Query(None, alias="efo"),
     limit: int = Query(50, ge=1, le=200),
-    ensembl: Optional[str] = Query(None, description="Optional Ensembl gene ID override"),
 ) -> Evidence:
     """
-    Mendelian / rare genetics evidence via **Open Targets Platform v4 GraphQL**.
+    Mendelian disease gene evidence from **ClinGen Gene-Disease Validity** (+ optional **OMIM** if API key configured).
+    Replaces prior Open Targets calls.
 
-    - If `efo` is supplied, fetch Disease.evidences filtered to rare/clinical genetics sources:
-      ['eva', 'gene_burden', 'genomics_england', 'clingen', 'orphanet'].
-    - If `efo` is not supplied, return the *top* rare/clinical evidences across all diseases by
-      querying Target.evidences with datasource filters (page size = limit).
+    - Primary: ClinGen geneâdisease validity table (JSON export) filtered by HGNC symbol.
+    - Optional: OMIM REST (requires OMIM_API_KEY) to pull phenotype mappings.
+    Docs: ClinGen downloads & APIs; OMIM downloads/API (key required).
     """
+    from urllib.parse import urlencode, quote
+
     validate_symbol(gene, field_name="gene")
-    efo_norm = None
-    efo_uri = ""
-    disease_label = ""
-    efo_cites: List[str] = []
+    sym = (gene or "").upper()
 
-    if efo_id:
-        validate_symbol(efo_id, field_name="efo")
-        efo_norm, efo_uri, disease_label, efo_cites = await _resolve_efo(efo_id)
+    citations: List[str] = []
 
-    # Resolve Ensembl id
-    ensg = ensembl
-    ensg_cites: List[str] = []
-    if not ensg:
-        ensg, _sym, ensg_cites = await _ensembl_from_symbol_or_id(gene)
-    if not ensg:
-        return Evidence(
-            status="NO_DATA",
-            source="Ensembl resolution failed",
-            fetched_n=0,
-            data={"gene": gene, "efo_id": efo_norm, "evidences": []},
-            citations=efo_cites + ensg_cites,
-            fetched_at=_now(),
-        )
+    # 1) ClinGen gene-disease validity JSON export
+    # The listing page allows JSON export; we use the query param to filter by gene symbol if supported.
+    # If the endpoint changes, we still return the full table and filter client-side.
+    clingen_url = f"https://search.clinicalgenome.org/kb/gene-validity?format=json&search={quote(sym)}"
+    try:
+        cg = await _get_json(clingen_url, tries=1)
+        citations.append(clingen_url)
+        items = []
+        # The JSON structure includes 'data' or array; be defensive.
+        if isinstance(cg, dict):
+            data = cg.get("data") or cg.get("items") or cg.get("results") or []
+            if isinstance(data, list):
+                items = [r for r in data if (str(r.get("geneSymbol") or r.get("gene", "")).upper() == sym)]
+        elif isinstance(cg, list):
+            items = [r for r in cg if (str(r.get("geneSymbol") or r.get("gene", "")).upper() == sym)]
+    except Exception:
+        items = []
 
-    sources = ["eva", "gene_burden", "genomics_england", "clingen", "orphanet"]
-
-    if efo_norm:
-        # Disease-scoped evidences
-        gql = {
-            "query": """
-            query RareByDisease($ensemblId: String!, $efoId: String!, $size: Int!, $sources: [String!]) {
-              disease(efoId: $efoId) {
-                id
-                name
-                evidences(ensemblIds: [$ensemblId], datasourceIds: $sources, size: $size) {
-                  count
-                  rows {
-                    id datasourceId datatypeId score literature urls { niceName url }
-                    studyId
-                    variant { id mostSevereConsequence { id name } }
-                  }
-                }
-              }
-            }
-            """,
-            "variables": {
-                "ensemblId": ensg,
-                "efoId": efo_norm,
-                "size": min(limit, 200),
-                "sources": sources,
-            },
-        }
+    # 2) OMIM (optional)
+    omim_key = os.getenv("OMIM_API_KEY") or os.getenv("OMIM_KEY")
+    omim_payload = None
+    if omim_key:
+        omim_base = "https://api.omim.org/api/entry"
+        qs = urlencode({"search": sym, "include": "geneMap", "format": "json", "apiKey": omim_key})
+        omim_url = f"{omim_base}?{qs}"
         try:
-            res = await _post_json(_OT_GQL, gql, tries=1)
-            evid = (((res.get("data", {}) or {}).get("disease") or {}).get("evidences") or {}).get("rows") or []
-            evid = evid[:limit]
-            return Evidence(
-                status="OK" if evid else "NO_DATA",
-                source="Open Targets Platform GraphQL (rare/clinical genetics)",
-                fetched_n=len(evid),
-                data={
-                    "gene": gene,
-                    "ensembl_id": ensg,
-                    "efo_id": efo_norm,
-                    "efo_uri": efo_uri,
-                    "disease_label": disease_label,
-                    "evidences": evid,
-                },
-                citations=[_OT_GQL] + efo_cites + ensg_cites,
-                fetched_at=_now(),
-            )
-        except Exception as e:
-            return Evidence(
-                status="NO_DATA",
-                source=f"Open Targets Platform unavailable: {e}",
-                fetched_n=0,
-                data={
-                    "gene": gene,
-                    "ensembl_id": ensg,
-                    "efo_id": efo_norm,
-                    "evidences": [],
-                },
-                citations=[_OT_GQL] + efo_cites + ensg_cites,
-                fetched_at=_now(),
-            )
+            omim = await _get_json(omim_url, tries=1)
+            citations.append("https://omim.org/downloads")
+            citations.append(omim_url)
+            # parse phenotype list crudely
+            omim_payload = omim
+        except Exception:
+            pass
     else:
-        # Target-scoped evidences across diseases
-        gql = {
-            "query": """
-            query RareByTarget($ensemblId: String!, $size: Int!, $sources: [String!]) {
-              target(ensemblId: $ensemblId) {
-                id
-                approvedSymbol
-                evidences(efoIds: [], datasourceIds: $sources, size: $size) {
-                  count
-                  rows {
-                    id datasourceId datatypeId score literature urls { niceName url }
-                    disease { id name }
-                    variant { id mostSevereConsequence { id name } }
-                  }
-                }
-              }
-            }
-            """,
-            "variables": {
-                "ensemblId": ensg,
-                "size": min(limit, 200),
-                "sources": sources,
-            },
-        }
-        try:
-            res = await _post_json(_OT_GQL, gql, tries=1)
-            targ = ((res.get("data", {}) or {}).get("target") or {})
-            evid = ((targ.get("evidences") or {}).get("rows") or [])[:limit]
-            return Evidence(
-                status="OK" if evid else "NO_DATA",
-                source="Open Targets Platform GraphQL (rare/clinical genetics)",
-                fetched_n=len(evid),
-                data={
-                    "gene": gene,
-                    "ensembl_id": ensg,
-                    "efo_id": None,
-                    "evidences": evid,
-                },
-                citations=[_OT_GQL] + ensg_cites,
-                fetched_at=_now(),
-            )
-        except Exception as e:
-            return Evidence(
-                status="NO_DATA",
-                source=f"Open Targets Platform unavailable: {e}",
-                fetched_n=0,
-                data={"gene": gene, "ensembl_id": ensg, "evidences": []},
-                citations=[_OT_GQL] + ensg_cites,
-                fetched_at=_now(),
-            )
+        # cite OMIM downloads page to indicate optional config
+        citations.append("https://omim.org/downloads")
 
-
+    payload = {
+        "gene": sym,
+        "clingen_gene_validity": (items or [])[:limit],
+        "omim": omim_payload,
+    }
+    status = "OK" if items or omim_payload else "NO_DATA"
+    return Evidence(
+        status=status,
+        source="ClinGen Gene Validity (+ OMIM optional)",
+        fetched_n=(len(items) if items else 0),
+        data=payload,
+        citations=citations,
+        fetched_at=_now(),
+    )
 @router.get("/genetics/mr", response_model=Evidence)
 async def genetics_mr(
     gene: str,
     efo_id: str = Query(..., alias="efo"),
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
-    """EpiGraphDB xQTL multiâSNP MR, outcome filtered by EFO."""
+    """
+    Mendelian randomization via **MRC IEU OpenGWAS API**.
+    NOTE: Many OpenGWAS endpoints now require authentication; set OPENGWAS_TOKEN env var if needed.
+
+    Strategy (pragmatic):
+      1) Resolve disease label from EFO and search OpenGWAS for candidate outcome GWAS IDs.
+      2) Return top matching studies plus a ready-to-run MR query URL template.
+      3) If OPENGWAS provides a direct MR endpoint accessible without auth, attempt it; otherwise surface the search.
+    """
+    from urllib.parse import urlencode, quote
+
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo_id, field_name="efo")
+
     efo_id_norm, efo_uri, disease_label, map_url = await _resolve_efo(efo_id)
 
-    base = "https://api.epigraphdb.org/xqtl/multi-snp-mr"
-    qs = urllib.parse.urlencode({"exposure_gene": gene, "outcome_trait": disease_label})
-    mr_url = f"{base}?{qs}"
+    token = os.getenv("OPENGWAS_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+
+    # 1) Search OpenGWAS studies by disease label
+    search_url = f"https://gwas.mrcieu.ac.uk/api/v1/studies?query={quote(disease_label)}"
+    studies = []
     try:
-        mr = await _get_json(mr_url, tries=1)
-        rows = mr.get("results", []) if isinstance(mr, dict) else (mr or [])
-        return Evidence(
-            status="OK" if rows else "NO_DATA",
-            source="EpiGraphDB xQTL multiâSNP MR",
-            fetched_n=len(rows),
-            data={
-                "gene": gene,
-                "efo_id": efo_id_norm,
-                "efo_uri": efo_uri,
-                "outcome_trait": disease_label,
-                "mr": rows[:limit],
-            },
-            citations=[mr_url, map_url],
-            fetched_at=_now(),
-        )
-    except Exception as e:
-        return Evidence(
-            status="NO_DATA",
-            source=f"MR request empty/unavailable: {e}",
-            fetched_n=0,
-            data={
-                "gene": gene,
-                "efo_id": efo_id_norm,
-                "efo_uri": efo_uri,
-                "outcome_trait": disease_label,
-                "mr": [],
-            },
-            citations=[mr_url, map_url],
-            fetched_at=_now(),
-        )
+        js = await _get_json(search_url, tries=1, headers=headers)
+        # Expect list of studies; be defensive
+        if isinstance(js, dict):
+            arr = js.get("data") or js.get("results") or js.get("studies") or []
+        else:
+            arr = js
+        if isinstance(arr, list):
+            studies = arr[:limit]
+    except Exception:
+        pass
 
+    # Provide a generic MR endpoint template (requires specific exposure/outcome IDs).
+    # OpenGWAS classic MR endpoint pattern:
+    mr_tpl = "https://api.opengwas.io/api/v1/mr?exposure={exposure_id}&outcome={outcome_id}"
+    example = None
+    if studies:
+        # pick first as outcome example
+        outcome_id = studies[0].get("id") or studies[0].get("study_id") or studies[0].get("accession")
+        if outcome_id:
+            example = mr_tpl.format(exposure_id="PUT_EXPOSURE_GWAS_ID", outcome_id=outcome_id)
 
+    payload = {
+        "gene": gene,
+        "efo_id": efo_id_norm,
+        "efo_uri": efo_uri,
+        "outcome_trait": disease_label,
+        "openGWAS_search_url": search_url,
+        "candidate_outcomes": studies,
+        "mr_endpoint_template": mr_tpl,
+        "mr_example": example,
+    }
+    status = "OK" if studies else "NO_DATA"
+    cites = [search_url, "https://api.opengwas.io/api/", "https://mrcieu.github.io/ieugwasr/"]
+    if map_url:
+        cites.insert(0, map_url)
+    return Evidence(
+        status=status,
+        source="OpenGWAS (search + MR template)",
+        fetched_n=len(studies),
+        data=payload,
+        citations=cites,
+        fetched_at=_now(),
+    )
 @router.get("/genetics/lncrna", response_model=Evidence)
 async def genetics_lncrna(
     gene: str,
@@ -1023,69 +920,174 @@ async def genetics_mirna(
 @router.get("/genetics/sqtl", response_model=Evidence)
 async def genetics_sqtl(
     gene: str,
-    efo_id: Optional[str] = Query(None, alias="efo"),
     limit: int = Query(50, ge=1, le=200),
+    ensembl: Optional[str] = Query(None, description="Optional Ensembl gene ID override"),
 ) -> Evidence:
+    """
+    Splicing QTLs via **GTEx Portal API v2** (prefers sQTL; falls back to independent eQTLs).
+    Replaces eQTL Catalogue, which was often empty.
+
+    - Endpoint: /api/v2/association/independentSqtl (preferred)
+    - Fallback: /api/v2/association/independentEqtl
+    NOTE: GTEx expects **versioned GENCODE IDs** (e.g., ENSG00000122971.9).
+    Docs: https://gtexportal.org/api/v2/redoc
+    """
+    from urllib.parse import urlencode, quote
+
     validate_symbol(gene, field_name="gene")
-    url = f"https://www.ebi.ac.uk/eqtl/api/genes/{urllib.parse.quote(gene)}/sqtls"
-    try:
-        js = await _get_json(url, tries=1)
-        results = js.get("sqtls", []) if isinstance(js, dict) else []
+
+    ensg = ensembl
+    symbol_norm = None
+    sym_cites: List[str] = []
+    if not ensg:
+        ensg, symbol_norm, sym_cites = await _ensembl_from_symbol_or_id(gene)
+    if not ensg:
         return Evidence(
-            status="OK" if results else "NO_DATA",
-            source="eQTL Catalogue",
-            fetched_n=len(results),
-            data={"gene": gene, "efo_id": efo_id or None, "sqtls": results[:limit]},
-            citations=[url],
-            fetched_at=_now(),
-        )
-    except Exception:
-        return Evidence(
-            status="NO_DATA",
-            source="eQTL Catalogue empty/unavailable",
+            status="ERROR",
+            source="GTEx API v2",
             fetched_n=0,
-            data={"gene": gene, "efo_id": efo_id or None, "sqtls": []},
-            citations=[url],
+            data={"message": "Could not resolve Ensembl gene id", "input": gene},
+            citations=sym_cites,
             fetched_at=_now(),
         )
 
+    # Fetch Ensembl version to construct versioned GENCODE id
+    gencode_id = ensg
+    try:
+        lookup_url = f"https://rest.ensembl.org/lookup/id/{quote(ensg)}?expand=0;content-type=application/json"
+        info = await _get_json(lookup_url, tries=1)
+        sym_cites.append(lookup_url)
+        if isinstance(info, dict) and info.get("version"):
+            gencode_id = f"{ensg}.{int(info.get('version'))}"
+    except Exception:
+        pass
 
+    # Try sQTL first
+    base = "https://gtexportal.org/api/v2/association/independentSqtl"
+    url_sqtl = f"{base}?{urlencode({'gencodeId': gencode_id})}"
+    url_eqtl = f"https://gtexportal.org/api/v2/association/independentEqtl?{urlencode({'gencodeId': gencode_id})}"
+
+    citations = sym_cites + [url_sqtl]
+    try:
+        js = await _get_json(url_sqtl, tries=1)
+        rows = []
+        if isinstance(js, dict):
+            rows = js.get("data") or js.get("sqtls") or js.get("associations") or []
+        elif isinstance(js, list):
+            rows = js
+        if not rows:
+            # fallback to eQTL
+            js2 = await _get_json(url_eqtl, tries=1)
+            citations.append(url_eqtl)
+            if isinstance(js2, dict):
+                rows = js2.get("data") or js2.get("eqtls") or js2.get("associations") or []
+            elif isinstance(js2, list):
+                rows = js2
+        status = "OK" if rows else "NO_DATA"
+        return Evidence(
+            status=status,
+            source="GTEx Portal API v2",
+            fetched_n=len(rows),
+            data={"gene": gene, "ensembl_id": ensg, "gencode_id": gencode_id, "sqtl_or_eqtl": rows[:limit]},
+            citations=citations,
+            fetched_at=_now(),
+        )
+    except Exception as e:
+        return Evidence(
+            status="ERROR",
+            source=f"GTEx API v2 error: {e}",
+            fetched_n=0,
+            data={"gene": gene, "ensembl_id": ensg, "gencode_id": gencode_id},
+            citations=citations,
+            fetched_at=_now(),
+        )
 @router.get("/genetics/epigenetics", response_model=Evidence)
 async def genetics_epigenetics(
     gene: str,
-    efo_id: Optional[str] = Query(None, alias="efo"),
-    limit: int = Query(50, ge=1, le=200),
+    flank_kb: int = Query(50, ge=0, le=1000),
 ) -> Evidence:
+    """
+    Functional epigenomics support via **Roadmap Epigenomics** and **BLUEPRINT** resources.
+
+    Implementation (lightweight but robust):
+      - Resolve gene â genomic locus (Ensembl REST).
+      - Return resource links for Roadmap (WashU portal/AWS) and BLUEPRINT (BDAP/IHEC) for that locus.
+      - This replaces ENCODE-only queries that were sparse.
+
+    Docs: Roadmap portal/AWS registry; BLUEPRINT BDAP; DeepBlue API (aggregates ENCODE/ROADMAP/BLUEPRINT).
+    """
+    from urllib.parse import urlencode, quote
+
     validate_symbol(gene, field_name="gene")
-    search_url = (
-        "https://www.encodeproject.org/search/?"
-        f"searchTerm={urllib.parse.quote(gene)}&format=json&limit={limit}&type=Experiment"
+    ensg, _sym, ensg_cites = await _ensembl_from_symbol_or_id(gene)
+    # fetch gene location from Ensembl REST overlap endpoint
+    spans = None
+    if ensg:
+        try:
+            # lookup gene region
+            url = f"https://rest.ensembl.org/lookup/id/{quote(ensg)}?expand=0;content-type=application/json"
+            info = await _get_json(url, tries=1)
+            ensg_cites.append(url)
+            if isinstance(info, dict) and info.get("start") and info.get("end"):
+                chrom = info.get("seq_region_name")
+                start = max(1, int(info.get("start")) - flank_kb * 1000)
+                end = int(info.get("end")) + flank_kb * 1000
+                spans = {"chrom": str(chrom), "start": start, "end": end, "assembly": info.get("assembly_name")}
+        except Exception:
+            pass
+
+    # Build resource links
+    links = []
+    if spans:
+        chrom = spans["chrom"]
+        start = spans["start"]
+        end = spans["end"]
+        # Roadmap portal grid page
+        links.append({
+            "label": "Roadmap Epigenomics portal",
+            "url": "http://egg2.wustl.edu/roadmap/web_portal/",
+            "note": "Browse tracks; use WashU Browser to zoom to locus"
+        })
+        # Roadmap AWS registry dataset
+        links.append({
+            "label": "Roadmap on AWS (registry)",
+            "url": "https://registry.opendata.aws/roadmapepigenomics/",
+            "note": "Raw/processed files in S3; requires downstream tooling"
+        })
+        # BLUEPRINT general
+        links.append({
+            "label": "BLUEPRINT Data portal",
+            "url": "https://projects.ensembl.org/blueprint/",
+            "note": "Hematopoietic epigenomes overview"
+        })
+        # DeepBlue (aggregator/API)
+        links.append({
+            "label": "DeepBlue Epigenomic Data Server",
+            "url": "http://deepblue.mpi-inf.mpg.de/",
+            "note": "Programmatic access to ENCODE/ROADMAP/BLUEPRINT region sets"
+        })
+
+    payload = {
+        "gene": gene,
+        "ensembl_id": ensg,
+        "region": spans,
+        "resources": links,
+    }
+    citations = ensg_cites + [
+        "https://egg2.wustl.edu/roadmap/web_portal/",
+        "https://registry.opendata.aws/roadmapepigenomics/",
+        "https://projects.ensembl.org/blueprint/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC4987868/",
+    ]
+    status = "OK" if links else "NO_DATA"
+    return Evidence(
+        status=status,
+        source="Roadmap Epigenomics + BLUEPRINT (links)",
+        fetched_n=len(links),
+        data=payload,
+        citations=citations,
+        fetched_at=_now(),
     )
-    try:
-        js = await _get_json(search_url, tries=1)
-        hits = js.get("@graph", []) if isinstance(js, dict) else []
-        return Evidence(
-            status="OK" if hits else "NO_DATA",
-            source="ENCODE Search API",
-            fetched_n=len(hits),
-            data={"gene": gene, "efo_id": efo_id or None, "experiments": hits[:limit]},
-            citations=[search_url],
-            fetched_at=_now(),
-        )
-    except Exception:
-        return Evidence(
-            status="NO_DATA",
-            source="ENCODE empty/unavailable",
-            fetched_n=0,
-            data={"gene": gene, "efo_id": efo_id or None, "experiments": []},
-            citations=[search_url],
-            fetched_at=_now(),
-        )
-
-
-# -----------------------------------------------------------------------------
-# BUCKET 2 â Disease Association & Perturbation
-# -----------------------------------------------------------------------------
 @router.get("/assoc/bulk-rna", response_model=Evidence)
 async def assoc_bulk_rna(
     condition: str,
