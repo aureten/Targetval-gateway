@@ -1,20 +1,23 @@
+ app/routers/targetval_router.py
 """
 Routes implementing the TARGETVAL gateway (bounded, resilient).
 
-This module exposes a suite of REST endpoints grouped by functional
-buckets (Human Genetics; Disease Association; Expression; Mechanistic Wiring;
-Tractability; Clinical Translation; Competition & IP).
+This module exposes a suite of REST endpoints grouped by functional buckets
+(Human Genetics; Disease Association; Expression; Mechanistic Wiring; Tractability; Clinical Translation; Competition & IP).
 
-Key implementation notes:
-* Bounded outbound wrappers: REQUEST_BUDGET_S caps total time per upstream call.
-* Per-attempt timeout is short; retries are limited and jittered.
-* Default headers: strong User-Agent + Accept JSON to avoid rejections.
-* Slow/fragile upstreams run with tries=1 and have pragmatic fallbacks.
-* Benign upstream misses return status="NO_DATA" (not "ERROR").
-* All endpoints return a structured Evidence payload and never propagate errors.
-* PUBLIC GATEWAY: no API key required anywhere.
+**September 2025 refresh**
+- Migrated *fundamental genetics* endpoints to the Open Targets **Platform** v4 GraphQL API.
+  Open Targets Genetics endpoints are deprecated and have been shut down.
+- genetics_l2g now queries Platform GraphQL and expects **Ensembl gene ID + EFO ID**.
+  If the client sends a symbol or free-text disease, we normalise to the required identifiers.
+- genetics_mendelian now sources ClinVar / EVA / gene-burden evidence via the Platform API.
+- Added robust normalisation helpers for Ensembl gene ID and EFO ID (OLS fallback).
+- Kept backward-compatible signatures: still accept `gene` and `efo` query params,
+  while also supporting optional `ensembl` (Ensembl gene id) in relevant endpoints.
+- Consistent Evidence payloads and pragmatic fallbacks remain unchanged.
+
+Public gateway only â no API keys required.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -36,22 +39,21 @@ from app.utils.validation import validate_symbol, validate_condition
 # -----------------------------------------------------------------------------
 # Router & models
 # -----------------------------------------------------------------------------
-
 router = APIRouter()
 
+
 class Evidence(BaseModel):
-    status: str           # "OK" | "ERROR" | "NO_DATA"
-    source: str           # upstream API / method used
-    fetched_n: int        # count before limit slicing (if applicable)
+    status: str  # "OK" | "ERROR" | "NO_DATA"
+    source: str  # upstream API / method used
+    fetched_n: int  # count before limit slicing (if applicable)
     data: Dict[str, Any]  # module-specific payload
     citations: List[str]  # URLs used as evidence
-    fetched_at: float     # UNIX timestamp
+    fetched_at: float  # UNIX timestamp
 
 
 # -----------------------------------------------------------------------------
 # Caching, concurrency & outbound client defaults
 # -----------------------------------------------------------------------------
-
 CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL: int = int(os.getenv("CACHE_TTL_SECONDS", str(24 * 60 * 60)))
 
@@ -63,15 +65,13 @@ DEFAULT_TIMEOUT = httpx.Timeout(
 DEFAULT_HEADERS: Dict[str, str] = {
     "User-Agent": os.getenv(
         "OUTBOUND_USER_AGENT",
-        "TargetVal/1.3 (+https://github.com/aureten/Targetval-gateway)"
+        "TargetVal/1.4 (+https://github.com/aureten/Targetval-gateway)",
     ),
     "Accept": "application/json",
 }
-
 REQUEST_BUDGET_S: float = float(os.getenv("REQUEST_BUDGET_S", "25.0"))
 OUTBOUND_TRIES: int = int(os.getenv("OUTBOUND_TRIES", "2"))
 BACKOFF_BASE_S: float = float(os.getenv("BACKOFF_BASE_S", "0.6"))
-
 MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "8"))
 _semaphore: asyncio.Semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
@@ -83,14 +83,12 @@ def _now() -> float:
 # -----------------------------------------------------------------------------
 # Bounded outbound wrappers
 # -----------------------------------------------------------------------------
-
 async def _get_json(
-    url: str,
-    tries: int = OUTBOUND_TRIES,
-    headers: Optional[Dict[str, str]] = None
+    url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None
 ) -> Any:
     """HTTP GET â JSON with cache, bounded total time, limited retries, jittered backoff.
-       More robust to content-encoding: attempts gzip decode if JSON parse fails."""
+    More robust to content-encoding: attempts gzip decode if JSON parse fails.
+    """
     cached = CACHE.get(url)
     if cached and (_now() - cached.get("timestamp", 0) < CACHE_TTL):
         return cached["data"]
@@ -105,14 +103,17 @@ async def _get_json(
                     break
                 try:
                     merged = {**DEFAULT_HEADERS, **(headers or {})}
-                    resp = await asyncio.wait_for(client.get(url, headers=merged), timeout=remaining)
+                    resp = await asyncio.wait_for(
+                        client.get(url, headers=merged), timeout=remaining
+                    )
                     if resp.status_code in (429, 500, 502, 503, 504):
-                        last_err = HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+                        last_err = HTTPException(
+                            status_code=resp.status_code, detail=resp.text[:500]
+                        )
                         backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.2
                         await asyncio.sleep(backoff)
                         continue
                     resp.raise_for_status()
-
                     # Primary: try JSON directly
                     try:
                         data = resp.json()
@@ -125,7 +126,6 @@ async def _get_json(
                         except Exception as ge:
                             last_err = ge
                             raise
-
                     CACHE[url] = {"data": data, "timestamp": _now()}
                     return data
                 except Exception as e:
@@ -136,9 +136,7 @@ async def _get_json(
 
 
 async def _get_text(
-    url: str,
-    tries: int = OUTBOUND_TRIES,
-    headers: Optional[Dict[str, str]] = None
+    url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None
 ) -> str:
     """HTTP GET â text with bounded total time, limited retries, jittered backoff."""
     last_err: Optional[Exception] = None
@@ -151,9 +149,13 @@ async def _get_text(
                     break
                 try:
                     merged = {**DEFAULT_HEADERS, **(headers or {})}
-                    resp = await asyncio.wait_for(client.get(url, headers=merged), timeout=remaining)
+                    resp = await asyncio.wait_for(
+                        client.get(url, headers=merged), timeout=remaining
+                    )
                     if resp.status_code in (429, 500, 502, 503, 504):
-                        last_err = HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+                        last_err = HTTPException(
+                            status_code=resp.status_code, detail=resp.text[:500]
+                        )
                         backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.2
                         await asyncio.sleep(backoff)
                         continue
@@ -183,9 +185,13 @@ async def _post_json(
                     break
                 try:
                     merged = {**DEFAULT_HEADERS, **(headers or {})}
-                    resp = await asyncio.wait_for(client.post(url, json=payload, headers=merged), timeout=remaining)
+                    resp = await asyncio.wait_for(
+                        client.post(url, json=payload, headers=merged), timeout=remaining
+                    )
                     if resp.status_code in (429, 500, 502, 503, 504):
-                        last_err = HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+                        last_err = HTTPException(
+                            status_code=resp.status_code, detail=resp.text[:500]
+                        )
                         backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.2
                         await asyncio.sleep(backoff)
                         continue
@@ -203,123 +209,139 @@ async def _safe_call(coro):
     try:
         return await coro
     except HTTPException as e:
-        return Evidence(status="ERROR", source=str(e.detail), fetched_n=0, data={}, citations=[], fetched_at=_now())
+        return Evidence(
+            status="ERROR",
+            source=str(e.detail),
+            fetched_n=0,
+            data={},
+            citations=[],
+            fetched_at=_now(),
+        )
     except Exception as e:
-        return Evidence(status="ERROR", source=str(e), fetched_n=0, data={}, citations=[], fetched_at=_now())
+        return Evidence(
+            status="ERROR",
+            source=str(e),
+            fetched_n=0,
+            data={},
+            citations=[],
+            fetched_at=_now(),
+        )
 
 
 # -----------------------------------------------------------------------------
-# Helpers for EFO resolution, identifiers, and simple heuristics
+# Helpers for EFO/Ensembl resolution, identifiers, and simple heuristics
 # -----------------------------------------------------------------------------
+_OT_GQL = "https://api.platform.opentargets.org/api/v4/graphql"
 
-async def _resolve_efo(efo_id: str) -> Tuple[str, str, str, str]:
+
+async def _resolve_efo(efo_or_term: str) -> Tuple[str, str, str, List[str]]:
     """
-    Return (efo_id_norm, efo_uri, disease_label, map_url).
-    Best-effort: try EpiGraphDB; fall back to simple URI + raw id for label.
+    Resolve EFO input to (efo_id_norm, efo_uri, disease_label, citations).
+
+    Behaviour:
+      - If input looks like EFO:* or EFO_*, normalise to underscore form and return.
+      - Else: try EpiGraphDB fuzzy term â EFO id mapping.
+      - Else: fall back to EBI OLS4 search (ontology=efo) and pick the top hit.
     """
-    efo_id_norm = (efo_id or "").strip()
-    if not efo_id_norm:
-        return "", "", "", ""
-    if ":" in efo_id_norm:
-        # support both EFO:0000270 and EFO_0000270
-        efo_id_norm = efo_id_norm.replace(":", "_")
-    efo_uri = f"http://www.ebi.ac.uk/efo/{efo_id_norm}"
-    map_url = f"https://api.epigraphdb.org/ontology/disease-efo?efo_term={urllib.parse.quote(efo_id_norm)}&fuzzy=true"
-    disease_label = efo_id_norm
+    citations: List[str] = []
+    efo = (efo_or_term or "").strip()
+    if not efo:
+        return "", "", "", citations
+
+    # Normalise colon to underscore
+    if ":" in efo:
+        efo = efo.replace(":", "_")
+
+    # If already an EFO ID
+    if efo.upper().startswith("EFO_"):
+        efo_norm = efo.upper()
+        uri = f"http://www.ebi.ac.uk/efo/{efo_norm}"
+        return efo_norm, uri, efo_norm, citations
+
+    # 1) Try EpiGraphDB mapping as before
+    map_url = (
+        f"https://api.epigraphdb.org/ontology/disease-efo?efo_term={urllib.parse.quote(efo)}&fuzzy=true"
+    )
     try:
         mapping = await _get_json(map_url, tries=1)
+        citations.append(map_url)
         results = mapping.get("results", []) if isinstance(mapping, dict) else []
         if results:
             top = results[0]
-            disease_label = (
-                top.get("disease_label")
-                or (top.get("disease") or {}).get("label")
-                or disease_label
-            )
+            label = top.get("disease_label") or (top.get("disease") or {}).get("label")
+            raw = top.get("efo_term") or (top.get("disease") or {}).get("id") or ""
+            if raw:
+                efo_id_norm = raw.replace(":", "_").upper()
+                uri = f"http://www.ebi.ac.uk/efo/{efo_id_norm}"
+                return efo_id_norm, uri, label or efo, citations
     except Exception:
         pass
-    return efo_id_norm, efo_uri, disease_label, map_url
 
-
-def _assoc_matches_efo(rec: Dict[str, Any], efo_id: str, efo_uri: str, label: str) -> bool:
-    """
-    Lenient filter: accept if JSON contains the EFO id/URI or trait label (case-insensitive).
-    """
+    # 2) Fallback to OLS4 term search
+    ols = f"https://www.ebi.ac.uk/ols4/api/search?q={urllib.parse.quote(efo)}&ontology=efo&rows=5"
     try:
-        blob = json.dumps(rec).lower()
-    except Exception:
-        return False
-    tgt = [efo_id.lower(), efo_uri.lower()]
-    if label:
-        tgt.append(label.lower())
-    return any(t in blob for t in tgt)
-
-
-async def _uniprot_primary_accession(symbol: str) -> Optional[str]:
-    url = (
-        "https://rest.uniprot.org/uniprotkb/search"
-        f"?query=gene_exact:{urllib.parse.quote(symbol)}+AND+organism_id:9606"
-        "&fields=accession&format=json&size=1"
-    )
-    try:
-        body = await _get_json(url, tries=1)
-        res = body.get("results", []) if isinstance(body, dict) else []
-        if res:
-            return (res[0].get("primaryAccession")
-                    or (res[0].get("uniProtkbId") if isinstance(res[0], dict) else None))
-    except Exception:
-        return None
-    return None
-
-
-async def _extracellular_len_from_uniprot(accession: str) -> int:
-    """
-    From UniProt entry JSON, approximate extracellular aa by summing 'Topological domain' with 'Extracellular' in description.
-    """
-    if not accession:
-        return 0
-    entry_url = f"https://rest.uniprot.org/uniprotkb/{urllib.parse.quote(accession)}.json"
-    try:
-        entry = await _get_json(entry_url, tries=1)
-        feats = entry.get("features", []) if isinstance(entry, dict) else []
-        total = 0
-        for f in feats:
-            if f.get("type") == "Topological domain":
-                desc = (f.get("description") or "").lower()
-                if "extracellular" in desc:
-                    loc = f.get("location", {})
-                    start = (loc.get("start") or {}).get("value")
-                    end = (loc.get("end") or {}).get("value")
-                    if isinstance(start, int) and isinstance(end, int) and end >= start:
-                        total += (end - start + 1)
-        return int(total)
-    except Exception:
-        return 0
-
-
-async def _iedb_counts(symbol: str, limit: int = 25) -> Tuple[int, int]:
-    """
-    Return (epitope_count, tcell_assay_count) using IEDB IQ-API (best-effort).
-    """
-    base = "https://query-api.iedb.org"
-    epi_url = f"{base}/epitope_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
-    tc_url = f"{base}/tcell_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
-    epi_n = 0
-    tc_n = 0
-    try:
-        ej = await _get_json(epi_url, tries=1)
-        epi_n = len(ej if isinstance(ej, list) else [])
+        js = await _get_json(ols, tries=1)
+        citations.append(ols)
+        docs = ((js.get("response") or {}).get("docs") or []) if isinstance(js, dict) else []
+        for doc in docs:
+            iri = doc.get("iri") or ""
+            label = doc.get("label") or efo
+            # Try to extract EFO id from IRI tail
+            tail = iri.rsplit("/", 1)[-1]
+            if tail.upper().startswith("EFO_"):
+                efo_id_norm = tail.upper()
+                uri = f"http://www.ebi.ac.uk/efo/{efo_id_norm}"
+                return efo_id_norm, uri, label, citations
     except Exception:
         pass
+
+    # Fall back to returning the input as label
+    return "", "", efo, citations
+
+
+async def _ensembl_from_symbol_or_id(s: str) -> Tuple[Optional[str], Optional[str], List[str]]:
+    """
+    Given a gene token, return (ensembl_id, symbol_norm, citations).
+
+    - If s already looks like ENSG..., return as ensembl_id.
+    - Else resolve via Ensembl REST xrefs (symbol â Ensembl gene id).
+    """
+    citations: List[str] = []
+    if not s:
+        return None, None, citations
+
+    tok = s.strip()
+    if tok.upper().startswith("ENSG"):
+        return tok, None, citations
+
+    # Primary: exact xref by symbol
+    url = f"https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{urllib.parse.quote(tok)}?content-type=application/json"
     try:
-        tj = await _get_json(tc_url, tries=1)
-        tc_n = len(tj if isinstance(tj, list) else [])
+        arr = await _get_json(url, tries=1)
+        citations.append(url)
+        if isinstance(arr, list):
+            for rec in arr:
+                if (rec.get("type") or "").upper() == "GENE" and rec.get("id", "").upper().startswith("ENSG"):
+                    return rec.get("id"), tok.upper(), citations
     except Exception:
         pass
-    return epi_n, tc_n
+
+    # Fallback: name-based xref
+    url2 = f"https://rest.ensembl.org/xrefs/name/homo_sapiens/{urllib.parse.quote(tok)}?content-type=application/json"
+    try:
+        arr = await _get_json(url2, tries=1)
+        citations.append(url2)
+        if isinstance(arr, list):
+            for rec in arr:
+                if (rec.get("type") or "").upper() == "GENE" and rec.get("id", "").upper().startswith("ENSG"):
+                    return rec.get("id"), tok.upper(), citations
+    except Exception:
+        pass
+
+    return None, tok.upper(), citations
 
 
-# --- Identifier normalization & heuristics -----------------------------------
+# Existing helpers -----------------------------------------------------------------
 
 # Minimal alias coverage for common cases; extend as needed
 _ALIAS_GENE_MAP: Dict[str, str] = {
@@ -329,12 +351,12 @@ _ALIAS_GENE_MAP: Dict[str, str] = {
     "TGFR2": "TGFBR2",
 }
 _COMMON_GENE_SET = {"CNR1", "IL6", "TGFBR2", "FAP"} | set(_ALIAS_GENE_MAP.keys()) | set(_ALIAS_GENE_MAP.values())
-
 _CONDITION_ALIAS_MAP: Dict[str, str] = {
     # Ambiguous acronyms handled as diseases when explicitly intended
     "FAP": "Familial adenomatous polyposis",
     # Add more as needed, e.g., "COPD": "Chronic obstructive pulmonary disease"
 }
+
 
 def _looks_like_gene_token(s: str) -> bool:
     """Heuristic: short uppercase token with no spaces; in known sets or alnum with digits."""
@@ -350,11 +372,16 @@ def _looks_like_gene_token(s: str) -> bool:
     if 2 <= len(up) <= 12 and up.replace("-", "").isalnum():
         if any(c.isdigit() for c in up) or up.isalpha():
             return True
+    # also allow Ensembl IDs
+    if up.startswith("ENSG"):
+        return True
     return False
+
 
 def _expand_condition_alias(cond: str) -> str:
     up = (cond or "").strip().upper()
     return _CONDITION_ALIAS_MAP.get(up, cond)
+
 
 async def _normalize_symbol(symbol: str) -> str:
     """
@@ -366,7 +393,7 @@ async def _normalize_symbol(symbol: str) -> str:
     up = symbol.strip().upper()
     if up in _ALIAS_GENE_MAP:
         return _ALIAS_GENE_MAP[up]
-    if up in _COMMON_GENE_SET:
+    if up in _COMMON_GENE_SET or up.startswith("ENSG"):
         return up
 
     # Try UniProt: look for gene field to capture canonical geneName
@@ -396,10 +423,71 @@ async def _normalize_symbol(symbol: str) -> str:
     return up
 
 
+async def _uniprot_primary_accession(symbol: str) -> Optional[str]:
+    url = (
+        "https://rest.uniprot.org/uniprotkb/search"
+        f"?query=gene_exact:{urllib.parse.quote(symbol)}+AND+organism_id:9606"
+        "&fields=accession&format=json&size=1"
+    )
+    try:
+        body = await _get_json(url, tries=1)
+        res = body.get("results", []) if isinstance(body, dict) else []
+        if res:
+            return (
+                res[0].get("primaryAccession")
+                or (res[0].get("uniProtkbId") if isinstance(res[0], dict) else None)
+            )
+    except Exception:
+        return None
+    return None
+
+
+async def _extracellular_len_from_uniprot(accession: str) -> int:
+    """From UniProt entry JSON, approximate extracellular aa by summing 'Topological domain' with 'Extracellular' in description."""
+    if not accession:
+        return 0
+    entry_url = f"https://rest.uniprot.org/uniprotkb/{urllib.parse.quote(accession)}.json"
+    try:
+        entry = await _get_json(entry_url, tries=1)
+        feats = entry.get("features", []) if isinstance(entry, dict) else []
+        total = 0
+        for f in feats:
+            if f.get("type") == "Topological domain":
+                desc = (f.get("description") or "").lower()
+                if "extracellular" in desc:
+                    loc = f.get("location", {})
+                    start = (loc.get("start") or {}).get("value")
+                    end = (loc.get("end") or {}).get("value")
+                    if isinstance(start, int) and isinstance(end, int) and end >= start:
+                        total += (end - start + 1)
+        return int(total)
+    except Exception:
+        return 0
+
+
+async def _iedb_counts(symbol: str, limit: int = 25) -> Tuple[int, int]:
+    """Return (epitope_count, tcell_assay_count) using IEDB IQ-API (best-effort)."""
+    base = "https://query-api.iedb.org"
+    epi_url = f"{base}/epitope_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
+    tc_url = f"{base}/tcell_search?parent_source_antigen_names=cs.%7B{urllib.parse.quote(symbol)}%7D&limit={limit}"
+    epi_n = 0
+    tc_n = 0
+    try:
+        ej = await _get_json(epi_url, tries=1)
+        epi_n = len(ej if isinstance(ej, list) else [])
+    except Exception:
+        pass
+    try:
+        tj = await _get_json(tc_url, tries=1)
+        tc_n = len(tj if isinstance(tj, list) else [])
+    except Exception:
+        pass
+    return epi_n, tc_n
+
+
 # -----------------------------------------------------------------------------
 # Utility endpoints
 # -----------------------------------------------------------------------------
-
 @router.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, "time": _now()}
@@ -425,78 +513,137 @@ def status() -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 # BUCKET 1 â Human Genetics & Causality
 # -----------------------------------------------------------------------------
-
 @router.get("/genetics/l2g", response_model=Evidence)
 async def genetics_l2g(
     gene: str,
     efo_id: str = Query(..., alias="efo"),
     limit: int = Query(50, ge=1, le=200),
+    ensembl: Optional[str] = Query(None, description="Optional Ensembl gene ID override"),
 ) -> Evidence:
     """
-    Locus-to-gene / association proxy:
-      * Resolve EFO â label & URI.
-      * Query GWAS Catalog by gene, then FILTER to the requested EFO (URI/id/label).
-      * Fallbacks retain disease specificity (filter by label).
+    L2G-style evidence via **Open Targets Platform v4 GraphQL**.
+
+    - Resolve inputs to **Ensembl gene id** and **EFO id** (if callers pass symbol/free-text).
+    - Query Disease.evidences filtered to `datasourceIds = ["gwas_credible_sets"]` for the targetâdisease pair.
+    - Also return the association score from Target.associatedDiseases for context.
     """
+    # Validate & normalise
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo_id, field_name="efo")
+    efo_norm, efo_uri, disease_label, efo_cites = await _resolve_efo(efo_id)
 
-    efo_id_norm, efo_uri, disease_label, map_url = await _resolve_efo(efo_id)
-
-    # Primary: GWAS Catalog associations by gene then filter with EFO id/URI/label
-    gwas_url = f"https://www.ebi.ac.uk/gwas/rest/api/associations?geneName={urllib.parse.quote(gene)}"
-    try:
-        js = await _get_json(gwas_url, tries=1)
-        hits: List[Dict[str, Any]] = []
-        if isinstance(js, dict):
-            hits = js.get("_embedded", {}).get("associations", [])
-        elif isinstance(js, list):
-            hits = js
-        filtered = [h for h in hits if _assoc_matches_efo(h, efo_id_norm, efo_uri, disease_label)]
-        return Evidence(
-            status="OK" if filtered else "NO_DATA",
-            source="GWAS Catalog associations (filtered by EFO)",
-            fetched_n=len(filtered),
-            data={
-                "gene": gene,
-                "efo_id": efo_id_norm,
-                "efo_uri": efo_uri,
-                "disease_label": disease_label,
-                "results": filtered[:limit],
-            },
-            citations=[gwas_url, map_url],
-            fetched_at=_now(),
-        )
-    except Exception:
-        pass
-
-    # Fallback: DisGeNET GDA by gene then string-match filter on disease label
-    dis_url = f"https://www.disgenet.org/api/gda/gene/{urllib.parse.quote(gene)}?format=json"
-    try:
-        js = await _get_json(dis_url, tries=1)
-        records = js if isinstance(js, list) else []
-        filtered = [r for r in records if _assoc_matches_efo(r, efo_id_norm, efo_uri, disease_label)]
-        return Evidence(
-            status="OK" if filtered else "NO_DATA",
-            source="DisGeNET GDA (filtered by EFO label/URI)",
-            fetched_n=len(filtered),
-            data={
-                "gene": gene,
-                "efo_id": efo_id_norm,
-                "efo_uri": efo_uri,
-                "disease_label": disease_label,
-                "results": filtered[:limit],
-            },
-            citations=[dis_url, map_url],
-            fetched_at=_now(),
-        )
-    except Exception:
+    # Early check
+    if not efo_norm:
         return Evidence(
             status="NO_DATA",
-            source="GWAS+DisGeNET empty/unavailable",
+            source="EFO resolution failed",
             fetched_n=0,
-            data={"gene": gene, "efo_id": efo_id_norm, "efo_uri": efo_uri, "disease_label": disease_label, "results": []},
-            citations=[gwas_url, dis_url, map_url],
+            data={"gene": gene, "efo_id": None, "results": []},
+            citations=efo_cites,
+            fetched_at=_now(),
+        )
+
+    # Resolve Ensembl id
+    ensg = ensembl
+    ensg_cites: List[str] = []
+    if not ensg:
+        ensg, _sym, ensg_cites = await _ensembl_from_symbol_or_id(gene)
+    if not ensg:
+        return Evidence(
+            status="NO_DATA",
+            source="Ensembl resolution failed",
+            fetched_n=0,
+            data={"gene": gene, "efo_id": efo_norm, "results": []},
+            citations=efo_cites + ensg_cites,
+            fetched_at=_now(),
+        )
+
+    # Build GraphQL
+    gql = {
+        "query": """
+        query L2G($ensemblId: String!, $efoId: String!, $size: Int!, $sources: [String!]) {
+          target(ensemblId: $ensemblId) {
+            id
+            approvedSymbol
+            associatedDiseases(efoId: $efoId, page: {index: 0, size: 1}) {
+              rows {
+                score
+                datatypeScores { id score }
+                datasourceScores { id score }
+                disease { id name }
+              }
+              count
+            }
+          }
+          disease(efoId: $efoId) {
+            id
+            name
+            evidences(ensemblIds: [$ensemblId], datasourceIds: $sources, size: $size) {
+              count
+              cursor
+              rows {
+                id
+                datasourceId
+                datatypeId
+                score
+                literature
+                urls { niceName url }
+                studyId
+                credibleSet {
+                  studyId
+                  credibleSetIndex
+                  confidence
+                  l2GPredictions(page: {index: 0, size: 50}) {
+                    count
+                    rows { score target { id approvedSymbol } }
+                  }
+                }
+                variant {
+                  id
+                  mostSevereConsequence { id name }
+                }
+              }
+            }
+          }
+        }
+        """,
+        "variables": {
+            "ensemblId": ensg,
+            "efoId": efo_norm,
+            "size": min(limit, 200),
+            "sources": ["gwas_credible_sets"],
+        },
+    }
+    try:
+        res = await _post_json(_OT_GQL, gql, tries=1)
+        t = (res.get("data", {}) or {}).get("target") or {}
+        d = (res.get("data", {}) or {}).get("disease") or {}
+        evid = ((d.get("evidences") or {}).get("rows") or [])[:limit]
+        assoc = (((t.get("associatedDiseases") or {}).get("rows") or [])[:1]) or []
+        payload = {
+            "gene": gene,
+            "ensembl_id": ensg,
+            "efo_id": efo_norm,
+            "efo_uri": efo_uri,
+            "disease_label": disease_label,
+            "association": assoc[0] if assoc else None,
+            "evidences": evid,
+        }
+        return Evidence(
+            status="OK" if evid or assoc else "NO_DATA",
+            source="Open Targets Platform GraphQL (gwas_credible_sets)",
+            fetched_n=len(evid),
+            data=payload,
+            citations=[_OT_GQL] + efo_cites + ensg_cites,
+            fetched_at=_now(),
+        )
+    except Exception as e:
+        return Evidence(
+            status="NO_DATA",
+            source=f"Open Targets Platform unavailable: {e}",
+            fetched_n=0,
+            data={"gene": gene, "ensembl_id": ensg, "efo_id": efo_norm, "evidences": []},
+            citations=[_OT_GQL] + efo_cites + ensg_cites,
             fetched_at=_now(),
         )
 
@@ -507,7 +654,6 @@ async def genetics_rare(
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     validate_symbol(gene, field_name="gene")
-
     clinvar_url = (
         f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?"
         f"db=clinvar&term={urllib.parse.quote(gene)}%5Bgene%5D&retmode=json"
@@ -516,9 +662,12 @@ async def genetics_rare(
         js = await _get_json(clinvar_url, tries=1)
         ids = js.get("esearchresult", {}).get("idlist", [])
         return Evidence(
-            status="OK" if ids else "NO_DATA", source="ClinVar E-utilities", fetched_n=len(ids),
+            status="OK" if ids else "NO_DATA",
+            source="ClinVar E-utilities",
+            fetched_n=len(ids),
             data={"gene": gene, "variants": ids[:limit]},
-            citations=[clinvar_url], fetched_at=_now(),
+            citations=[clinvar_url],
+            fetched_at=_now(),
         )
     except Exception:
         pass
@@ -526,26 +675,32 @@ async def genetics_rare(
     gql_url = "https://gnomad.broadinstitute.org/api"
     query = {
         "query": """
-            query ($symbol: String!) {
-              gene(symbol: $symbol) {
-                variants { variantId genome { ac an } }
-              }
-            }""",
+        query ($symbol: String!) {
+          gene(symbol: $symbol) {
+            variants { variantId genome { ac an } }
+          }
+        }""",
         "variables": {"symbol": gene},
     }
     try:
         body = await _post_json(gql_url, query, tries=1)
         variants = (body.get("data", {}).get("gene", {}).get("variants", []) or [])
         return Evidence(
-            status="OK" if variants else "NO_DATA", source="gnomAD GraphQL", fetched_n=len(variants),
+            status="OK" if variants else "NO_DATA",
+            source="gnomAD GraphQL",
+            fetched_n=len(variants),
             data={"gene": gene, "variants": variants[:limit]},
-            citations=[gql_url], fetched_at=_now(),
+            citations=[gql_url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="ClinVar+gnomAD empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="ClinVar+gnomAD empty/unavailable",
+            fetched_n=0,
             data={"gene": gene, "variants": []},
-            citations=[clinvar_url, gql_url], fetched_at=_now()
+            citations=[clinvar_url, gql_url],
+            fetched_at=_now(),
         )
 
 
@@ -554,39 +709,153 @@ async def genetics_mendelian(
     gene: str,
     efo_id: Optional[str] = Query(None, alias="efo"),
     limit: int = Query(50, ge=1, le=200),
+    ensembl: Optional[str] = Query(None, description="Optional Ensembl gene ID override"),
 ) -> Evidence:
     """
-    Mendelian links (Monarch). If EFO is supplied, filter diseases by that EFO (URI/id/label).
+    Mendelian / rare genetics evidence via **Open Targets Platform v4 GraphQL**.
+
+    - If `efo` is supplied, fetch Disease.evidences filtered to rare/clinical genetics sources:
+      ['eva', 'gene_burden', 'genomics_england', 'clingen', 'orphanet'].
+    - If `efo` is not supplied, return the *top* rare/clinical evidences across all diseases by
+      querying Target.evidences with datasource filters (page size = limit).
     """
     validate_symbol(gene, field_name="gene")
+    efo_norm = None
+    efo_uri = ""
+    disease_label = ""
+    efo_cites: List[str] = []
 
-    efo_id_norm, efo_uri, disease_label, map_url = ("", "", "", "")
     if efo_id:
         validate_symbol(efo_id, field_name="efo")
-        efo_id_norm, efo_uri, disease_label, map_url = await _resolve_efo(efo_id)
+        efo_norm, efo_uri, disease_label, efo_cites = await _resolve_efo(efo_id)
 
-    url = f"https://api.monarchinitiative.org/api/bioentity/gene/{urllib.parse.quote(gene)}/diseases?rows=20"
-    try:
-        js = await _get_json(url, tries=1)
-        associations = js.get("associations", []) if isinstance(js, dict) else []
-        if efo_id_norm:
-            filt = [a for a in associations if _assoc_matches_efo(a, efo_id_norm, efo_uri, disease_label)]
-        else:
-            filt = associations
+    # Resolve Ensembl id
+    ensg = ensembl
+    ensg_cites: List[str] = []
+    if not ensg:
+        ensg, _sym, ensg_cites = await _ensembl_from_symbol_or_id(gene)
+    if not ensg:
         return Evidence(
-            status="OK" if filt else "NO_DATA", source="Monarch API",
-            fetched_n=len(filt),
-            data={"gene": gene, "efo_id": efo_id_norm or None, "diseases": filt[:limit]},
-            citations=[url] + ([map_url] if map_url else []),
+            status="NO_DATA",
+            source="Ensembl resolution failed",
+            fetched_n=0,
+            data={"gene": gene, "efo_id": efo_norm, "evidences": []},
+            citations=efo_cites + ensg_cites,
             fetched_at=_now(),
         )
-    except Exception:
-        return Evidence(
-            status="NO_DATA", source="Monarch empty/unavailable", fetched_n=0,
-            data={"gene": gene, "efo_id": efo_id_norm or None, "diseases": []},
-            citations=[url] + ([map_url] if map_url else []),
-            fetched_at=_now(),
-        )
+
+    sources = ["eva", "gene_burden", "genomics_england", "clingen", "orphanet"]
+
+    if efo_norm:
+        # Disease-scoped evidences
+        gql = {
+            "query": """
+            query RareByDisease($ensemblId: String!, $efoId: String!, $size: Int!, $sources: [String!]) {
+              disease(efoId: $efoId) {
+                id
+                name
+                evidences(ensemblIds: [$ensemblId], datasourceIds: $sources, size: $size) {
+                  count
+                  rows {
+                    id datasourceId datatypeId score literature urls { niceName url }
+                    studyId
+                    variant { id mostSevereConsequence { id name } }
+                  }
+                }
+              }
+            }
+            """,
+            "variables": {
+                "ensemblId": ensg,
+                "efoId": efo_norm,
+                "size": min(limit, 200),
+                "sources": sources,
+            },
+        }
+        try:
+            res = await _post_json(_OT_GQL, gql, tries=1)
+            evid = (((res.get("data", {}) or {}).get("disease") or {}).get("evidences") or {}).get("rows") or []
+            evid = evid[:limit]
+            return Evidence(
+                status="OK" if evid else "NO_DATA",
+                source="Open Targets Platform GraphQL (rare/clinical genetics)",
+                fetched_n=len(evid),
+                data={
+                    "gene": gene,
+                    "ensembl_id": ensg,
+                    "efo_id": efo_norm,
+                    "efo_uri": efo_uri,
+                    "disease_label": disease_label,
+                    "evidences": evid,
+                },
+                citations=[_OT_GQL] + efo_cites + ensg_cites,
+                fetched_at=_now(),
+            )
+        except Exception as e:
+            return Evidence(
+                status="NO_DATA",
+                source=f"Open Targets Platform unavailable: {e}",
+                fetched_n=0,
+                data={
+                    "gene": gene,
+                    "ensembl_id": ensg,
+                    "efo_id": efo_norm,
+                    "evidences": [],
+                },
+                citations=[_OT_GQL] + efo_cites + ensg_cites,
+                fetched_at=_now(),
+            )
+    else:
+        # Target-scoped evidences across diseases
+        gql = {
+            "query": """
+            query RareByTarget($ensemblId: String!, $size: Int!, $sources: [String!]) {
+              target(ensemblId: $ensemblId) {
+                id
+                approvedSymbol
+                evidences(efoIds: [], datasourceIds: $sources, size: $size) {
+                  count
+                  rows {
+                    id datasourceId datatypeId score literature urls { niceName url }
+                    disease { id name }
+                    variant { id mostSevereConsequence { id name } }
+                  }
+                }
+              }
+            }
+            """,
+            "variables": {
+                "ensemblId": ensg,
+                "size": min(limit, 200),
+                "sources": sources,
+            },
+        }
+        try:
+            res = await _post_json(_OT_GQL, gql, tries=1)
+            targ = ((res.get("data", {}) or {}).get("target") or {})
+            evid = ((targ.get("evidences") or {}).get("rows") or [])[:limit]
+            return Evidence(
+                status="OK" if evid else "NO_DATA",
+                source="Open Targets Platform GraphQL (rare/clinical genetics)",
+                fetched_n=len(evid),
+                data={
+                    "gene": gene,
+                    "ensembl_id": ensg,
+                    "efo_id": None,
+                    "evidences": evid,
+                },
+                citations=[_OT_GQL] + ensg_cites,
+                fetched_at=_now(),
+            )
+        except Exception as e:
+            return Evidence(
+                status="NO_DATA",
+                source=f"Open Targets Platform unavailable: {e}",
+                fetched_n=0,
+                data={"gene": gene, "ensembl_id": ensg, "evidences": []},
+                citations=[_OT_GQL] + ensg_cites,
+                fetched_at=_now(),
+            )
 
 
 @router.get("/genetics/mr", response_model=Evidence)
@@ -598,7 +867,6 @@ async def genetics_mr(
     """EpiGraphDB xQTL multiâSNP MR, outcome filtered by EFO."""
     validate_symbol(gene, field_name="gene")
     validate_symbol(efo_id, field_name="efo")
-
     efo_id_norm, efo_uri, disease_label, map_url = await _resolve_efo(efo_id)
 
     base = "https://api.epigraphdb.org/xqtl/multi-snp-mr"
@@ -623,9 +891,18 @@ async def genetics_mr(
         )
     except Exception as e:
         return Evidence(
-            status="NO_DATA", source=f"MR request empty/unavailable: {e}", fetched_n=0,
-            data={"gene": gene, "efo_id": efo_id_norm, "efo_uri": efo_uri, "outcome_trait": disease_label, "mr": []},
-            citations=[mr_url, map_url], fetched_at=_now(),
+            status="NO_DATA",
+            source=f"MR request empty/unavailable: {e}",
+            fetched_n=0,
+            data={
+                "gene": gene,
+                "efo_id": efo_id_norm,
+                "efo_uri": efo_uri,
+                "outcome_trait": disease_label,
+                "mr": [],
+            },
+            citations=[mr_url, map_url],
+            fetched_at=_now(),
         )
 
 
@@ -640,14 +917,21 @@ async def genetics_lncrna(
         js = await _get_json(url, tries=1)
         results = js.get("results", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK" if results else "NO_DATA", source="RNAcentral", fetched_n=len(results),
+            status="OK" if results else "NO_DATA",
+            source="RNAcentral",
+            fetched_n=len(results),
             data={"gene": gene, "lncRNAs": results[:limit]},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="RNAcentral empty/unavailable", fetched_n=0,
-            data={"gene": gene, "lncRNAs": []}, citations=[url], fetched_at=_now()
+            status="NO_DATA",
+            source="RNAcentral empty/unavailable",
+            fetched_n=0,
+            data={"gene": gene, "lncRNAs": []},
+            citations=[url],
+            fetched_at=_now(),
         )
 
 
@@ -665,17 +949,23 @@ async def genetics_mirna(
         r = await _post_json(mirnet_url, payload, tries=1)
         rows = r.get("data", []) if isinstance(r, dict) else (r or [])
         if rows:
-            simplified = [{
-                "miRNA": it.get("miRNA") or it.get("mirna") or it.get("ID"),
-                "target": it.get("Target") or it.get("Gene") or gene,
-                "evidence": it.get("Category") or it.get("Evidence") or it.get("Source"),
-                "pmid": it.get("PMID") or it.get("PubMedID"),
-                "source_db": it.get("Source") or "miRNet"
-            } for it in rows[:limit]]
+            simplified = [
+                {
+                    "miRNA": it.get("miRNA") or it.get("mirna") or it.get("ID"),
+                    "target": it.get("Target") or it.get("Gene") or gene,
+                    "evidence": it.get("Category") or it.get("Evidence") or it.get("Source"),
+                    "pmid": it.get("PMID") or it.get("PubMedID"),
+                    "source_db": it.get("Source") or "miRNet",
+                }
+                for it in rows[:limit]
+            ]
             return Evidence(
-                status="OK", source="miRNet 2.0", fetched_n=len(rows),
+                status="OK",
+                source="miRNet 2.0",
+                fetched_n=len(rows),
                 data={"gene": gene, "interactions": simplified},
-                citations=[mirnet_url], fetched_at=_now(),
+                citations=[mirnet_url],
+                fetched_at=_now(),
             )
     except Exception:
         pass
@@ -690,31 +980,43 @@ async def genetics_mirna(
         lines = [ln for ln in tsv.splitlines() if ln.strip()]
         if len(lines) <= 1:
             return Evidence(
-                status="NO_DATA", source="ENCORI/starBase empty", fetched_n=0,
-                data={"gene": gene, "interactions": []}, citations=[encori_url], fetched_at=_now()
+                status="NO_DATA",
+                source="ENCORI/starBase empty",
+                fetched_n=0,
+                data={"gene": gene, "interactions": []},
+                citations=[encori_url],
+                fetched_at=_now(),
             )
         header = [h.strip() for h in lines[0].split("\t")]
         out = []
         for ln in lines[1:][:limit]:
             cols = ln.split("\t")
             row = dict(zip(header, cols))
-            out.append({
-                "miRNA": row.get("miRNA") or row.get("miRNA_Name"),
-                "target": row.get("Target_Gene") or gene,
-                "support": row.get("SupportType") or row.get("Support_Type"),
-                "pmid": row.get("PMID") or row.get("CLIP-Data_PubMed_ID"),
-                "cell_type": row.get("Cell_Type"),
-            })
+            out.append(
+                {
+                    "miRNA": row.get("miRNA") or row.get("miRNA_Name"),
+                    "target": row.get("Target_Gene") or gene,
+                    "support": row.get("SupportType") or row.get("Support_Type"),
+                    "pmid": row.get("PMID") or row.get("CLIP-Data_PubMed_ID"),
+                    "cell_type": row.get("Cell_Type"),
+                }
+            )
         return Evidence(
-            status="OK", source="ENCORI/starBase", fetched_n=len(out),
+            status="OK",
+            source="ENCORI/starBase",
+            fetched_n=len(out),
             data={"gene": gene, "interactions": out},
-            citations=[encori_url], fetched_at=_now(),
+            citations=[encori_url],
+            fetched_at=_now(),
         )
     except Exception as e:
         return Evidence(
-            status="NO_DATA", source=f"ENCORI unavailable: {e}", fetched_n=0,
+            status="NO_DATA",
+            source=f"ENCORI unavailable: {e}",
+            fetched_n=0,
             data={"gene": gene, "interactions": []},
-            citations=[mirnet_url, encori_url], fetched_at=_now(),
+            citations=[mirnet_url, encori_url],
+            fetched_at=_now(),
         )
 
 
@@ -730,15 +1032,21 @@ async def genetics_sqtl(
         js = await _get_json(url, tries=1)
         results = js.get("sqtls", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK" if results else "NO_DATA", source="eQTL Catalogue", fetched_n=len(results),
+            status="OK" if results else "NO_DATA",
+            source="eQTL Catalogue",
+            fetched_n=len(results),
             data={"gene": gene, "efo_id": efo_id or None, "sqtls": results[:limit]},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="eQTL Catalogue empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="eQTL Catalogue empty/unavailable",
+            fetched_n=0,
             data={"gene": gene, "efo_id": efo_id or None, "sqtls": []},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
 
 
@@ -749,7 +1057,6 @@ async def genetics_epigenetics(
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     validate_symbol(gene, field_name="gene")
-
     search_url = (
         "https://www.encodeproject.org/search/?"
         f"searchTerm={urllib.parse.quote(gene)}&format=json&limit={limit}&type=Experiment"
@@ -758,37 +1065,44 @@ async def genetics_epigenetics(
         js = await _get_json(search_url, tries=1)
         hits = js.get("@graph", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK" if hits else "NO_DATA", source="ENCODE Search API", fetched_n=len(hits),
+            status="OK" if hits else "NO_DATA",
+            source="ENCODE Search API",
+            fetched_n=len(hits),
             data={"gene": gene, "efo_id": efo_id or None, "experiments": hits[:limit]},
-            citations=[search_url], fetched_at=_now(),
+            citations=[search_url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="ENCODE empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="ENCODE empty/unavailable",
+            fetched_n=0,
             data={"gene": gene, "efo_id": efo_id or None, "experiments": []},
-            citations=[search_url], fetched_at=_now(),
+            citations=[search_url],
+            fetched_at=_now(),
         )
 
 
 # -----------------------------------------------------------------------------
 # BUCKET 2 â Disease Association & Perturbation
 # -----------------------------------------------------------------------------
-
 @router.get("/assoc/bulk-rna", response_model=Evidence)
 async def assoc_bulk_rna(
     condition: str,
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     validate_condition(condition, field_name="condition")
-
     url = f"https://gtexportal.org/api/v2/association/genesByTissue?tissueSiteDetail={urllib.parse.quote(condition)}"
     try:
         js = await _get_json(url, tries=1)
         genes = js.get("genes", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK" if genes else "NO_DATA", source="GTEx genesByTissue", fetched_n=len(genes),
+            status="OK" if genes else "NO_DATA",
+            source="GTEx genesByTissue",
+            fetched_n=len(genes),
             data={"condition": condition, "genes": genes[:limit]},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
     except Exception:
         # Fallback â HPA search with rna_gtex hints
@@ -805,13 +1119,17 @@ async def assoc_bulk_rna(
                 source="Human Protein Atlas (fallback)",
                 fetched_n=len(genes),
                 data={"condition": condition, "genes": genes[:limit]},
-                citations=[url, hpa], fetched_at=_now(),
+                citations=[url, hpa],
+                fetched_at=_now(),
             )
         except Exception:
             return Evidence(
-                status="NO_DATA", source="GTEx+HPA unavailable or empty", fetched_n=0,
+                status="NO_DATA",
+                source="GTEx+HPA unavailable or empty",
+                fetched_n=0,
                 data={"condition": condition, "genes": []},
-                citations=[url, hpa], fetched_at=_now(),
+                citations=[url, hpa],
+                fetched_at=_now(),
             )
 
 
@@ -821,7 +1139,6 @@ async def assoc_bulk_prot(
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     validate_condition(condition, field_name="condition")
-
     url = (
         "https://www.proteomicsdb.org/proteomicsdb/api/v2/proteins/search"
         f"?search={urllib.parse.quote(condition)}"
@@ -834,9 +1151,12 @@ async def assoc_bulk_prot(
         elif isinstance(js, list):
             records = js
         return Evidence(
-            status="OK" if records else "NO_DATA", source="ProteomicsDB proteins search", fetched_n=len(records),
+            status="OK" if records else "NO_DATA",
+            source="ProteomicsDB proteins search",
+            fetched_n=len(records),
             data={"condition": condition, "proteins": records[:limit]},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
     except Exception:
         # Fallback â PRIDE project list as a proxy
@@ -849,13 +1169,17 @@ async def assoc_bulk_prot(
                 source="PRIDE Archive (fallback)",
                 fetched_n=len(items),
                 data={"condition": condition, "proteins": items[:limit]},
-                citations=[url, pride], fetched_at=_now(),
+                citations=[url, pride],
+                fetched_at=_now(),
             )
         except Exception:
             return Evidence(
-                status="NO_DATA", source="ProteomicsDB+PRIDE unavailable or empty", fetched_n=0,
+                status="NO_DATA",
+                source="ProteomicsDB+PRIDE unavailable or empty",
+                fetched_n=0,
                 data={"condition": condition, "proteins": []},
-                citations=[url, pride], fetched_at=_now(),
+                citations=[url, pride],
+                fetched_at=_now(),
             )
 
 
@@ -865,9 +1189,9 @@ async def assoc_sc(
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
     """Singleâcell signal using Human Protein Atlas search API.
-       Accepts either a disease term or a gene-like token; if gene-like, normalizes and searches by gene."""
+    Accepts either a disease term or a gene-like token; if gene-like, normalizes and searches by gene.
+    """
     validate_condition(condition, field_name="condition")
-
     search_term = condition
     normalized_symbol: Optional[str] = None
     if _looks_like_gene_token(condition):
@@ -884,29 +1208,37 @@ async def assoc_sc(
         out: List[Dict[str, Any]] = []
         for r in rows:
             if any(k in r and r[k] for k in ("cell_type", "rna_cell_type")):
-                out.append({
-                    "gene": r.get("gene"),
-                    "cell_type": r.get("cell_type") or r.get("rna_cell_type"),
-                    "rna_gtex": r.get("rna_gtex"),
-                    "tissue": r.get("rna_tissue"),
-                })
+                out.append(
+                    {
+                        "gene": r.get("gene"),
+                        "cell_type": r.get("cell_type") or r.get("rna_cell_type"),
+                        "rna_gtex": r.get("rna_gtex"),
+                        "tissue": r.get("rna_tissue"),
+                    }
+                )
         status = "OK" if out else "NO_DATA"
         payload = {"condition": condition, "sc_records": out[:limit]}
         if normalized_symbol:
             payload["normalized_symbol"] = normalized_symbol
         return Evidence(
-            status=status, source="Human Protein Atlas (search_download)", fetched_n=len(out),
+            status=status,
+            source="Human Protein Atlas (search_download)",
+            fetched_n=len(out),
             data=payload,
-            citations=[hpa_url], fetched_at=_now(),
+            citations=[hpa_url],
+            fetched_at=_now(),
         )
     except Exception as e:
         payload = {"condition": condition, "sc_records": []}
         if normalized_symbol:
             payload["normalized_symbol"] = normalized_symbol
         return Evidence(
-            status="NO_DATA", source=f"HPA search empty/unavailable: {e}", fetched_n=0,
+            status="NO_DATA",
+            source=f"HPA search empty/unavailable: {e}",
+            fetched_n=0,
             data=payload,
-            citations=[hpa_url], fetched_at=_now(),
+            citations=[hpa_url],
+            fetched_at=_now(),
         )
 
 
@@ -916,9 +1248,10 @@ async def assoc_perturb(
     limit: int = Query(100, ge=1, le=500),
 ) -> Evidence:
     """CRISPR perturbation from BioGRID ORCS REST (requires ORCS_ACCESS_KEY).
-       Skips gracefully if input appears to be a gene symbol rather than a condition."""
-    validate_condition(condition, field_name="condition")
 
+    Skips gracefully if input appears to be a gene symbol rather than a condition.
+    """
+    validate_condition(condition, field_name="condition")
     # If input looks like a gene symbol, do not query ORCS with a gene term; return clean NO_DATA
     if _looks_like_gene_token(condition):
         return Evidence(
@@ -933,8 +1266,12 @@ async def assoc_perturb(
     access_key = os.getenv("ORCS_ACCESS_KEY")
     if not access_key:
         return Evidence(
-            status="ERROR", source="Missing ORCS access key (set ORCS_ACCESS_KEY)", fetched_n=0,
-            data={"condition": condition, "screens": []}, citations=["https://orcsws.thebiogrid.org/"], fetched_at=_now(),
+            status="ERROR",
+            source="Missing ORCS access key (set ORCS_ACCESS_KEY)",
+            fetched_n=0,
+            data={"condition": condition, "screens": []},
+            citations=["https://orcsws.thebiogrid.org/"],
+            fetched_at=_now(),
         )
 
     base = "https://orcsws.thebiogrid.org/screens/"
@@ -957,34 +1294,41 @@ async def assoc_perturb(
             try:
                 sc_hits = await _get_json(sc_url, tries=1)
                 for h in (sc_hits if isinstance(sc_hits, list) else []):
-                    hits_collected.append({
-                        "screen_id": sc_id,
-                        "gene": h.get("OFFICIAL_SYMBOL") or h.get("NAME"),
-                        "cell_line": sc.get("CELL_LINE"),
-                        "phenotype": sc.get("PHENOTYPE"),
-                        "score1": h.get("SCORE_1") or h.get("SCORE1") or h.get("SCORE"),
-                        "pubmed_id": sc.get("PUBMED_ID"),
-                    })
+                    hits_collected.append(
+                        {
+                            "screen_id": sc_id,
+                            "gene": h.get("OFFICIAL_SYMBOL") or h.get("NAME"),
+                            "cell_line": sc.get("CELL_LINE"),
+                            "phenotype": sc.get("PHENOTYPE"),
+                            "score1": h.get("SCORE_1") or h.get("SCORE1") or h.get("SCORE"),
+                            "pubmed_id": sc.get("PUBMED_ID"),
+                        }
+                    )
             except Exception:
                 continue
 
         return Evidence(
-            status="OK" if hits_collected else "NO_DATA", source="BioGRID ORCS REST", fetched_n=len(hits_collected),
+            status="OK" if hits_collected else "NO_DATA",
+            source="BioGRID ORCS REST",
+            fetched_n=len(hits_collected),
             data={"condition": condition, "screens_n": len(screens_list), "hits": hits_collected[:limit]},
-            citations=[list_url], fetched_at=_now(),
+            citations=[list_url],
+            fetched_at=_now(),
         )
     except Exception as e:
         return Evidence(
-            status="NO_DATA", source=f"ORCS empty/unavailable: {e}", fetched_n=0,
+            status="NO_DATA",
+            source=f"ORCS empty/unavailable: {e}",
+            fetched_n=0,
             data={"condition": condition, "screens": []},
-            citations=[list_url], fetched_at=_now(),
+            citations=[list_url],
+            fetched_at=_now(),
         )
 
 
 # -----------------------------------------------------------------------------
 # BUCKET 3 â Expression, Specificity & Localization
 # -----------------------------------------------------------------------------
-
 @router.get("/expr/baseline", response_model=Evidence)
 async def expression_baseline(
     symbol: Optional[str] = Query(None),
@@ -992,7 +1336,8 @@ async def expression_baseline(
     limit: int = Query(50, ge=1, le=500),
 ) -> Evidence:
     """Baseline expression via HPA â UniProt â Expression Atlas.
-       Accepts both 'symbol' and 'gene' query parameters; normalizes aliases (e.g., CB1âCNR1)."""
+    Accepts both 'symbol' and 'gene' query parameters; normalizes aliases (e.g., CB1âCNR1).
+    """
     sym_in = symbol or gene
     validate_symbol(sym_in, field_name="symbol")
     sym_norm = await _normalize_symbol(sym_in)
@@ -1007,9 +1352,12 @@ async def expression_baseline(
         records = js if isinstance(js, list) else []
         if records:
             return Evidence(
-                status="OK", source="Human Protein Atlas search_download", fetched_n=len(records),
+                status="OK",
+                source="Human Protein Atlas search_download",
+                fetched_n=len(records),
                 data={"symbol": sym_in, "normalized_symbol": sym_norm, "baseline": records[:limit]},
-                citations=[hpa_url], fetched_at=_now(),
+                citations=[hpa_url],
+                fetched_at=_now(),
             )
     except Exception:
         pass
@@ -1024,9 +1372,12 @@ async def expression_baseline(
         entries = body.get("results", []) if isinstance(body, dict) else []
         if entries:
             return Evidence(
-                status="OK", source="UniProt search", fetched_n=len(entries),
+                status="OK",
+                source="UniProt search",
+                fetched_n=len(entries),
                 data={"symbol": sym_in, "normalized_symbol": sym_norm, "baseline": entries[:limit]},
-                citations=[uniprot_url], fetched_at=_now(),
+                citations=[uniprot_url],
+                fetched_at=_now(),
             )
     except Exception:
         pass
@@ -1039,20 +1390,23 @@ async def expression_baseline(
         if isinstance(body, dict):
             for exp in body.get("experiments", []) or []:
                 for d in exp.get("data", []):
-                    results.append({
-                        "tissue": d.get("organismPart") or d.get("tissue") or "NA",
-                        "level": d.get("expressions", [{}])[0].get("value")
-                    })
+                    results.append({"tissue": d.get("organismPart") or d.get("tissue") or "NA", "level": d.get("expressions", [{}])[0].get("value")})
         return Evidence(
-            status="OK" if results else "NO_DATA", source="Expression Atlas (baseline)", fetched_n=len(results),
+            status="OK" if results else "NO_DATA",
+            source="Expression Atlas (baseline)",
+            fetched_n=len(results),
             data={"symbol": sym_in, "normalized_symbol": sym_norm, "baseline": results[:limit]},
-            citations=[atlas_url], fetched_at=_now(),
+            citations=[atlas_url],
+            fetched_at=_now(),
         )
     except Exception as e:
         return Evidence(
-            status="NO_DATA", source=f"GXA empty/unavailable: {e}", fetched_n=0,
+            status="NO_DATA",
+            source=f"GXA empty/unavailable: {e}",
+            fetched_n=0,
             data={"symbol": sym_in, "normalized_symbol": sym_norm, "baseline": []},
-            citations=[hpa_url, uniprot_url, atlas_url], fetched_at=_now(),
+            citations=[hpa_url, uniprot_url, atlas_url],
+            fetched_at=_now(),
         )
 
 
@@ -1062,7 +1416,6 @@ async def expr_localization(
     limit: int = Query(50, ge=1, le=200),
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
-
     sym_norm = await _normalize_symbol(symbol)
     url = f"https://compartments.jensenlab.org/Service?gene_names={urllib.parse.quote(sym_norm)}&format=json"
     uni = (
@@ -1075,9 +1428,12 @@ async def expr_localization(
         locs = js.get(sym_norm, []) if isinstance(js, dict) else []
         if locs:
             return Evidence(
-                status="OK", source="COMPARTMENTS API", fetched_n=len(locs),
+                status="OK",
+                source="COMPARTMENTS API",
+                fetched_n=len(locs),
                 data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": locs[:limit]},
-                citations=[url], fetched_at=_now(),
+                citations=[url],
+                fetched_at=_now(),
             )
     except Exception:
         pass
@@ -1091,15 +1447,21 @@ async def expr_localization(
                 if c.get("commentType") == "SUBCELLULAR LOCATION":
                     locs.append(c)
         return Evidence(
-            status="OK" if locs else "NO_DATA", source="UniProt (fallback)", fetched_n=len(locs),
+            status="OK" if locs else "NO_DATA",
+            source="UniProt (fallback)",
+            fetched_n=len(locs),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": locs[:limit]},
-            citations=[url, uni], fetched_at=_now(),
+            citations=[url, uni],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="COMPARTMENTS+UniProt unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="COMPARTMENTS+UniProt unavailable",
+            fetched_n=0,
             data={"symbol": symbol, "normalized_symbol": sym_norm, "localization": []},
-            citations=[url, uni], fetched_at=_now(),
+            citations=[url, uni],
+            fetched_at=_now(),
         )
 
 
@@ -1110,7 +1472,6 @@ async def expr_inducibility(
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-
     url = (
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
         f"?db=gds&term={urllib.parse.quote(sym_norm)}%5Bgene%5D&retmode=json"
@@ -1119,22 +1480,27 @@ async def expr_inducibility(
         js = await _get_json(url, tries=1)
         ids = js.get("esearchresult", {}).get("idlist", [])
         return Evidence(
-            status="OK" if ids else "NO_DATA", source="GEO E-utilities", fetched_n=len(ids),
+            status="OK" if ids else "NO_DATA",
+            source="GEO E-utilities",
+            fetched_n=len(ids),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "datasets": ids[:limit]},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="GEO empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="GEO empty/unavailable",
+            fetched_n=0,
             data={"symbol": symbol, "normalized_symbol": sym_norm, "datasets": []},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
 
 
 # -----------------------------------------------------------------------------
 # BUCKET 4 â Mechanistic Wiring & Networks
 # -----------------------------------------------------------------------------
-
 @router.get("/mech/pathways", response_model=Evidence)
 async def mech_pathways(
     symbol: str,
@@ -1142,7 +1508,6 @@ async def mech_pathways(
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-
     search = f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(sym_norm)}&species=Homo%20sapiens"
     try:
         js = await _get_json(search, tries=1)
@@ -1152,15 +1517,21 @@ async def mech_pathways(
             if (h.get("stId", "") or "").startswith("R-HSA") or (h.get("species") in ("Homo sapiens", "Pathway")):
                 pathways.append({"name": h.get("name"), "stId": h.get("stId"), "score": h.get("score")})
         return Evidence(
-            status="OK" if pathways else "NO_DATA", source="Reactome ContentService", fetched_n=len(pathways),
+            status="OK" if pathways else "NO_DATA",
+            source="Reactome ContentService",
+            fetched_n=len(pathways),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "pathways": pathways[:limit]},
-            citations=[search], fetched_at=_now(),
+            citations=[search],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="Reactome empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="Reactome empty/unavailable",
+            fetched_n=0,
             data={"symbol": symbol, "normalized_symbol": sym_norm, "pathways": []},
-            citations=[search], fetched_at=_now(),
+            citations=[search],
+            fetched_at=_now(),
         )
 
 
@@ -1182,8 +1553,12 @@ async def mech_ppi(
         ids = await _get_json(map_url, tries=1)
         if not ids:
             return Evidence(
-                status="NO_DATA", source="STRING id lookup empty", fetched_n=0,
-                data={"symbol": symbol, "normalized_symbol": sym_norm, "neighbors": []}, citations=[map_url], fetched_at=_now()
+                status="NO_DATA",
+                source="STRING id lookup empty",
+                fetched_n=0,
+                data={"symbol": symbol, "normalized_symbol": sym_norm, "neighbors": []},
+                citations=[map_url],
+                fetched_at=_now(),
             )
         string_id = ids[0].get("stringId")
         net = await _get_json(net_tpl.format(id=string_id, sp=int(species)), tries=1)
@@ -1191,22 +1566,30 @@ async def mech_ppi(
         for edge in net:
             score = edge.get("score") or edge.get("combined_score")
             if score and float(score) >= cutoff:
-                neighbors.append({
-                    "preferredName_A": edge.get("preferredName_A"),
-                    "preferredName_B": edge.get("preferredName_B"),
-                    "score": float(score),
-                })
+                neighbors.append(
+                    {
+                        "preferredName_A": edge.get("preferredName_A"),
+                        "preferredName_B": edge.get("preferredName_B"),
+                        "score": float(score),
+                    }
+                )
         neighbors = neighbors[:limit]
         return Evidence(
-            status="OK" if neighbors else "NO_DATA", source="STRING REST", fetched_n=len(neighbors),
+            status="OK" if neighbors else "NO_DATA",
+            source="STRING REST",
+            fetched_n=len(neighbors),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "species": species, "neighbors": neighbors},
-            citations=[map_url, net_tpl.format(id=string_id, sp=int(species))], fetched_at=_now(),
+            citations=[map_url, net_tpl.format(id=string_id, sp=int(species))],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="STRING empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="STRING empty/unavailable",
+            fetched_n=0,
             data={"symbol": symbol, "normalized_symbol": sym_norm, "species": species, "neighbors": []},
-            citations=[map_url], fetched_at=_now(),
+            citations=[map_url],
+            fetched_at=_now(),
         )
 
 
@@ -1217,29 +1600,33 @@ async def mech_ligrec(
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-
     url = "https://omnipathdb.org/interactions?format=json&genes={gene}&substrate_only=false"
     try:
         js = await _get_json(url.format(gene=urllib.parse.quote(sym_norm)), tries=1)
         interactions = js if isinstance(js, list) else []
         filtered = [i for i in interactions if sym_norm in (i.get("source", ""), i.get("target", ""))]
         return Evidence(
-            status="OK" if filtered else "NO_DATA", source="OmniPath interactions", fetched_n=len(filtered),
+            status="OK" if filtered else "NO_DATA",
+            source="OmniPath interactions",
+            fetched_n=len(filtered),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": filtered[:limit]},
-            citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now(),
+            citations=[url.format(gene=urllib.parse.quote(sym_norm))],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="OmniPath empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="OmniPath empty/unavailable",
+            fetched_n=0,
             data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": []},
-            citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now(),
+            citations=[url.format(gene=urllib.parse.quote(sym_norm))],
+            fetched_at=_now(),
         )
 
 
 # -----------------------------------------------------------------------------
 # BUCKET 5 â Tractability & Modality
 # -----------------------------------------------------------------------------
-
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(
     symbol: str,
@@ -1254,11 +1641,11 @@ async def tract_drugs(
     # 1) OpenTargets knownDrugs (GraphQL)
     query = {
         "query": """
-            query ($symbol: String!) {
-              target(approvedSymbol: $symbol) {
-                knownDrugs { rows { drugId drugName mechanismOfAction } count }
-              }
-            }""",
+        query ($symbol: String!) {
+          target(approvedSymbol: $symbol) {
+            knownDrugs { rows { drugId drugName mechanismOfAction } count }
+          }
+        }""",
         "variables": {"symbol": sym_norm},
     }
     try:
@@ -1266,9 +1653,12 @@ async def tract_drugs(
         rows = (res.get("data", {}).get("target", {}).get("knownDrugs", {}).get("rows", []))
         if rows:
             return Evidence(
-                status="OK", source="OpenTargets knownDrugs", fetched_n=len(rows),
+                status="OK",
+                source="OpenTargets knownDrugs",
+                fetched_n=len(rows),
                 data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": rows[:limit]},
-                citations=[gql_url], fetched_at=_now(),
+                citations=[gql_url],
+                fetched_at=_now(),
             )
     except Exception:
         pass
@@ -1282,14 +1672,21 @@ async def tract_drugs(
         for term in matched or []:
             interactions.extend(term.get("interactions", []))
         return Evidence(
-            status="OK" if interactions else "NO_DATA", source="DGIdb", fetched_n=len(interactions),
+            status="OK" if interactions else "NO_DATA",
+            source="DGIdb",
+            fetched_n=len(interactions),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": interactions[:limit]},
-            citations=[dg_url], fetched_at=_now(),
+            citations=[dg_url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="OpenTargets+DGIdb empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": []}, citations=[gql_url, dg_url], fetched_at=_now()
+            status="NO_DATA",
+            source="OpenTargets+DGIdb empty/unavailable",
+            fetched_n=0,
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": []},
+            citations=[gql_url, dg_url],
+            fetched_at=_now(),
         )
 
 
@@ -1300,21 +1697,26 @@ async def tract_ligandability_sm(
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-
     url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(sym_norm)}&format=json"
     try:
         js = await _get_json(url, tries=1)
         targets = js.get("targets", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK" if targets else "NO_DATA", source="ChEMBL target search", fetched_n=len(targets),
+            status="OK" if targets else "NO_DATA",
+            source="ChEMBL target search",
+            fetched_n=len(targets),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": targets[:limit]},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="ChEMBL empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="ChEMBL empty/unavailable",
+            fetched_n=0,
             data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": []},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
 
 
@@ -1325,7 +1727,6 @@ async def tract_ligandability_ab(
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-
     url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(sym_norm)}"
     try:
         js = await _get_json(url, tries=1)
@@ -1335,15 +1736,21 @@ async def tract_ligandability_ab(
                 if isinstance(vals, list):
                     entries.extend(vals)
         return Evidence(
-            status="OK" if entries else "NO_DATA", source="PDBe proteins API", fetched_n=len(entries),
+            status="OK" if entries else "NO_DATA",
+            source="PDBe proteins API",
+            fetched_n=len(entries),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "structures": entries[:limit]},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="PDBe empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="PDBe empty/unavailable",
+            fetched_n=0,
             data={"symbol": symbol, "normalized_symbol": sym_norm, "structures": []},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
 
 
@@ -1355,7 +1762,6 @@ async def tract_ligandability_oligo(
     """Oligonucleotide ligandability via Ribocentre Aptamer API."""
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-
     api_url = f"https://aptamer.ribocentre.org/api/?search={urllib.parse.quote(sym_norm)}"
     try:
         js = await _get_json(api_url, tries=1)
@@ -1364,24 +1770,32 @@ async def tract_ligandability_oligo(
         for it in items:
             ligand = (it.get("Ligand") or it.get("Target") or it.get("ligand") or "")
             if isinstance(ligand, str) and sym_norm.lower() in ligand.lower():
-                out.append({
-                    "id": it.get("id") or it.get("Name") or it.get("Sequence Name") or it.get("name"),
-                    "ligand": ligand,
-                    "sequence": it.get("Sequence") or it.get("sequence"),
-                    "kd": it.get("Affinity (Kd)") or it.get("Kd") or it.get("affinity"),
-                    "year": it.get("Discovery Year") or it.get("year"),
-                    "ref": it.get("Article name") or it.get("reference"),
-                })
+                out.append(
+                    {
+                        "id": it.get("id") or it.get("Name") or it.get("Sequence Name") or it.get("name"),
+                        "ligand": ligand,
+                        "sequence": it.get("Sequence") or it.get("sequence"),
+                        "kd": it.get("Affinity (Kd)") or it.get("Kd") or it.get("affinity"),
+                        "year": it.get("Discovery Year") or it.get("year"),
+                        "ref": it.get("Article name") or it.get("reference"),
+                    }
+                )
         return Evidence(
-            status="OK" if out else "NO_DATA", source="Ribocentre Aptamer API", fetched_n=len(out),
+            status="OK" if out else "NO_DATA",
+            source="Ribocentre Aptamer API",
+            fetched_n=len(out),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": out[:limit]},
-            citations=[api_url], fetched_at=_now(),
+            citations=[api_url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="Aptamer API empty/unavailable", fetched_n=0,
+            status="NO_DATA",
+            source="Aptamer API empty/unavailable",
+            fetched_n=0,
             data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": []},
-            citations=[api_url], fetched_at=_now(),
+            citations=[api_url],
+            fetched_at=_now(),
         )
 
 
@@ -1401,10 +1815,10 @@ async def tract_modality(
     Enhanced heuristic modality assessment using COMPARTMENTS + ChEMBL + PDBe + UniProt + IEDB.
 
     Additions over the baseline:
-      * Optional priors (success-rate-inspired).
-      * Extracellular domain length estimate from UniProt topology.
-      * Immunogenicity signal from IEDB (epitopes / T-cell assays).
-      * User can override the resulting per-modality scores with w_* query params.
+    * Optional priors (success-rate-inspired).
+    * Extracellular domain length estimate from UniProt topology.
+    * Immunogenicity signal from IEDB (epitopes / T-cell assays).
+    * User can override the resulting per-modality scores with w_* query params.
     """
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
@@ -1441,6 +1855,7 @@ async def tract_modality(
 
     # Fetch base evidence concurrently
     compres, chemblres, pdberes = await asyncio.gather(_get_comp(), _get_chembl(), _get_pdbe())
+
     loc_terms = " ".join([str(x) for x in compres]).lower()
     is_extracellular = any(t in loc_terms for t in ["secreted", "extracellular", "extracellular space"])
     is_membrane = any(t in loc_terms for t in ["plasma membrane", "cell membrane", "membrane"])
@@ -1481,7 +1896,8 @@ async def tract_modality(
 
     recommendation = sorted(
         [("small_molecule", sm_score), ("antibody", ab_score), ("oligo", oligo_score)],
-        key=lambda kv: kv[1], reverse=True,
+        key=lambda kv: kv[1],
+        reverse=True,
     )
 
     return Evidence(
@@ -1544,6 +1960,7 @@ async def tract_immunogenicity(
             return []
 
     epi_list, tc_list = await asyncio.gather(_epi(), _tc())
+
     hla_counts: Dict[str, int] = {}
     for r in tc_list:
         allele = r.get("mhc_allele_name") or r.get("assay_mhc_allele_name") or r.get("mhc_name")
@@ -1552,8 +1969,11 @@ async def tract_immunogenicity(
 
     total = len(epi_list) + len(tc_list)
     status = "OK" if total > 0 else "NO_DATA"
+
     return Evidence(
-        status=status, source="IEDB IQâAPI", fetched_n=total,
+        status=status,
+        source="IEDB IQâAPI",
+        fetched_n=total,
         data={
             "symbol": symbol,
             "normalized_symbol": sym_norm,
@@ -1562,30 +1982,32 @@ async def tract_immunogenicity(
             "hla_breakdown": sorted([[k, v] for k, v in hla_counts.items()], key=lambda kv: kv[1], reverse=True)[:25],
             "examples": {"epitopes": epi_list[: min(10, limit)], "tcell_assays": tc_list[: min(10, limit)]},
         },
-        citations=[epi_url, tc_url], fetched_at=_now(),
+        citations=[epi_url, tc_url],
+        fetched_at=_now(),
     )
 
 
 # -----------------------------------------------------------------------------
 # BUCKET 6 â Clinical Translation & Safety
 # -----------------------------------------------------------------------------
-
 @router.get("/clin/endpoints", response_model=Evidence)
 async def clin_endpoints(
     condition: str,
     limit: int = Query(3, ge=1, le=100),
 ) -> Evidence:
     validate_condition(condition, field_name="condition")
-
     base = "https://clinicaltrials.gov/api/v2/studies"
     q = f"{base}?query.cond={urllib.parse.quote(condition)}&pageSize={limit}"
     try:
         js = await _get_json(q, tries=1)
         studies = js.get("studies", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK" if studies else "NO_DATA", source="ClinicalTrials.gov v2", fetched_n=len(studies),
+            status="OK" if studies else "NO_DATA",
+            source="ClinicalTrials.gov v2",
+            fetched_n=len(studies),
             data={"condition": condition, "studies": studies[:limit]},
-            citations=[q], fetched_at=_now(),
+            citations=[q],
+            fetched_at=_now(),
         )
     except Exception:
         # Fallback to v1 study_fields API
@@ -1603,12 +2025,17 @@ async def clin_endpoints(
                 source="ClinicalTrials.gov v1 study_fields (fallback)",
                 fetched_n=len(fields),
                 data={"condition": condition, "studies": fields[:limit]},
-                citations=[q, v1], fetched_at=_now(),
+                citations=[q, v1],
+                fetched_at=_now(),
             )
         except Exception:
             return Evidence(
-                status="NO_DATA", source="ClinicalTrials.gov v2+v1 unavailable or empty", fetched_n=0,
-                data={"condition": condition, "studies": []}, citations=[q, v1], fetched_at=_now(),
+                status="NO_DATA",
+                source="ClinicalTrials.gov v2+v1 unavailable or empty",
+                fetched_n=0,
+                data={"condition": condition, "studies": []},
+                citations=[q, v1],
+                fetched_at=_now(),
             )
 
 
@@ -1620,6 +2047,7 @@ async def clin_rwe(
     """
     RWE proxies: FAERS (openFDA) + ClinicalTrials.gov.
     Both fetched concurrently with bounded retries.
+
     If input appears to be a gene symbol, either expand a known condition alias or return clean NO_DATA.
     """
     validate_condition(condition, field_name="condition")
@@ -1671,7 +2099,8 @@ async def clin_rwe(
         source="openFDA FAERS + ClinicalTrials.gov v2",
         fetched_n=total,
         data={"condition": condition, "faers_events": faers_results[:limit], "observational_trials": trials[:limit]},
-        citations=[faers_url, ct_url], fetched_at=_now(),
+        citations=[faers_url, ct_url],
+        fetched_at=_now(),
     )
 
 
@@ -1691,14 +2120,21 @@ async def clin_safety(
         js = await _get_json(url, tries=1)
         results = js.get("results", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK" if results else "NO_DATA", source="openFDA FAERS", fetched_n=len(results),
+            status="OK" if results else "NO_DATA",
+            source="openFDA FAERS",
+            fetched_n=len(results),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "reports": results[:limit]},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="FAERS empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "reports": []}, citations=[url], fetched_at=_now(),
+            status="NO_DATA",
+            source="FAERS empty/unavailable",
+            fetched_n=0,
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "reports": []},
+            citations=[url],
+            fetched_at=_now(),
         )
 
 
@@ -1709,16 +2145,18 @@ async def clin_pipeline(
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-
     inx_url = f"https://drugs.ncats.io/api/v1/drugs?name={urllib.parse.quote(sym_norm)}"
     try:
         js = await _get_json(inx_url, tries=1)
         items = js.get("content", []) if isinstance(js, dict) else []
         if items:
             return Evidence(
-                status="OK", source="Inxight Drugs", fetched_n=len(items),
+                status="OK",
+                source="Inxight Drugs",
+                fetched_n=len(items),
                 data={"symbol": symbol, "normalized_symbol": sym_norm, "pipeline": items[:limit]},
-                citations=[inx_url], fetched_at=_now(),
+                citations=[inx_url],
+                fetched_at=_now(),
             )
     except Exception:
         pass
@@ -1729,14 +2167,14 @@ async def clin_pipeline(
         source=result.source,
         fetched_n=result.fetched_n,
         data={"symbol": symbol, "pipeline": result.data.get("interactions", [])[:limit]},
-        citations=result.citations, fetched_at=result.fetched_at,
+        citations=result.citations,
+        fetched_at=result.fetched_at,
     )
 
 
 # -----------------------------------------------------------------------------
 # BUCKET 7 â Competition & IP
 # -----------------------------------------------------------------------------
-
 @router.get("/comp/intensity", response_model=Evidence)
 async def comp_intensity(
     symbol: str,
@@ -1745,23 +2183,25 @@ async def comp_intensity(
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-
     cond = condition or ""
-    query = {"_and": [
-        {"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}]},
-    ]}
+
+    query = {"_and": [{"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}}]}]
     if cond:
         query["_and"].append({"_or": [{"patent_title": {"_text_any": cond}}, {"patent_abstract": {"_text_any": cond}}]})
     query_str = urllib.parse.quote(json.dumps(query))
     fields = urllib.parse.quote(json.dumps(["patent_id"]))
     pat_url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
+
     try:
         js = await _get_json(pat_url, tries=1)
         patents = js.get("patents", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK" if patents else "NO_DATA", source="PatentsView query", fetched_n=len(patents),
+            status="OK" if patents else "NO_DATA",
+            source="PatentsView query",
+            fetched_n=len(patents),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "condition": condition, "patents": patents[:limit]},
-            citations=[pat_url], fetched_at=_now(),
+            citations=[pat_url],
+            fetched_at=_now(),
         )
     except Exception:
         pass
@@ -1769,12 +2209,17 @@ async def comp_intensity(
     drug_res = await _safe_call(tract_drugs(symbol, limit=limit))
     trial_res = await _safe_call(clin_endpoints(condition or symbol, limit=limit))
     count = (drug_res.fetched_n if drug_res else 0) + (trial_res.fetched_n if trial_res else 0)
+
     return Evidence(
-        status="OK" if count > 0 else "NO_DATA", source="Drugs+Trials fallback", fetched_n=count,
+        status="OK" if count > 0 else "NO_DATA",
+        source="Drugs+Trials fallback",
+        fetched_n=count,
         data={
-            "symbol": symbol, "normalized_symbol": sym_norm, "condition": condition,
+            "symbol": symbol,
+            "normalized_symbol": sym_norm,
+            "condition": condition,
             "drugs_n": drug_res.fetched_n if drug_res else 0,
-            "trials_n": trial_res.fetched_n if trial_res else 0
+            "trials_n": trial_res.fetched_n if trial_res else 0,
         },
         citations=(drug_res.citations if drug_res else []) + (trial_res.citations if trial_res else []),
         fetched_at=_now(),
@@ -1788,7 +2233,6 @@ async def comp_freedom(
 ) -> Evidence:
     validate_symbol(symbol, field_name="symbol")
     sym_norm = await _normalize_symbol(symbol)
-
     query = {"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}]}
     query_str = urllib.parse.quote(json.dumps(query))
     fields = urllib.parse.quote(json.dumps(["patent_id"]))
@@ -1797,12 +2241,19 @@ async def comp_freedom(
         js = await _get_json(url, tries=1)
         patents = js.get("patents", []) if isinstance(js, dict) else []
         return Evidence(
-            status="OK" if patents else "NO_DATA", source="PatentsView FTO query", fetched_n=len(patents),
+            status="OK" if patents else "NO_DATA",
+            source="PatentsView FTO query",
+            fetched_n=len(patents),
             data={"symbol": symbol, "normalized_symbol": sym_norm, "patents": patents[:limit]},
-            citations=[url], fetched_at=_now(),
+            citations=[url],
+            fetched_at=_now(),
         )
     except Exception:
         return Evidence(
-            status="NO_DATA", source="PatentsView empty/unavailable", fetched_n=0,
-            data={"symbol": symbol, "normalized_symbol": sym_norm, "patents": []}, citations=[url], fetched_at=_now()
+            status="NO_DATA",
+            source="PatentsView empty/unavailable",
+            fetched_n=0,
+            data={"symbol": symbol, "normalized_symbol": sym_norm, "patents": []},
+            citations=[url],
+            fetched_at=_now(),
         )
