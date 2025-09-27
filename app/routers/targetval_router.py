@@ -2185,9 +2185,27 @@ async def comp_intensity(
     sym_norm = await _normalize_symbol(symbol)
     cond = condition or ""
 
-    query = {"_and": [{"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}}]}]
+    # Balanced and readable construction of the PatentsView boolean query
+    query = {
+        "_and": [
+            {
+                "_or": [
+                    {"patent_title": {"_text_any": sym_norm}},
+                    {"patent_abstract": {"_text_any": sym_norm}},
+                ]
+            }
+        ]
+    }
     if cond:
-        query["_and"].append({"_or": [{"patent_title": {"_text_any": cond}}, {"patent_abstract": {"_text_any": cond}}]})
+        query["_and"].append(
+            {
+                "_or": [
+                    {"patent_title": {"_text_any": cond}},
+                    {"patent_abstract": {"_text_any": cond}},
+                ]
+            }
+        )
+
     query_str = urllib.parse.quote(json.dumps(query))
     fields = urllib.parse.quote(json.dumps(["patent_id"]))
     pat_url = f"https://api.patentsview.org/patents/query?q={query_str}&f={fields}"
