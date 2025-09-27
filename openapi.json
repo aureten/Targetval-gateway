@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "TargetVal Gateway (Public)",
-    "version": "1.5.0",
-    "description": "Public OpenAPI aligned to the September 2025 router/main refresh.\nGenetics Bucket B1 upstreams now use: GWAS Catalog (l2g), ClinGen/OMIM (mendelian), OpenGWAS (mr), GTEx Portal (sqtl), and Roadmap/BLUEPRINT (epigenetics). Unchanged: ClinVar (rare), RNAcentral (lncrna), ENCORI (mirna)."
+    "version": "1.6.0",
+    "description": "Public OpenAPI aligned to the v1.6.0 router/main refresh.\nGenetics B1 now use: GWAS Catalog (l2g), OMIM primary with Orphanet/ClinGen links (mendelian), MR-Base / IEU OpenGWAS (mr), eQTL Catalogue v2 (sqtl), Roadmap/BLUEPRINT (epigenetics). Assoc & perturbation: GEO/ArrayExpress, CPTAC/ProteomeXchange, Tabula Sapiens/HCA, DepMap/Achilles. Mechanistic: Reactome + KEGG + WikiPathways; LigRec via OmniPath. Tractability: ChEMBL/DrugBank/Inxight, SAbDab/Thera-SAbDab for antibodies. Clinical: CT.gov v2 + WHO ICTRP + EU CTR; adds /clin/biomarker-fit. Competition/IP via Lens.org search."
   },
   "servers": [
     {
@@ -41,6 +41,9 @@
           },
           "fetched_at": {
             "type": "number"
+          },
+          "error": {
+            "type": "string"
           }
         },
         "required": [
@@ -439,7 +442,7 @@
     "/genetics/mendelian": {
       "get": {
         "operationId": "genetics_mendelian",
-        "summary": "Mendelian/rare (ClinGen validity; optional OMIM enrichment)",
+        "summary": "Mendelian/rare (OMIM primary; Orphanet/ClinGen links)",
         "parameters": [
           {
             "in": "query",
@@ -497,7 +500,7 @@
     "/genetics/mr": {
       "get": {
         "operationId": "genetics_mr",
-        "summary": "Mendelian randomization (OpenGWAS search + MR endpoints)",
+        "summary": "Mendelian randomization (MR-Base / IEU OpenGWAS endpoints)",
         "parameters": [
           {
             "in": "query",
@@ -622,7 +625,7 @@
     "/genetics/sqtl": {
       "get": {
         "operationId": "genetics_sqtl",
-        "summary": "Splicing QTLs (GTEx Portal; independent eQTL fallback)",
+        "summary": "Splicing QTLs (eQTL Catalogue v2; eQTL fallback)",
         "parameters": [
           {
             "in": "query",
@@ -716,7 +719,7 @@
     "/assoc/bulk-rna": {
       "get": {
         "operationId": "assoc_bulk_rna",
-        "summary": "Bulk RNA associations by tissue/disease",
+        "summary": "Bulk RNA associations (GEO/ArrayExpress; tissue-mapped)",
         "parameters": [
           {
             "in": "query",
@@ -755,7 +758,7 @@
     "/assoc/bulk-prot": {
       "get": {
         "operationId": "assoc_bulk_prot",
-        "summary": "Bulk protein associations",
+        "summary": "Bulk protein associations (CPTAC/ProteomeXchange)",
         "parameters": [
           {
             "in": "query",
@@ -794,7 +797,7 @@
     "/assoc/sc": {
       "get": {
         "operationId": "assoc_sc",
-        "summary": "Single-cell signal (HPA search)",
+        "summary": "Single-cell signal (Tabula Sapiens / Human Cell Atlas)",
         "parameters": [
           {
             "in": "query",
@@ -833,7 +836,7 @@
     "/assoc/perturb": {
       "get": {
         "operationId": "assoc_perturb",
-        "summary": "CRISPR perturbation screens (BioGRID ORCS)",
+        "summary": "CRISPR/RNAi perturbation (DepMap/Achilles)",
         "parameters": [
           {
             "in": "query",
@@ -990,7 +993,7 @@
     "/mech/pathways": {
       "get": {
         "operationId": "mech_pathways",
-        "summary": "Reactome pathway membership",
+        "summary": "Reactome pathway membership (+ KEGG, WikiPathways)",
         "parameters": [
           {
             "in": "query",
@@ -1128,7 +1131,7 @@
     "/tract/drugs": {
       "get": {
         "operationId": "tract_drugs",
-        "summary": "Known/experimental drugs for a target (OT \u2192 DGIdb)",
+        "summary": "Known/experimental drugs (ChEMBL / DrugBank / Inxight)",
         "parameters": [
           {
             "in": "query",
@@ -1206,7 +1209,7 @@
     "/tract/ligandability-ab": {
       "get": {
         "operationId": "tract_ligandability_ab",
-        "summary": "Antibody ligandability (PDB/PDBe presence)",
+        "summary": "Antibody ligandability (SAbDab / Thera-SAbDab)",
         "parameters": [
           {
             "in": "query",
@@ -1225,45 +1228,6 @@
               "minimum": 1,
               "maximum": 200,
               "default": 50
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/tract/ligandability-oligo": {
-      "get": {
-        "operationId": "tract_ligandability_oligo",
-        "summary": "Oligonucleotide ligandability (Ribocentre)",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "symbol",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 500,
-              "default": 100
             }
           }
         ],
@@ -1414,7 +1378,7 @@
     "/clin/endpoints": {
       "get": {
         "operationId": "clin_endpoints",
-        "summary": "Clinical endpoints (ClinicalTrials.gov v2 + v1 fallback)",
+        "summary": "Clinical endpoints (CT.gov v2 + WHO ICTRP + EU CTR)",
         "parameters": [
           {
             "in": "query",
@@ -1531,7 +1495,7 @@
     "/clin/pipeline": {
       "get": {
         "operationId": "clin_pipeline",
-        "summary": "Pipeline (Inxight \u2192 OT drugs fallback)",
+        "summary": "Pipeline (Inxight + ClinicalTrials.gov)",
         "parameters": [
           {
             "in": "query",
@@ -1570,7 +1534,7 @@
     "/comp/intensity": {
       "get": {
         "operationId": "comp_intensity",
-        "summary": "Competition intensity (PatentsView; qualitative)",
+        "summary": "Competition intensity (Lens.org; qualitative)",
         "parameters": [
           {
             "in": "query",
@@ -1636,6 +1600,45 @@
               "minimum": 1,
               "maximum": 1000,
               "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clin/biomarker-fit": {
+      "get": {
+        "operationId": "clin_biomarker_fit",
+        "summary": "Biomarker fit (assayability, analyte availability, tissue specificity, precedent)",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 10
             }
           }
         ],
