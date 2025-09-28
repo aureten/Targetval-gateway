@@ -3,7 +3,7 @@
   "info": {
     "title": "TargetVal Gateway (Public)",
     "version": "1.6.0",
-    "description": "Public OpenAPI aligned to the v1.6.0 router/main refresh.\nGenetics B1 now use: GWAS Catalog (l2g), OMIM primary with Orphanet/ClinGen links (mendelian), MR-Base / IEU OpenGWAS (mr), eQTL Catalogue v2 (sqtl), Roadmap/BLUEPRINT (epigenetics). Assoc & perturbation: GEO/ArrayExpress, CPTAC/ProteomeXchange, Tabula Sapiens/HCA, DepMap/Achilles. Mechanistic: Reactome + KEGG + WikiPathways; LigRec via OmniPath. Tractability: ChEMBL/DrugBank/Inxight, SAbDab/Thera-SAbDab for antibodies. Clinical: CT.gov v2 + WHO ICTRP + EU CTR; adds /clin/biomarker-fit. Competition/IP via Lens.org search."
+    "description": "Public OpenAPI aligned to the v1.6.0 router/main refresh.\nGenetics B1 now use: GWAS Catalog (l2g), OMIM primary with Orphanet/ClinGen links (mendelian), MR-Base / IEU OpenGWAS (mr), eQTL Catalogue v2 (sqtl), Roadmap/BLUEPRINT (epigenetics). Assoc & perturbation: GEO/ArrayExpress, CPTAC/ProteomeXchange, Tabula Sapiens/HCA, DepMap/Achilles. Mechanistic: Reactome + KEGG + WikiPathways; LigRec via OmniPath. Tractability: ChEMBL/DrugBank/Inxight, SAbDab/Thera-SAbDab for antibodies. Clinical: CT.gov v2 + WHO ICTRP + EU CTR; adds /clin/biomarker-fit. Competition/IP via Lens.org search.\n\n[2025-09-28] Hybrid mode enabled across GETs (+mode=auto|live|snapshot). Aggregate body now accepts {species, cutoff, extra, mode}. Evidence allows optional {provenance, diagnostics}."
   },
   "servers": [
     {
@@ -44,11 +44,18 @@
           },
           "error": {
             "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "diagnostics": {
+            "$ref": "#/components/schemas/Diagnostics"
           }
         },
         "required": [
           "status"
-        ]
+        ],
+        "additionalProperties": true
       },
       "AggregateEnvelope": {
         "type": "object",
@@ -130,6 +137,52 @@
         "required": [
           "results"
         ]
+      },
+      "Provenance": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "live",
+              "snapshot"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "source_version": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "retrieved_at": {
+            "type": "string"
+          },
+          "router_reason": {
+            "type": "string"
+          }
+        }
+      },
+      "Diagnostics": {
+        "type": "object",
+        "properties": {
+          "latency_ms": {
+            "type": "integer"
+          },
+          "cache": {
+            "type": "string"
+          },
+          "fallbacks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
       }
     }
   },
@@ -255,6 +308,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -321,6 +388,14 @@
                   "extra": {
                     "type": "object",
                     "additionalProperties": true
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "auto",
+                      "live",
+                      "snapshot"
+                    ]
                   }
                 },
                 "required": []
@@ -354,7 +429,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Gene symbol or Ensembl gene id (ENSG\u2026 )"
+            "description": "Gene symbol or Ensembl gene id (ENSGâ¦ )"
           },
           {
             "in": "query",
@@ -372,7 +447,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Explicit Ensembl gene id override (ENSG\u2026 )"
+            "description": "Explicit Ensembl gene id override (ENSGâ¦ )"
           },
           {
             "in": "query",
@@ -384,6 +459,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -403,7 +492,7 @@
     "/genetics/rare": {
       "get": {
         "operationId": "genetics_rare",
-        "summary": "Rare variant lookups (ClinVar \u2192 gnomAD fallback)",
+        "summary": "Rare variant lookups (ClinVar â gnomAD fallback)",
         "parameters": [
           {
             "in": "query",
@@ -423,6 +512,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -481,6 +584,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -528,6 +645,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -567,6 +698,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -606,6 +751,20 @@
               "maximum": 500,
               "default": 100
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -653,6 +812,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -700,6 +873,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -739,6 +926,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -778,6 +979,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -817,6 +1032,20 @@
               "maximum": 500,
               "default": 100
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -856,6 +1085,20 @@
               "maximum": 500,
               "default": 100
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -875,7 +1118,7 @@
     "/expr/baseline": {
       "get": {
         "operationId": "expr_baseline",
-        "summary": "Baseline expression (HPA \u2192 UniProt \u2192 GXA)",
+        "summary": "Baseline expression (HPA â UniProt â GXA)",
         "parameters": [
           {
             "in": "query",
@@ -896,6 +1139,20 @@
               "maximum": 500,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -915,7 +1172,7 @@
     "/expr/localization": {
       "get": {
         "operationId": "expr_localization",
-        "summary": "Subcellular localization (COMPARTMENTS \u2192 UniProt)",
+        "summary": "Subcellular localization (COMPARTMENTS â UniProt)",
         "parameters": [
           {
             "in": "query",
@@ -935,6 +1192,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -974,6 +1245,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1013,6 +1298,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1032,7 +1331,7 @@
     "/mech/ppi": {
       "get": {
         "operationId": "mech_ppi",
-        "summary": "STRING protein\u2013protein interactions",
+        "summary": "STRING proteinâprotein interactions",
         "parameters": [
           {
             "in": "query",
@@ -1073,6 +1372,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1092,7 +1405,7 @@
     "/mech/ligrec": {
       "get": {
         "operationId": "mech_ligrec",
-        "summary": "Ligand\u2013receptor interactions (OmniPath)",
+        "summary": "Ligandâreceptor interactions (OmniPath)",
         "parameters": [
           {
             "in": "query",
@@ -1112,6 +1425,20 @@
               "maximum": 500,
               "default": 100
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1151,6 +1478,20 @@
               "maximum": 500,
               "default": 100
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1190,6 +1531,20 @@
               "maximum": 500,
               "default": 100
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1229,6 +1584,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1320,6 +1689,20 @@
               "minimum": 0.0,
               "maximum": 1.0
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1359,6 +1742,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1398,6 +1795,20 @@
               "maximum": 100,
               "default": 3
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1437,6 +1848,20 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1476,6 +1901,20 @@
               "maximum": 500,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1515,6 +1954,20 @@
               "maximum": 500,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1562,6 +2015,20 @@
               "maximum": 1000,
               "default": 100
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1601,6 +2068,20 @@
               "maximum": 1000,
               "default": 100
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
@@ -1640,6 +2121,20 @@
               "maximum": 100,
               "default": 10
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode: auto (default), live or snapshot."
           }
         ],
         "responses": {
