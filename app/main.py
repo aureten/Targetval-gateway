@@ -1,4 +1,4 @@
-# app/main.py — public gateway, passthrough extras, proxy-aware, request-id
+# app/main.py — public gateway (best-of), passthrough extras, proxy-aware, request-id
 import os
 import inspect
 import asyncio
@@ -12,16 +12,26 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-# Import both routers (fixes NameError from include_router)
-from app.routers import targetval_router, insight_router
+# Routers
+from app.routers import targetval_router
+
+# Try to include insight_router if present; keep public-only behavior if missing
+try:
+    from app.routers import insight_router as _insight_router  # type: ignore
+    HAS_INSIGHT = True
+except Exception:
+    _insight_router = None
+    HAS_INSIGHT = False
 
 # -----------------------------------------------------------------------------
 # FastAPI app & CORS
 # -----------------------------------------------------------------------------
-app = FastAPI(title="TARGETVAL Gateway", version="1.3.0")
+APP_VERSION = os.getenv("APP_VERSION", "2.0.0")
+app = FastAPI(title="TARGETVAL Gateway", version=APP_VERSION)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
+    allow_origins=[o for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -34,7 +44,7 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 # Request ID middleware for traceability
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        rid = request.headers.get("X-Request-ID") or os.getenv("REQUEST_ID_PREFIX", "") + str(uuid.uuid4())
+        rid = request.headers.get("X-Request-ID") or (os.getenv("REQUEST_ID_PREFIX", "") + str(uuid.uuid4()))
         resp = await call_next(request)
         resp.headers["X-Request-ID"] = rid
         return resp
@@ -42,18 +52,17 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RequestIDMiddleware)
 
-# Mount all module endpoints from routers
+# Mount module endpoints from routers
 app.include_router(targetval_router.router)
-app.include_router(insight_router.router)  # ensure insight routes are live
+if HAS_INSIGHT and _insight_router is not None:
+    app.include_router(_insight_router.router)  # optional, if your repo has it
 
 # -----------------------------------------------------------------------------
 # Modules registry (string → function) for programmatic calls
-# NOTE: These reference the *route handler functions* in targetval_router.
-# They accept typical params like (gene/symbol/efo/limit/...) and, after the hybrid change,
-# many also accept an optional 'mode' param (live|snapshot|auto).
+# NOTE: Functions are the actual FastAPI route handlers from targetval_router.
 # -----------------------------------------------------------------------------
 MODULE_MAP: Dict[str, Any] = {
-    # Bucket 1 – Human Genetics & Causality
+    # ---- B1: Genetics & Causality
     "genetics_l2g": targetval_router.genetics_l2g,
     "genetics_rare": targetval_router.genetics_rare,
     "genetics_mendelian": targetval_router.genetics_mendelian,
@@ -62,35 +71,44 @@ MODULE_MAP: Dict[str, Any] = {
     "genetics_mirna": targetval_router.genetics_mirna,
     "genetics_sqtl": targetval_router.genetics_sqtl,
     "genetics_epigenetics": targetval_router.genetics_epigenetics,
-    # Bucket 2 – Disease Association & Perturbation
+    # ---- B2: Association & Perturbation
     "assoc_bulk_rna": targetval_router.assoc_bulk_rna,
+    "assoc_geo_arrayexpress": targetval_router.assoc_geo_arrayexpress,
     "assoc_bulk_prot": targetval_router.assoc_bulk_prot,
-    "assoc_sc": targetval_router.assoc_sc,
+    "assoc_cptac": targetval_router.assoc_cptac,  # POST under the hood, callable here
+    "assoc_tabula_hca": targetval_router.assoc_tabula_hca,
+    "assoc_depmap_achilles": targetval_router.assoc_depmap_achilles,
     "assoc_perturb": targetval_router.assoc_perturb,
-    # Bucket 3 – Expression, Specificity & Localization
+    # ---- B3: Expression, Specificity & Localization
     "expr_baseline": targetval_router.expression_baseline,
     "expr_localization": targetval_router.expr_localization,
     "expr_inducibility": targetval_router.expr_inducibility,
-    # Bucket 4 – Mechanistic Wiring & Networks
+    "assoc_sc": targetval_router.assoc_sc,
+    # ---- B4: Mechanistic Wiring & Networks
     "mech_pathways": targetval_router.mech_pathways,
     "mech_ppi": targetval_router.mech_ppi,
     "mech_ligrec": targetval_router.mech_ligrec,
-    # Bucket 5 – Tractability & Modality
+    # ---- B5: Tractability & Modality
     "tract_drugs": targetval_router.tract_drugs,
     "tract_ligandability_sm": targetval_router.tract_ligandability_sm,
     "tract_ligandability_ab": targetval_router.tract_ligandability_ab,
     "tract_ligandability_oligo": targetval_router.tract_ligandability_oligo,
     "tract_modality": targetval_router.tract_modality,
     "tract_immunogenicity": targetval_router.tract_immunogenicity,
-    # Bucket 6 – Clinical Translation & Safety
+    # ---- B6: Clinical Translation & Safety
     "clin_endpoints": targetval_router.clin_endpoints,
     "clin_rwe": targetval_router.clin_rwe,
     "clin_safety": targetval_router.clin_safety,
     "clin_pipeline": targetval_router.clin_pipeline,
     "clin_biomarker_fit": targetval_router.clin_biomarker_fit,
-    # Bucket 7 – Competition & IP
+    # ---- B7: Competition & IP
     "comp_intensity": targetval_router.comp_intensity,
     "comp_freedom": targetval_router.comp_freedom,
+    # ---- Literature & Synthesis
+    "lit_search": targetval_router.lit_search,
+    "lit_angles": targetval_router.lit_angles,
+    "synth_targetcard": targetval_router.synth_targetcard,
+    "synth_graph": targetval_router.synth_graph,
 }
 
 # -----------------------------------------------------------------------------
@@ -104,8 +122,6 @@ class AggregateRequest(BaseModel):
     condition: Optional[str] = None
     modules: Optional[List[str]] = None
     limit: Optional[int] = 50
-    # Optional hybrid source mode to pass through to wrapped endpoints (live|snapshot|auto)
-    mode: Optional[str] = None
     # Common passthroughs used by specific modules
     species: Optional[int] = None
     cutoff: Optional[float] = None
@@ -113,7 +129,6 @@ class AggregateRequest(BaseModel):
     extra: Optional[Dict[str, Any]] = None
 
 
-# crude heuristic to tell if a string "looks like" an HGNC symbol (not an Ensembl/NCBI/curie)
 SYMBOLISH = re.compile(r"^[A-Za-z0-9-]+$")
 
 
@@ -142,7 +157,6 @@ async def _run_module(
     efo: Optional[str],
     condition: Optional[str],
     limit: Optional[int],
-    mode: Optional[str],
     extra: Optional[Dict[str, Any]],
 ):
     """Invoke a single module function safely and return (name, result_dict)."""
@@ -156,8 +170,7 @@ async def _run_module(
         "condition": condition,
         "disease": condition,  # some functions use 'disease' as the param name
         "limit": limit,
-        "mode": mode,          # NEW: pass-through for hybrid endpoints that accept it
-        # NEW passthrough for modules that accept it (e.g., genetics_l2g, genetics_mendelian)
+        # NEW passthrough for modules that accept it (e.g., genetics_l2g can take ensembl)
         "ensembl": ensembl_id,
     }
     if extra:
@@ -212,7 +225,7 @@ async def _run_module(
 # -----------------------------------------------------------------------------
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "modules": len(MODULE_MAP)}
+    return {"ok": True, "modules": len(MODULE_MAP), "version": APP_VERSION, "has_insight": HAS_INSIGHT}
 
 @app.get("/")
 async def root():
@@ -233,14 +246,13 @@ async def run_single_module(
     efo: Optional[str] = Query(default=None),
     condition: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=1000),
-    mode: Optional[str] = Query(default=None, regex="^(auto|live|snapshot)$"),
 ):
     func = MODULE_MAP.get(name)
     if not func:
         raise HTTPException(status_code=404, detail=f"Unknown module: {name}")
 
     # Pass through any extra query params (species, cutoff, tissue, cell_type, etc.)
-    known = {"gene", "symbol", "ensembl", "efo", "condition", "limit", "mode"}
+    known = {"gene", "symbol", "ensembl", "efo", "condition", "limit"}
     extras: Dict[str, Any] = {k: v for k, v in request.query_params.items() if k not in known}
 
     _, res = await _run_module(
@@ -252,7 +264,6 @@ async def run_single_module(
         efo=efo,
         condition=condition,
         limit=limit,
-        mode=mode,
         extra=extras or None,
     )
     return res
@@ -291,7 +302,6 @@ async def aggregate(body: AggregateRequest):
                 efo=body.efo,
                 condition=body.condition,
                 limit=body.limit or 50,
-                mode=body.mode,
                 extra=extras or None,
             )
 
@@ -315,7 +325,7 @@ async def aggregate(body: AggregateRequest):
             "modules": modules,
             "species": body.species,
             "cutoff": body.cutoff,
-            "mode": body.mode or "auto",
+            "mode": "live",
         },
         "results": {name: res for name, res in results},
     }
