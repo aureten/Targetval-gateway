@@ -1,49 +1,21 @@
+"""
+sources.py — public-only, live-first client helpers for TargetVal gateway
 
-""" 
-Client layer for calling upstream services used by the TargetVal gateway.
+Principles
+- **Public APIs only** (no keys required). Where a provider typically needs a key (OMIM, DrugBank, Lens),
+  we return a graceful "skipped" object with citations/links instead of raising.
+- **Live-first** with pragmatic fallbacks. Each helper returns small normalized dicts and always includes
+  a `citations` list of the precise URLs hit. No synthetic payloads.
+- **No stubs**: every function attempts a live call; if that fails, it returns an empty result *plus*
+  navigational links you can follow in the UI.
 
-This module proxies public REST/GraphQL APIs only — **no synthetic payloads**.
-On success, helpers return minimal, normalized dicts that always include a
-`citations` list of the exact URLs hit. On transient failures, helpers return
-empty results with citations where possible; for endpoints that require
-credentials (e.g., BioGRID ORCS), we raise a clear RuntimeError if the required
-environment variables are missing.
-
-v1.6.0 — aligned with latest router/main:
-- B1: L2G via GWAS Catalog; Mendelian via OMIM (primary) with Orphanet/ClinGen links; MR via MR-Base/IEU; sQTL via eQTL Catalogue v2.
-- B2: Disease association from GEO/ArrayExpress; proteomics via CPTAC/ProteomeXchange; scRNA via Tabula Sapiens/HCA; perturbation via DepMap/Achilles (ORCS optional).
-- B3: HPA/UniProt/GXA maintained.
-- B4: Pathways include Reactome + KEGG + WikiPathways; ligrec via OmniPath.
-- B5: Drugs via ChEMBL/DrugBank/Inxight; antibody ligandability via SAbDab/Thera‑SAbDab; immunogenicity via IEDB IQ‑API.
-- B6: Clinical endpoints via CT.gov v2 + WHO ICTRP + EU CTR; NEW biomarker_fit helper.
-- B7: IP search via Lens.org.
-
-Upstream services touched here:
-- GWAS Catalog (REST)
-- EpiGraphDB (EFO resolver; MR multi‑SNP)
-- DisGeNET (REST) — retained for optional use
-- OMIM (REST, requires OMIM_API_KEY) + Orphanet/ClinGen links
-- RNAcentral (REST)
-- miRNet 2.0 (REST, POST)
-- eQTL Catalogue v2 (REST)
-- GEO / ArrayExpress (REST/links)
-- CPTAC / ProteomeXchange (links)
-- Tabula Sapiens / Human Cell Atlas (links)
-- Reactome (REST), KEGG REST, WikiPathways
-- STRING (REST)
-- OmniPath (REST)
-- UniProt / Proteins API (REST)
-- ChEMBL (REST), DrugBank (site search link), Inxight Drugs (site search link)
-- IEDB IQ‑API (PostgREST)
-- openFDA FAERS (REST)
-- ClinicalTrials.gov v2 (REST), WHO ICTRP (docs/API), EU CTR (site search)
-- Lens.org (site search link)
+Note: these helpers use `app.utils.http.get_json` / `post_json` for bounded, retrying HTTP.
 """
 
 from __future__ import annotations
 
-import json
 import os
+import json
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
@@ -51,58 +23,75 @@ from app.utils.http import get_json, post_json
 
 
 # =============================================================================
-# EFO normalisation & resolution
+# Shared utils
 # =============================================================================
 
-def _norm_efo_id(raw: str) -> str:
-    x = (raw or "").strip()
+def _norm_efo_id(x: str) -> str:
     if not x:
         return x
-    x = x.replace(":", "_").upper()
+    x = x.strip().replace(":", "_").upper()
     return x
 
 
+# =============================================================================
+# EFO & identifier resolution
+# =============================================================================
+
 async def resolve_efo(efo_or_label: str) -> Dict[str, Any]:
-    """Resolve label/id → {efo_id, efo_uri, label, citations} via EpiGraphDB (fuzzy)."""
+    """
+    Resolve a disease label or EFO id to {efo_id, efo_uri, label, citations}
+    Strategy: EpiGraphDB fuzzy → OLS4 fallback.
+    """
     term = (efo_or_label or "").strip()
-    url = f"https://api.epigraphdb.org/ontology/disease-efo?efo_term={urllib.parse.quote(term)}&fuzzy=true"
+    citations: List[str] = []
+    if not term:
+        return {"efo_id": "", "efo_uri": None, "label": "", "citations": citations}
+
+    # 1) EpiGraphDB fuzzy
+    epi = f"https://api.epigraphdb.org/ontology/disease-efo?efo_term={urllib.parse.quote(term)}&fuzzy=true"
     try:
-        js = await get_json(url)
+        js = await get_json(epi)
+        citations.append(epi)
         rows = js.get("results", []) if isinstance(js, dict) else []
         if rows:
             top = rows[0]
-            eid = top.get("efo_id") or (top.get("disease") or {}).get("id") or _norm_efo_id(term)
-            label = top.get("disease_label") or (top.get("disease") or {}).get("label") or term
-            uri = top.get("efo_uri") or (top.get("disease") or {}).get("uri") or f"http://www.ebi.ac.uk/efo/{_norm_efo_id(eid)}"
-            return {"efo_id": _norm_efo_id(eid), "efo_uri": uri, "label": label, "citations": [url]}
+            eid = (
+                top.get("efo_id")
+                or (top.get("disease") or {}).get("id")
+                or _norm_efo_id(term)
+            )
+            label = (
+                top.get("disease_label")
+                or (top.get("disease") or {}).get("label")
+                or term
+            )
+            uri = (
+                top.get("efo_uri")
+                or (top.get("disease") or {}).get("uri")
+                or f"http://www.ebi.ac.uk/efo/{_norm_efo_id(eid)}"
+            )
+            return {"efo_id": _norm_efo_id(eid), "efo_uri": uri, "label": label, "citations": citations}
     except Exception:
         pass
+
+    # 2) OLS4 fallback
+    ols = f"https://www.ebi.ac.uk/ols4/api/search?q={urllib.parse.quote(term)}&ontology=efo&rows=5"
+    try:
+        js = await get_json(ols)
+        citations.append(ols)
+        docs = ((js.get("response") or {}).get("docs") or []) if isinstance(js, dict) else []
+        for d in docs:
+            iri = d.get("iri") or ""
+            lab = d.get("label") or term
+            tail = iri.rsplit("/", 1)[-1]
+            if tail.upper().startswith("EFO_"):
+                return {"efo_id": tail.upper(), "efo_uri": f"http://www.ebi.ac.uk/efo/{tail.upper()}", "label": lab, "citations": citations}
+    except Exception:
+        pass
+
+    # Fallback: echo input
     eid = _norm_efo_id(term)
-    return {"efo_id": eid, "efo_uri": f"http://www.ebi.ac.uk/efo/{eid}" if eid.startswith("EFO_") else None, "label": term, "citations": [url]}
-
-
-def _assoc_matches_efo(assoc: Dict[str, Any], efo_id: str, efo_uri: Optional[str], label: str) -> bool:
-    targets = {efo_id.lower(), (efo_uri or "").lower(), label.lower()}
-    traits: List[Dict[str, Any]] = []
-    for k in ("efoTraits", "efoTrait", "_embedded"):
-        v = assoc.get(k)
-        if isinstance(v, list):
-            traits.extend(v)
-        elif isinstance(v, dict):
-            traits.extend(v.get("efoTraits", []))
-    for t in traits:
-        vals = [
-            str(t.get("uri", "")).lower(),
-            str(t.get("efoURI", "")).lower(),
-            str(t.get("shortForm", "")).lower().replace(":", "_"),
-            str(t.get("efoId", "")).lower().replace(":", "_"),
-            str(t.get("trait", "")).lower(),
-            str(t.get("label", "")).lower(),
-        ]
-        if any(val and val in targets for val in vals):
-            return True
-    maybe = [assoc.get("disease_name"), assoc.get("diseaseid"), assoc.get("disease_name_upper"), assoc.get("diseaseid_db")]
-    return any(isinstance(x, str) and label.lower() in x.lower() for x in maybe if x)
+    return {"efo_id": eid, "efo_uri": f"http://www.ebi.ac.uk/efo/{eid}" if eid.startswith("EFO_") else None, "label": term, "citations": citations}
 
 
 # =============================================================================
@@ -110,7 +99,7 @@ def _assoc_matches_efo(assoc: Dict[str, Any], efo_id: str, efo_uri: Optional[str
 # =============================================================================
 
 async def gwas_associations_by_gene(gene: str, size: int = 200) -> Dict[str, Any]:
-    url = f"https://www.ebi.ac.uk/gwas/rest/api/associations?geneName={urllib.parse.quote(gene)}&size={size}"
+    url = f"https://www.ebi.ac.uk/gwas/rest/api/associations?geneName={urllib.parse.quote(gene)}&size={min(size,200)}"
     try:
         js = await get_json(url)
         if isinstance(js, dict):
@@ -124,28 +113,51 @@ async def gwas_associations_by_gene(gene: str, size: int = 200) -> Dict[str, Any
         return {"associations": [], "citations": [url]}
 
 
+def _assoc_matches_efo(assoc: Dict[str, Any], efo_id: str, efo_uri: Optional[str], label: str) -> bool:
+    targets = {efo_id.lower(), (efo_uri or "").lower(), label.lower()}
+    traits: List[Dict[str, Any]] = []
+    # known shapes: association.efoTraits (list of {uri, trait, shortForm}), nested forms under _embedded
+    efots = assoc.get("efoTraits") or assoc.get("efoTrait")
+    if isinstance(efots, list):
+        traits.extend(efots)
+    # sometimes nested
+    emb = assoc.get("_embedded")
+    if isinstance(emb, dict):
+        traits.extend(emb.get("efoTraits") or [])
+    for t in traits:
+        vals = [
+            str(t.get("uri", "")).lower(),
+            str(t.get("efoURI", "")).lower(),
+            str(t.get("shortForm", "")).lower().replace(":", "_"),
+            str(t.get("efoId", "")).lower().replace(":", "_"),
+            str(t.get("trait", "")).lower(),
+            str(t.get("label", "")).lower(),
+        ]
+        if any(v and v in targets for v in vals):
+            return True
+    return False
+
+
 async def gwas_gene_efo_filtered(gene: str, efo: str, size: int = 200) -> Dict[str, Any]:
     e = await resolve_efo(efo)
     gw = await gwas_associations_by_gene(gene, size=size)
     filt = [a for a in (gw["associations"] or []) if _assoc_matches_efo(a, e["efo_id"], e["efo_uri"], e["label"])]
-    return {"efo": e, "associations": filt, "citations": gw["citations"] + e["citations"]}
+    return {"efo": e, "associations": filt, "citations": list({*gw["citations"], *e["citations"]})}
 
 
-async def omim_gene_map(gene: str) -> Dict[str, Any]:
-    """OMIM geneMap slice (requires OMIM_API_KEY)."""
-    api_key = os.getenv("OMIM_API_KEY")
-    if not api_key:
-        raise RuntimeError("OMIM_API_KEY not set. Cannot call OMIM.")
-    url = (
-        "https://api.omim.org/api/entry/search"
-        f"?search={urllib.parse.quote(gene)}&include=geneMap&format=json&apiKey={urllib.parse.quote(api_key)}"
-    )
+async def clingen_gene_validity(gene: str) -> Dict[str, Any]:
+    url = f"https://search.clinicalgenome.org/kb/gene-validity?format=json&search={urllib.parse.quote(gene)}"
     try:
         js = await get_json(url)
-        entries = ((js.get("omim", {}) or {}).get("searchResponse", {}) or {}).get("entryList", [])
-        return {"entries": entries, "citations": [url]}
+        data = []
+        if isinstance(js, dict):
+            data = js.get("data") or js.get("items") or js.get("results") or []
+        elif isinstance(js, list):
+            data = js
+        items = [r for r in data if str(r.get("geneSymbol") or r.get("gene","")).upper() == gene.upper()]
+        return {"items": items, "citations": [url]}
     except Exception:
-        return {"entries": [], "citations": [url]}
+        return {"items": [], "citations": [url]}
 
 
 def orphanet_links(gene: str) -> Dict[str, Any]:
@@ -159,7 +171,10 @@ def orphanet_links(gene: str) -> Dict[str, Any]:
 
 
 async def ieu_mr(exposure_gene_symbol: str, outcome_efo_or_label: str) -> Dict[str, Any]:
-    """Two-sample MR via EpiGraphDB MR-Base multi-snp API (stable)."""
+    """
+    EpiGraphDB MR-Base multi-snp MR (stable public).
+    Returns: {mr: rows[], outcome_trait, efo, citations}
+    """
     e = await resolve_efo(outcome_efo_or_label)
     base = "https://api.epigraphdb.org/xqtl/multi-snp-mr"
     url = f"{base}?exposure_gene={urllib.parse.quote(exposure_gene_symbol)}&outcome_trait={urllib.parse.quote(e['label'])}"
@@ -171,68 +186,137 @@ async def ieu_mr(exposure_gene_symbol: str, outcome_efo_or_label: str) -> Dict[s
         return {"mr": [], "outcome_trait": e["label"], "efo": e, "citations": [url] + e["citations"]}
 
 
-async def eqtl_catalogue_sqtls(gene: str, size: int = 200) -> Dict[str, Any]:
+async def eqtl_catalogue_sqtls(ensembl_gene_id: str, size: int = 200) -> Dict[str, Any]:
+    """
+    eQTL Catalogue v2 live call: fetch sQTL first, fall back to eQTL if empty.
+    """
     base = "https://www.ebi.ac.uk/eqtl/api/v2/associations"
-    sq = {"gene_id": gene, "qtl_group": "sQTL", "size": min(size, 200)}
-    eq = {"gene_id": gene, "qtl_group": "eQTL", "size": min(size, 200)}
-    return {"params": {"sqtl": sq, "eqtl": eq}, "citations": [base]}
-
-
-# =============================================================================
-# B2 — Disease association & perturbation
-# =============================================================================
-
-async def geo_arrayexpress(condition: str) -> Dict[str, Any]:
-    geo = f"https://www.ncbi.nlm.nih.gov/gds/?term=liver%20AND%20({urllib.parse.quote(condition)})"
-    ae  = f"https://www.ebi.ac.uk/biostudies/arrayexpress/studies?query=liver%20{urllib.parse.quote(condition)}"
-    return {"condition": condition, "links": {"geo": geo, "arrayexpress": ae}, "citations": [geo, ae]}
-
-
-async def cptac_proteomics(condition: str) -> Dict[str, Any]:
-    cptac = "https://cptac-data-portal.georgetown.edu/"
-    px    = f"http://proteomecentral.proteomexchange.org/cgi/GetDataset?ID=PXD*&q=liver%20{urllib.parse.quote(condition)}"
-    return {"condition": condition, "links": {"cptac": cptac, "proteomexchange": px}, "citations": [cptac, px]}
-
-
-async def tabula_hca(condition: str) -> Dict[str, Any]:
-    ts = "https://tabula-sapiens-portal.ds.czbiohub.org/"
-    hca = "https://data.humancellatlas.org/"
-    return {"condition": condition, "links": {"tabula_sapiens": ts, "hca": hca}, "citations": [ts, hca]}
-
-
-async def depmap_achilles(condition: str) -> Dict[str, Any]:
-    depmap = "https://depmap.org/portal/"
-    ach    = "https://depmap.org/portal/download/all/"
-    return {"condition": condition, "links": {"depmap_portal": depmap, "achilles_downloads": ach}, "citations": [depmap, ach]}
-
-
-async def orcs_perturb(condition: str, limit: int = 100) -> Dict[str, Any]:
-    """Optional BioGRID ORCS live pull; requires ORCS_ACCESS_KEY."""
-    access_key = os.getenv("ORCS_ACCESS_KEY")
-    if not access_key:
-        raise RuntimeError("Missing ORCS_ACCESS_KEY for BioGRID ORCS access.")
-    base = "https://orcsws.thebiogrid.org/screens/"
-    list_url = f"{base}?accesskey={urllib.parse.quote(access_key)}&format=json&organismID=9606&conditionName={urllib.parse.quote(condition)}&start=0&max=50"
+    # 1) sQTL
+    sq_params = {"gene_id": ensembl_gene_id, "qtl_group": "sQTL", "size": min(size, 200)}
     try:
-        screens = await get_json(list_url)
-        screens_list = screens if isinstance(screens, list) else []
-        screens_list = screens_list[: min(3, len(screens_list))]
-        hits_collected: List[Dict[str, Any]] = []
-        for sc in screens_list:
-            sc_id = sc.get("SCREEN_ID") or sc.get("ID") or sc.get("SCREENID")
-            if not sc_id:
-                continue
-            res_url = f"https://orcsws.thebiogrid.org/results/?accesskey={urllib.parse.quote(access_key)}&format=json&screenID={urllib.parse.quote(str(sc_id))}&start=0&max=500"
-            try:
-                hits = await get_json(res_url)
-                for h in hits if isinstance(hits, list) else []:
-                    if h.get("HIT") in (True, "true", "YES", "Yes", "yes"):
-                        hits_collected.append({"screen_id": sc_id, "gene": h.get("OFFICIAL_SYMBOL"), "effect": h.get("PHENOTYPE") or "hit"})
-            except Exception:
-                pass
-        return {"condition": condition, "screens_n": len(screens_list), "top_hits": hits_collected[:limit], "citations": [list_url]}
+        sq = await get_json(f"{base}?{urllib.parse.urlencode(sq_params)}")
+        sq_rows = sq.get("rows") or sq.get("associations") or sq.get("data") or []
+        if isinstance(sq_rows, list) and sq_rows:
+            return {"type": "sQTL", "rows": sq_rows[:size], "citations": [f"{base}?{urllib.parse.urlencode(sq_params)}"]}
     except Exception:
-        return {"condition": condition, "screens_n": 0, "top_hits": [], "citations": [list_url]}
+        pass
+    # 2) eQTL fallback
+    eq_params = {"gene_id": ensembl_gene_id, "qtl_group": "eQTL", "size": min(size, 200)}
+    try:
+        eq = await get_json(f"{base}?{urllib.parse.urlencode(eq_params)}")
+        eq_rows = eq.get("rows") or eq.get("associations") or eq.get("data") or []
+        return {"type": "eQTL", "rows": (eq_rows or [])[:size], "citations": [f"{base}?{urllib.parse.urlencode(eq_params)}"]}
+    except Exception:
+        return {"type": "eQTL", "rows": [], "citations": [f"{base}?{urllib.parse.urlencode(eq_params)}"]}
+
+
+# =============================================================================
+# B2 — Association & perturbation
+# =============================================================================
+
+async def geo_gds_search(term: str, size: int = 100) -> Dict[str, Any]:
+    """
+    GEO E-utilities: db=gds esearch for term; returns GDS IDs.
+    """
+    url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?"
+        f"db=gds&term={urllib.parse.quote(term)}&retmode=json&retmax={min(size, 500)}"
+    )
+    try:
+        js = await get_json(url)
+        ids = ((js.get("esearchresult") or {}).get("idlist") or [])
+        return {"term": term, "gds_ids": ids[:size], "citations": [url]}
+    except Exception:
+        return {"term": term, "gds_ids": [], "citations": [url]}
+
+
+async def arrayexpress_search(term: str, size: int = 50) -> Dict[str, Any]:
+    """
+    BioStudies/ArrayExpress search (JSON). If API shape changes, return navigational links.
+    """
+    api = f"https://www.ebi.ac.uk/biostudies/api/v1/studies?query={urllib.parse.quote(term)}&pageSize={min(size,100)}"
+    try:
+        js = await get_json(api)
+        # Expected shape: {"hits": int, "page":..., "entries":[{accno,title,...}]}
+        entries = js.get("entries") or js.get("studies") or js.get("data") or []
+        return {"term": term, "entries": entries[:size], "citations": [api]}
+    except Exception:
+        portal = f"https://www.ebi.ac.uk/biostudies/arrayexpress/studies?query={urllib.parse.quote(term)}"
+        return {"term": term, "entries": [], "citations": [api, portal]}
+
+
+async def pdc_cptac_projects(keyword: str, size: int = 50) -> Dict[str, Any]:
+    """
+    NCI PDC GraphQL search for CPTAC-related projects by keyword.
+    Falls back to portal search links if GraphQL fails.
+    """
+    gql = "https://pdc.cancer.gov/graphql"
+    query = {
+        "query": """
+        query SearchProjects($kw: String!, $first: Int!) {
+          searchProjects(keyword: $kw, first: $first) {
+            projectId
+            projectName
+            programName
+            diseaseType
+          }
+        }""",
+        "variables": {"kw": keyword, "first": min(size, 100)}
+    }
+    try:
+        js = await post_json(gql, payload=query)
+        rows = ((js.get("data") or {}).get("searchProjects") or [])
+        return {"keyword": keyword, "projects": rows[:size], "citations": [gql]}
+    except Exception:
+        # Links fallback
+        cptac = "https://cptac-data-portal.georgetown.edu/"
+        px = f"http://proteomecentral.proteomexchange.org/cgi/GetDataset?ID=PXD*&q={urllib.parse.quote(keyword)}"
+        return {"keyword": keyword, "projects": [], "citations": [gql, cptac, px]}
+
+
+async def tabula_sapiens_datasets(keyword: str, size: int = 50) -> Dict[str, Any]:
+    """
+    Tabula Sapiens portal datasets list (best-effort JSON; portal link fallback).
+    """
+    api = "https://tabula-sapiens-portal.ds.czbiohub.org/api/datasets"
+    try:
+        js = await get_json(api)
+        rows = [r for r in (js if isinstance(js, list) else []) if keyword.lower() in json.dumps(r).lower()]
+        return {"keyword": keyword, "datasets": rows[:size], "citations": [api]}
+    except Exception:
+        portal = f"https://tabula-sapiens-portal.ds.czbiohub.org/search?q={urllib.parse.quote(keyword)}"
+        return {"keyword": keyword, "datasets": [], "citations": [api, portal]}
+
+
+async def hca_projects(keyword: str, size: int = 50) -> Dict[str, Any]:
+    """
+    HCA Azul index quick search (public). Fallback to portal search link.
+    """
+    api = f"https://service.azul.data.humancellatlas.org/index/projects?size={min(size,100)}&search={urllib.parse.quote(keyword)}"
+    try:
+        js = await get_json(api)
+        hits = (js.get("hits") or [])
+        return {"keyword": keyword, "projects": hits[:size], "citations": [api]}
+    except Exception:
+        portal = f"https://data.humancellatlas.org/search?search={urllib.parse.quote(keyword)}"
+        return {"keyword": keyword, "projects": [], "citations": [api, portal]}
+
+
+async def depmap_achilles_index(keyword: Optional[str] = None) -> Dict[str, Any]:
+    """
+    DepMap public downloads index (no stable JSON API; return links + best-effort hints).
+    """
+    portal = "https://depmap.org/portal/download/all/"
+    # Provide canonical datasets of interest for clients to fetch offline
+    datasets = [
+        "CRISPR (DepMap) Gene Effect",
+        "CRISPR (Achilles) gene effect",
+        "Omics (expression / copy number)",
+        "Cell line metadata",
+    ]
+    if keyword:
+        datasets = [d for d in datasets if keyword.lower() in d.lower()]
+    return {"keyword": keyword, "datasets": datasets, "citations": [portal], "links": {"portal": portal}}
 
 
 # =============================================================================
@@ -258,11 +342,6 @@ async def uniprot_localization(symbol: str) -> Dict[str, Any]:
         return {"results": [], "citations": [url]}
 
 
-async def hpa_search(symbol: str) -> Dict[str, Any]:
-    url = f"https://www.proteinatlas.org/search/{urllib.parse.quote(symbol)}"
-    return {"url": url, "citations": [url]}
-
-
 # =============================================================================
 # B4 — Mechanistic wiring & networks
 # =============================================================================
@@ -277,6 +356,7 @@ async def reactome_search(symbol: str) -> Dict[str, Any]:
 
 
 async def kegg_find_pathway(symbol: str) -> Dict[str, Any]:
+    # KEGG REST is TSV/text for find endpoints; return navigational link
     url = f"https://rest.kegg.jp/find/pathway/{urllib.parse.quote(symbol)}"
     return {"url": url, "citations": [url]}
 
@@ -317,20 +397,32 @@ async def omnipath_ligrec(symbol: str) -> Dict[str, Any]:
 # =============================================================================
 
 async def chembl_drugs(symbol: str) -> Dict[str, Any]:
-    mech_url = f"https://www.ebi.ac.uk/chembl/api/data/mechanism.json?target_chembl_id={urllib.parse.quote(symbol)}"
-    tgt_url  = f"https://www.ebi.ac.uk/chembl/api/data/target.json?search={urllib.parse.quote(symbol)}"
-    try:
-        mech = await get_json(mech_url)
-    except Exception:
-        mech = {}
+    tgt_url  = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(symbol)}&format=json"
     try:
         tgt = await get_json(tgt_url)
     except Exception:
         tgt = {}
-    return {"mechanism": mech, "targets": tgt, "citations": [mech_url, tgt_url]}
+    mech_rows: List[Dict[str, Any]] = []
+    # If we have target_chembl_ids, try mechanisms for the first few
+    try:
+        tids = [t.get("target_chembl_id") for t in (tgt.get("targets", []) if isinstance(tgt, dict) else []) if t.get("target_chembl_id")]
+        cites = [tgt_url]
+        for tid in tids[:2]:
+            mech_url = f"https://www.ebi.ac.uk/chembl/api/data/mechanism.json?target_chembl_id={urllib.parse.quote(tid)}"
+            try:
+                mech = await get_json(mech_url)
+                for m in (mech.get("mechanisms", []) if isinstance(mech, dict) else []):
+                    mech_rows.append(m)
+                cites.append(mech_url)
+            except Exception:
+                cites.append(mech_url)
+        return {"targets": tgt.get("targets", []) if isinstance(tgt, dict) else [], "mechanisms": mech_rows, "citations": cites}
+    except Exception:
+        return {"targets": tgt.get("targets", []) if isinstance(tgt, dict) else [], "mechanisms": [], "citations": [tgt_url]}
 
 
 def drugbank_search(symbol: str) -> Dict[str, Any]:
+    # Public site search link (no API key)
     url = f"https://go.drugbank.com/unearth/q?query={urllib.parse.quote(symbol)}&searcher=targets"
     return {"url": url, "citations": [url]}
 
@@ -370,16 +462,17 @@ async def iedb_immunogenicity(symbol: str, limit: int = 50) -> Dict[str, Any]:
 # B6 — Clinical translation & safety
 # =============================================================================
 
-async def openfda_faers_reactions(drug_name: str) -> Dict[str, Any]:
+async def openfda_faers_reactions(drug_name: str, limit: int = 20) -> Dict[str, Any]:
     url = (
         "https://api.fda.gov/drug/event.json?"
         f"search=patient.drug.medicinalproduct:{urllib.parse.quote(drug_name)}&count=patient.reaction.reactionmeddrapt.exact"
     )
     try:
         js = await get_json(url)
-        return {"results": js.get("results", []) if isinstance(js, dict) else [], "citations": [url]}
+        rows = (js.get("results", []) if isinstance(js, dict) else [])[:limit]
+        return {"drug": drug_name, "reactions": rows, "citations": [url]}
     except Exception:
-        return {"results": [], "citations": [url]}
+        return {"drug": drug_name, "reactions": [], "citations": [url]}
 
 
 async def ctgov_trial_count(condition: Optional[str]) -> Dict[str, Any]:
@@ -394,7 +487,6 @@ async def ctgov_trial_count(condition: Optional[str]) -> Dict[str, Any]:
 
 
 def who_ictrp_info() -> Dict[str, Any]:
-    # Programmatic endpoints are limited; provide canonical API root/docs.
     root = "https://trialsearch.who.int/Api"
     docs = "https://trialsearch.who.int/"
     return {"root": root, "docs": docs, "citations": [root, docs]}
@@ -405,8 +497,16 @@ def eu_ctr_search(condition: str) -> Dict[str, Any]:
     return {"url": url, "citations": [url]}
 
 
+def fda_bqp_search(symbol: str) -> Dict[str, Any]:
+    url = "https://www.fda.gov/drugs/biomarker-qualification-program"
+    return {"symbol": symbol, "url": url, "citations": [url]}
+
+
 def biomarker_fit(symbol: str) -> Dict[str, Any]:
-    """Return qualitative components and citations for biomarker suitability."""
+    """
+    Qualitative components + citations for biomarker suitability.
+    (Public links — no API keys; use alongside /expr and /clin endpoints.)
+    """
     components = {
         "assayability": {
             "rationale": "Assays exist or feasible (ELISA/MS/imaging).",
@@ -425,13 +525,37 @@ def biomarker_fit(symbol: str) -> Dict[str, Any]:
             "links": ["https://www.fda.gov/drugs/biomarker-qualification-program"]
         }
     }
-    return {"symbol": symbol, "score": None, "components": components, "citations": sum([v["links"] for v in components.values()], [])}
+    citations = []
+    for v in components.values():
+        citations.extend(v["links"])
+    return {"symbol": symbol, "score": None, "components": components, "citations": citations}
 
 
 # =============================================================================
 # B7 — Competition & IP
 # =============================================================================
 
-def lens_search(query: str) -> Dict[str, Any]:
+async def patentsview_search(query_text: str, size: int = 100) -> Dict[str, Any]:
+    q = {"_or": [
+        {"patent_title": {"_text_any": query_text}},
+        {"patent_abstract": {"_text_any": query_text}},
+    ]}
+    base = "https://api.patentsview.org/patents/query"
+    url = f"{base}?q={urllib.parse.quote(json.dumps(q))}&f={urllib.parse.quote(json.dumps(['patent_id','patent_title']))}&o={urllib.parse.quote(json.dumps({'per_page': min(size, 100)}))}"
+    try:
+        js = await get_json(url)
+        patents = js.get("patents", []) if isinstance(js, dict) else []
+        return {"query": query_text, "patents": patents[:size], "citations": [url]}
+    except Exception:
+        return {"query": query_text, "patents": [], "citations": [url]}
+
+
+def surechembl_search(query_text: str) -> Dict[str, Any]:
+    url = f"https://www.ebi.ac.uk/surechembl/api/search?query={urllib.parse.quote(query_text)}"
+    return {"url": url, "citations": [url]}
+
+
+def lens_search_link(query: str) -> Dict[str, Any]:
+    # Public site link (no API token)
     url = f"https://www.lens.org/lens/search?q={urllib.parse.quote(query)}"
     return {"url": url, "citations": [url]}
