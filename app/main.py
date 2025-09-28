@@ -44,6 +44,8 @@ app.add_middleware(RequestIDMiddleware)
 
 # Mount all module endpoints from router
 app.include_router(targetval_router.router)
+app.include_router(insight_router.router)  # NEW
+
 
 # -----------------------------------------------------------------------------
 # Modules registry (string → function) for programmatic calls
