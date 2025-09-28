@@ -12,8 +12,8 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from app.routers import targetval_router
-from app.routers.targetval_router import Evidence  # for isinstance checks
+# Import both routers (fixes NameError from include_router)
+from app.routers import targetval_router, insight_router
 
 # -----------------------------------------------------------------------------
 # FastAPI app & CORS
@@ -42,13 +42,15 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RequestIDMiddleware)
 
-# Mount all module endpoints from router
+# Mount all module endpoints from routers
 app.include_router(targetval_router.router)
-app.include_router(insight_router.router)  # NEW
-
+app.include_router(insight_router.router)  # ensure insight routes are live
 
 # -----------------------------------------------------------------------------
 # Modules registry (string → function) for programmatic calls
+# NOTE: These reference the *route handler functions* in targetval_router.
+# They accept typical params like (gene/symbol/efo/limit/...) and, after the hybrid change,
+# many also accept an optional 'mode' param (live|snapshot|auto).
 # -----------------------------------------------------------------------------
 MODULE_MAP: Dict[str, Any] = {
     # Bucket 1 – Human Genetics & Causality
@@ -97,11 +99,13 @@ MODULE_MAP: Dict[str, Any] = {
 class AggregateRequest(BaseModel):
     gene: Optional[str] = None
     symbol: Optional[str] = None
-    ensembl_id: Optional[str] = None  # NEW: allow direct Ensembl submission
+    ensembl_id: Optional[str] = None  # allow direct Ensembl submission
     efo: Optional[str] = None
     condition: Optional[str] = None
     modules: Optional[List[str]] = None
     limit: Optional[int] = 50
+    # Optional hybrid source mode to pass through to wrapped endpoints (live|snapshot|auto)
+    mode: Optional[str] = None
     # Common passthroughs used by specific modules
     species: Optional[int] = None
     cutoff: Optional[float] = None
@@ -138,6 +142,7 @@ async def _run_module(
     efo: Optional[str],
     condition: Optional[str],
     limit: Optional[int],
+    mode: Optional[str],
     extra: Optional[Dict[str, Any]],
 ):
     """Invoke a single module function safely and return (name, result_dict)."""
@@ -151,6 +156,7 @@ async def _run_module(
         "condition": condition,
         "disease": condition,  # some functions use 'disease' as the param name
         "limit": limit,
+        "mode": mode,          # NEW: pass-through for hybrid endpoints that accept it
         # NEW passthrough for modules that accept it (e.g., genetics_l2g, genetics_mendelian)
         "ensembl": ensembl_id,
     }
@@ -164,12 +170,11 @@ async def _run_module(
         if asyncio.iscoroutine(result):
             result = await result
 
-        # Coerce Evidence Pydantic model (v1 or v2) to plain dict
-        if isinstance(result, Evidence):
-            if hasattr(result, "dict"):
-                return name, result.dict()
-            if hasattr(result, "model_dump"):
-                return name, result.model_dump()
+        # Coerce to plain dict without tying to a specific Evidence class
+        if hasattr(result, "dict") and callable(result.dict):
+            return name, result.dict()
+        if hasattr(result, "model_dump") and callable(result.model_dump):
+            return name, result.model_dump()
         if isinstance(result, dict):
             return name, result
 
@@ -209,6 +214,9 @@ async def _run_module(
 async def healthz():
     return {"ok": True, "modules": len(MODULE_MAP)}
 
+@app.get("/")
+async def root():
+    return {"service": "targetval-gateway", "docs": "/docs", "version": app.version}
 
 @app.get("/modules")
 async def list_modules():
@@ -225,13 +233,14 @@ async def run_single_module(
     efo: Optional[str] = Query(default=None),
     condition: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=1000),
+    mode: Optional[str] = Query(default=None, regex="^(auto|live|snapshot)$"),
 ):
     func = MODULE_MAP.get(name)
     if not func:
         raise HTTPException(status_code=404, detail=f"Unknown module: {name}")
 
     # Pass through any extra query params (species, cutoff, tissue, cell_type, etc.)
-    known = {"gene", "symbol", "ensembl", "efo", "condition", "limit"}
+    known = {"gene", "symbol", "ensembl", "efo", "condition", "limit", "mode"}
     extras: Dict[str, Any] = {k: v for k, v in request.query_params.items() if k not in known}
 
     _, res = await _run_module(
@@ -243,6 +252,7 @@ async def run_single_module(
         efo=efo,
         condition=condition,
         limit=limit,
+        mode=mode,
         extra=extras or None,
     )
     return res
@@ -281,6 +291,7 @@ async def aggregate(body: AggregateRequest):
                 efo=body.efo,
                 condition=body.condition,
                 limit=body.limit or 50,
+                mode=body.mode,
                 extra=extras or None,
             )
 
@@ -304,6 +315,7 @@ async def aggregate(body: AggregateRequest):
             "modules": modules,
             "species": body.species,
             "cutoff": body.cutoff,
+            "mode": body.mode or "auto",
         },
         "results": {name: res for name, res in results},
     }
