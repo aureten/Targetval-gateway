@@ -1,4 +1,11 @@
 # app/routers/insight_router.py
+"""
+Revised to enable hybrid (live|snapshot|auto) mode per fetch via app.hybrid.hyridize.
+- Adds optional `mode` param (query or x-source-mode header) on /v1/evidence
+- Wraps each live fetcher in a hybrid wrapper (snapshots optional; can be added later)
+- Keeps response models identical for backward compatibility
+"""
+
 import os
 import math
 import asyncio
@@ -7,8 +14,11 @@ from typing import Optional, List, Dict, Any, Iterable, Union
 
 import httpx
 import networkx as nx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+
+# Hybrid layer: wrappers + dependency to parse mode
+from app.hybrid import hybridize, get_source_mode, SourceMode  # Evidence objects are returned internally
 
 router = APIRouter(prefix="/v1", tags=["insight"])
 
@@ -285,7 +295,7 @@ async def hpa_fetch(ensg: str) -> List[EvidenceItem]:
             if r.status_code != 200 or not r.text:
                 return []
             import csv, io
-            reader = csv.DictReader(io.StringIO(r.text), delimiter="\t")
+            reader = csv.DictReader(io.StringIO(r.text), delimiter="\\t")
             for row in reader:
                 tissue = row.get("Tissue")
                 level = row.get("Level")
@@ -365,27 +375,95 @@ async def resolve_efo(disease_text: Optional[str]) -> Optional[str]:
     return None
 
 # ==============================
+# Hybrid wrappers for live connectors (snapshots are optional and can be plugged later)
+# ==============================
+
+# Defaults here keep behavior as-live; you can change default="snapshot" once you add local snapshot functions.
+hybrid_ot = hybridize(
+    "insight_ot",
+    ot_fetch,
+    snapshot_fn=None,                 # plug snapshot callable when ready
+    default="live",
+    ttl_sec=7 * 24 * 3600,
+    source_name_live="OpenTargets",
+    source_name_snapshot="OT_SNAPSHOT"
+)
+
+hybrid_gtex = hybridize(
+    "insight_gtex",
+    gtex_fetch,
+    snapshot_fn=None,                 # plug snapshot callable when ready
+    default="live",
+    ttl_sec=30 * 24 * 3600,
+    source_name_live="GTEx",
+    source_name_snapshot="GTEx_SNAPSHOT"
+)
+
+hybrid_hpa = hybridize(
+    "insight_hpa",
+    hpa_fetch,
+    snapshot_fn=None,
+    default="live",
+    ttl_sec=60 * 24 * 3600,
+    source_name_live="HPA",
+    source_name_snapshot="HPA_SNAPSHOT"
+)
+
+hybrid_faers = hybridize(
+    "insight_faers",
+    faers_fetch,
+    snapshot_fn=None,
+    default="live",
+    ttl_sec=14 * 24 * 3600,
+    source_name_live="openFDA_FAERS",
+    source_name_snapshot="FAERS_SNAPSHOT"
+)
+
+# ==============================
 # Endpoints (PUBLIC)
 # ==============================
 
 @router.get("/evidence", response_model=EvidenceResponse)
-async def get_evidence(target: str, disease: Optional[str] = None, faers_kw: Optional[str] = None):
+async def get_evidence(
+    target: str,
+    disease: Optional[str] = None,
+    faers_kw: Optional[str] = None,
+    mode: SourceMode = Depends(get_source_mode)   # live|snapshot|auto (default auto via dependency)
+):
+    """
+    Aggregate evidence from multiple sources. The `mode` parameter controls source behavior:
+      - mode=live: use live APIs
+      - mode=snapshot: use snapshot callables (if configured)
+      - mode=auto (default): try live, fall back to snapshot if available
+    """
     # Resolve EFO and ENSG so all downstream connectors can run.
     efo_id = await resolve_efo(disease) if disease else None
     ensg = await resolve_ensg(target) or target
 
+    # Call wrappers concurrently; each returns an Evidence envelope with .data list[EvidenceItem]
     tasks = [
-        ot_fetch(target, efo_id),   # accepts symbol or ENSG
-        gtex_fetch(ensg, efo_id),   # requires ENSG
-        hpa_fetch(ensg),            # requires ENSG
-        faers_fetch(ensg, faers_kw) # optional keyword for class AE proxy
+        hybrid_ot(ensg_or_symbol=target, efo_id=efo_id, mode=mode),         # accepts symbol or ENSG
+        hybrid_gtex(ensg=ensg, efo_id=efo_id, mode=mode),                   # requires ENSG
+        hybrid_hpa(ensg=ensg, mode=mode),                                   # requires ENSG
+        hybrid_faers(target_for_context=ensg, drug_kw=faers_kw, mode=mode)  # optional keyword for class AE proxy
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
+
     items: List[EvidenceItem] = []
     for res in results:
         if isinstance(res, Exception):
             continue
-        items.extend(res or [])
+        # res is an Evidence envelope from app.hybrid; extract its .data payload
+        data = getattr(res, "data", None)
+        if isinstance(data, list):
+            for it in data:
+                if isinstance(it, EvidenceItem):
+                    items.append(it)
+                elif isinstance(it, dict):
+                    try:
+                        items.append(EvidenceItem(**it))
+                    except Exception:
+                        continue
 
     return EvidenceResponse(
         fetched_n=len(items),
