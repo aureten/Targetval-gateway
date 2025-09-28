@@ -1,21 +1,25 @@
 # app/routers/insight_router.py
 """
-Revised to enable hybrid (live|snapshot|auto) mode per fetch via app.hybrid.hyridize.
-- Adds optional `mode` param (query or x-source-mode header) on /v1/evidence
-- Wraps each live fetcher in a hybrid wrapper (snapshots optional; can be added later)
-- Keeps response models identical for backward compatibility
+Revised to make `networkx` optional (Render build without the dependency will still work).
+- Soft-imports networkx; if missing, falls back to a simple connected-components implementation.
+- Keeps the hybrid wrappers and `mode` param support as before.
 """
 
 import os
 import math
 import asyncio
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Iterable, Union
+from typing import Optional, List, Dict, Any, Iterable, Union, Tuple, Set
 
 import httpx
-import networkx as nx
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+
+# Optional networkx import with graceful fallback
+try:
+    import networkx as nx  # type: ignore
+except Exception:
+    nx = None  # type: ignore
 
 # Hybrid layer: wrappers + dependency to parse mode
 from app.hybrid import hybridize, get_source_mode, SourceMode  # Evidence objects are returned internally
@@ -132,29 +136,76 @@ def tcs(items: Iterable[EvidenceItem], desired_direction:int=-1, safety_penalty:
     return {"tcs": round(tcs_val,1), "conflict": round(conflict,2), "safety_penalty": round(safety_penalty,2)}
 
 # ==============================
-# Graph
+# Graph (with optional networkx)
 # ==============================
 
-def build_graph(items: List[Union[EvidenceItem, EvidenceItemLite]]) -> nx.Graph:
-    G = nx.Graph()
+def _edges_and_nodes(items: List[Union[EvidenceItem, EvidenceItemLite]]) -> Tuple[List[Tuple[str,str,str]], Set[str]]:
+    edges: List[Tuple[str,str,str]] = []
+    nodes: Set[str] = set()
     for it in items:
         t = f"T::{it.target}"
-        G.add_node(t, kind="target")
+        nodes.add(t)
         if getattr(it, "disease_efo", None):
-            G.add_edge(t, f"D::{it.disease_efo}", kind="assoc")
+            d = f"D::{it.disease_efo}"
+            nodes.add(d)
+            edges.append((t, d, "assoc"))
         if getattr(it, "endpoint", None):
-            G.add_edge(t, f"E::{it.endpoint}", kind="endpoint")
+            e = f"E::{it.endpoint}"
+            nodes.add(e)
+            edges.append((t, e, "endpoint"))
         if getattr(it, "species", None):
-            G.add_edge(t, f"S::{it.species}", kind="species")
+            s = f"S::{it.species}"
+            nodes.add(s)
+            edges.append((t, s, "species"))
         if getattr(it, "study_type", None):
-            G.add_edge(t, f"ST::{it.study_type}", kind="study")
-    return G
+            st = f"ST::{it.study_type}"
+            nodes.add(st)
+            edges.append((t, st, "study"))
+    return edges, nodes
 
-def communities_json(G: nx.Graph) -> List[Dict[str, Any]]:
-    if G.number_of_nodes() == 0:
-        return []
-    comms = list(nx.algorithms.community.greedy_modularity_communities(G))
-    return [{"community_id": i, "size": len(c), "nodes": sorted(list(c))} for i, c in enumerate(comms)]
+def build_graph(items: List[Union[EvidenceItem, EvidenceItemLite]]):
+    """Return a networkx.Graph if networkx is installed; otherwise a simple (nodes, edges) pair."""
+    edges, nodes = _edges_and_nodes(items)
+    if nx:
+        G = nx.Graph()
+        for u, v, k in edges:
+            G.add_edge(u, v, kind=k)
+        return G
+    # Fallback: return tuple (nodes_list, edges_with_kind)
+    return sorted(nodes), [[u, v, k] for u, v, k in edges]
+
+def communities_json(graph_obj) -> List[Dict[str, Any]]:
+    """Return communities using networkx if available; else compute connected components."""
+    if nx and isinstance(graph_obj, nx.Graph):
+        if graph_obj.number_of_nodes() == 0:
+            return []
+        comms = list(nx.algorithms.community.greedy_modularity_communities(graph_obj))
+        return [{"community_id": i, "size": len(c), "nodes": sorted(list(c))} for i, c in enumerate(comms)]
+    # Fallback: graph_obj is (nodes, edges_with_kind)
+    nodes, edges = graph_obj
+    # Build adjacency ignoring 'kind'
+    adj: Dict[str, Set[str]] = {n: set() for n in nodes}
+    for u, v, _ in edges:
+        adj.setdefault(u, set()).add(v)
+        adj.setdefault(v, set()).add(u)
+    visited: Set[str] = set()
+    comms: List[List[str]] = []
+    for n in nodes:
+        if n in visited:
+            continue
+        # BFS
+        comp = []
+        stack = [n]
+        visited.add(n)
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for nb in adj.get(cur, ()):
+                if nb not in visited:
+                    visited.add(nb)
+                    stack.append(nb)
+        comms.append(sorted(comp))
+    return [{"community_id": i, "size": len(c), "nodes": c} for i, c in enumerate(comms)]
 
 # ==============================
 # Connectors & helpers (public)
@@ -295,7 +346,7 @@ async def hpa_fetch(ensg: str) -> List[EvidenceItem]:
             if r.status_code != 200 or not r.text:
                 return []
             import csv, io
-            reader = csv.DictReader(io.StringIO(r.text), delimiter="\\t")
+            reader = csv.DictReader(io.StringIO(r.text), delimiter="\t")
             for row in reader:
                 tissue = row.get("Tissue")
                 level = row.get("Level")
@@ -483,9 +534,15 @@ async def post_score(items: List[EvidenceItem], desired_direction: int = -1, saf
 
 @router.post("/graph/subgraph", response_model=SubgraphOut)
 async def post_subgraph(items: List[EvidenceItemLite]):
-    G = build_graph(items)
+    G_or_tuple = build_graph(items)
+    if nx and isinstance(G_or_tuple, nx.Graph):
+        nodes = list(G_or_tuple.nodes())
+        edges = [[u, v, G_or_tuple[u][v].get("kind")] for u, v in G_or_tuple.edges()]
+    else:
+        # Fallback (nodes list, edges with kind already)
+        nodes, edges = G_or_tuple
     return {
-        "nodes": list(G.nodes()),
-        "edges": [[u, v, G[u][v].get("kind")] for u, v in G.edges()],
-        "communities": communities_json(G)
+        "nodes": nodes,
+        "edges": edges,
+        "communities": communities_json(G_or_tuple)
     }
