@@ -171,15 +171,16 @@ _SYMBOL_CACHE: Dict[str, str] = {}
 _EFO_CACHE: Dict[str, Tuple[str, str, str, List[str]]] = {}
 
 async def _normalize_symbol(symbol: str) -> str:
-    if not symbol: return symbol
+    if not symbol:
+        return symbol
     up = symbol.strip().upper()
-    if up in _SYMBOL_CACHE: return _SYMBOL_CACHE[up]
+    if up in _SYMBOL_CACHE:
+        return _SYMBOL_CACHE[up]
     if up in _ALIAS_GENE_MAP:
         _SYMBOL_CACHE[up] = _ALIAS_GENE_MAP[up]
         return _ALIAS_GENE_MAP[up]
     if up in _COMMON_GENE_SET or up.startswith("ENSG"):
         _SYMBOL_CACHE[up] = up
-         _SYMBOL_CACHE[up] = up
         return up
     url = ("https://rest.uniprot.org/uniprotkb/search?"
            f"query={urllib.parse.quote(symbol)}+AND+organism_id:9606&fields=genes&format=json&size=1")
@@ -190,14 +191,17 @@ async def _normalize_symbol(symbol: str) -> str:
             genes = res[0].get("genes") or []
             for g in genes:
                 gn = g.get("geneName", {}).get("value")
-                if gn: return gn.upper()
+                if gn:
+                    return gn.upper()
             for g in genes:
                 for syn in (g.get("synonyms") or []):
                     val = syn.get("value")
-                    if val: return val.upper()
-    except Exception: pass
-     _SYMBOL_CACHE[up] = up
-        return up
+                    if val:
+                        return val.upper()
+    except Exception:
+        pass
+    _SYMBOL_CACHE[up] = up
+    return up
 
 async def _ensembl_from_symbol_or_id(s: str) -> Tuple[Optional[str], Optional[str], List[str]]:
     citations: List[str] = []
@@ -1396,7 +1400,7 @@ async def clin_rwe(condition: str, symbol: Optional[str] = Query(None), limit: i
             ex_url = f"{faers_base}?search={term_q}&limit={per_term_cap}"
             try:
                 ej = await _get_json(ex_url, tries=1); cites.append(ex_url)
-                for it in (ej.get(\"results\", []) if isinstance(ej, dict) else []):
+                for it in (ej.get("results", []) if isinstance(ej, dict) else []):
                     examples.append({"event": term, "safety_report_id": it.get("safetyreportid"), "receivedate": it.get("receivedate")})
             except Exception:
                 continue
