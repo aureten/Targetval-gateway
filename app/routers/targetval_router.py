@@ -166,11 +166,21 @@ def _looks_like_gene_token(s: str) -> bool:
     if up.startswith("ENSG"): return True
     return False
 
+# Sticky caches for normalization (avoid provider-specific alias drift)
+_SYMBOL_CACHE: Dict[str, str] = {}
+_EFO_CACHE: Dict[str, Tuple[str, str, str, List[str]]] = {}
+
 async def _normalize_symbol(symbol: str) -> str:
     if not symbol: return symbol
     up = symbol.strip().upper()
-    if up in _ALIAS_GENE_MAP: return _ALIAS_GENE_MAP[up]
-    if up in _COMMON_GENE_SET or up.startswith("ENSG"): return up
+    if up in _SYMBOL_CACHE: return _SYMBOL_CACHE[up]
+    if up in _ALIAS_GENE_MAP:
+        _SYMBOL_CACHE[up] = _ALIAS_GENE_MAP[up]
+        return _ALIAS_GENE_MAP[up]
+    if up in _COMMON_GENE_SET or up.startswith("ENSG"):
+        _SYMBOL_CACHE[up] = up
+         _SYMBOL_CACHE[up] = up
+        return up
     url = ("https://rest.uniprot.org/uniprotkb/search?"
            f"query={urllib.parse.quote(symbol)}+AND+organism_id:9606&fields=genes&format=json&size=1")
     try:
@@ -186,7 +196,8 @@ async def _normalize_symbol(symbol: str) -> str:
                     val = syn.get("value")
                     if val: return val.upper()
     except Exception: pass
-    return up
+     _SYMBOL_CACHE[up] = up
+        return up
 
 async def _ensembl_from_symbol_or_id(s: str) -> Tuple[Optional[str], Optional[str], List[str]]:
     citations: List[str] = []
@@ -216,9 +227,14 @@ async def _resolve_efo(efo_or_term: str) -> Tuple[str, str, str, List[str]]:
     citations: List[str] = []
     efo = (efo_or_term or "").strip()
     if not efo: return "", "", "", citations
+    # sticky cache
+    if efo.upper() in _EFO_CACHE:
+        idn, uri, label, cites = _EFO_CACHE[efo.upper()]
+        return idn, uri, label, cites.copy()
     if ":" in efo: efo = efo.replace(":", "_")
     if efo.upper().startswith("EFO_"):
-        return efo.upper(), f"http://www.ebi.ac.uk/efo/{efo.upper()}", efo.upper(), citations
+        _EFO_CACHE[efo.upper()] = (efo.upper(), f"https://www.ebi.ac.uk/efo/{efo.upper()}", efo.upper(), citations.copy())
+        return efo.upper(), f"https://www.ebi.ac.uk/efo/{efo.upper()}", efo.upper(), citations
     # 1) EpiGraphDB mapping
     map_url = f"https://api.epigraphdb.org/ontology/disease-efo?efo_term={urllib.parse.quote(efo)}&fuzzy=true"
     try:
@@ -230,7 +246,7 @@ async def _resolve_efo(efo_or_term: str) -> Tuple[str, str, str, List[str]]:
             raw = top.get("efo_term") or (top.get("disease") or {}).get("id") or ""
             if raw:
                 efo_id_norm = raw.replace(":", "_").upper()
-                uri = f"http://www.ebi.ac.uk/efo/{efo_id_norm}"
+                uri = f"https://www.ebi.ac.uk/efo/{efo_id_norm}"
                 return efo_id_norm, uri, label or efo, citations
     except Exception: pass
     # 2) OLS4 search
@@ -244,9 +260,11 @@ async def _resolve_efo(efo_or_term: str) -> Tuple[str, str, str, List[str]]:
             tail = iri.rsplit("/", 1)[-1]
             if tail.upper().startswith("EFO_"):
                 efo_id_norm = tail.upper()
-                uri = f"http://www.ebi.ac.uk/efo/{efo_id_norm}"
+                uri = f"https://www.ebi.ac.uk/efo/{efo_id_norm}"
+                _EFO_CACHE[(label or efo).upper()] = (efo_id_norm, uri, label, citations.copy())
                 return efo_id_norm, uri, label, citations
     except Exception: pass
+    _EFO_CACHE[efo.upper()] = ("", "", efo, citations.copy())
     return "", "", efo, citations
 
 async def _uniprot_primary_accession(symbol: str) -> Optional[str]:
@@ -460,7 +478,8 @@ async def genetics_rare(gene: str, limit: int = Query(50, ge=1, le=200)) -> Evid
 
 @router.get("/genetics/mendelian", response_model=Evidence)
 async def genetics_mendelian(gene: str, limit: int = Query(50, ge=1, le=200)) -> Evidence:
-    """ClinGen gene–disease validity; Orphanet fallback (OMIM omitted: key required)."""
+    """ClinGen gene–disease validity; Orphanet fallback (OMIM omitted: key required).
+    Looser matching across geneSymbol/gene/name (case-insensitive). Adds G2P link when ClinGen empty."""
     from urllib.parse import quote
     validate_symbol(gene, field_name="gene")
     sym = (gene or "").upper(); citations: List[str] = []
@@ -470,47 +489,95 @@ async def genetics_mendelian(gene: str, limit: int = Query(50, ge=1, le=200)) ->
     except Exception:
         cg = {}
     items = []
-    if isinstance(cg, dict):
-        data = cg.get("data") or cg.get("items") or cg.get("results") or []
-        if isinstance(data, list):
-            items = [r for r in data if (str(r.get("geneSymbol") or r.get("gene", "")).upper() == sym)]
+    def _match(row: Dict[str, Any]) -> bool:
+        # Accept geneSymbol or gene string or nested gene label
+        gs = str(row.get("geneSymbol") or "").upper()
+        g1 = str(row.get("gene") or "").upper()
+        gdict = row.get("gene") if isinstance(row.get("gene"), dict) else {}
+        glabel = str(gdict.get("label") or gdict.get("name") or "").upper() if isinstance(gdict, dict) else ""
+        return sym in {gs, g1, glabel}
+    data = cg.get("data") or cg.get("items") or cg.get("results") or []
+    if isinstance(data, list):
+        items = [r for r in data if _match(r)]
     elif isinstance(cg, list):
-        items = [r for r in cg if (str(r.get("geneSymbol") or r.get("gene", "")).upper() == sym)]
+        items = [r for r in cg if _match(r)]
     orphanet_items = []
     try:
         orpha_url = f"https://www.orphadata.com/cgi-bin/DiseaseGene.php?gene={quote(sym)}&format=json"
         oj = await _get_json(orpha_url, tries=1); citations.append(orpha_url)
         if isinstance(oj, dict): orphanet_items = (oj.get("associations") or oj.get("results") or [])
     except Exception: pass
+    # Add Gene2Phenotype link (public) for manual review when empty
+    if not items:
+        g2p_link = f"https://www.ebi.ac.uk/gene2phenotype/search?search_term={quote(sym)}"
+        citations.append(g2p_link)
     payload = {"gene": sym, "clingen_gene_validity": (items or [])[:limit], "orphanet": orphanet_items[:limit]}
     status = "OK" if (items or orphanet_items) else "NO_DATA"
-    return Evidence(status=status, source="ClinGen (+ Orphanet)", fetched_n=len(items), data=payload, citations=citations, fetched_at=_now())
+    return Evidence(status=status, source="ClinGen (+ Orphanet)", fetched_n=len(items) + len(orphanet_items),
+                    data=payload, citations=citations, fetched_at=_now())
+
 
 @router.get("/genetics/mr", response_model=Evidence)
 async def genetics_mr(gene: str, efo: str = Query(...), limit: int = Query(25, ge=1, le=200)) -> Evidence:
-    """EpiGraphDB MR-Base multi-SNP primary; OpenGWAS search link secondary."""
+    """EpiGraphDB MR-Base multi-SNP primary; OpenGWAS search link secondary.
+    More tolerant to EFO/synonym naming; returns candidate outcomes when MR is empty."""
     from urllib.parse import quote
     validate_symbol(gene, field_name="gene"); validate_symbol(efo, field_name="efo")
-    efo_norm = efo.replace(":", "_").upper()
-    cites: List[str] = []
-    mr_api = f"https://api.epigraphdb.org/mr?exposure={quote(gene)}&outcome={quote(efo_norm)}"
+    # Resolve EFO → (id, uri, label)
+    efo_id, efo_uri, efo_label, efo_cites = await _resolve_efo(efo)
+    cites: List[str] = [] + efo_cites
+    # Build outcome candidates: prefer canonical EFO id, then label, then common synonyms
+    candidates: List[str] = []
+    if efo_id: candidates.append(efo_id)
+    if efo_label: candidates.append(efo_label)
+    label_up = (efo_label or efo).upper()
+    _SYN = {
+        "CORONARY ARTERY DISEASE": ["CAD", "CORONARY HEART DISEASE", "CHD"],
+        "TYPE 2 DIABETES MELLITUS": ["T2D", "TYPE II DIABETES", "TYPE 2 DIABETES"],
+        "BODY MASS INDEX": ["BMI"],
+        "MYOCARDIAL INFARCTION": ["HEART ATTACK", "MI"],
+        "ALZHEIMER'S DISEASE": ["ALZHEIMER DISEASE", "AD"],
+    }
+    for k,v in _SYN.items():
+        if label_up == k: candidates.extend(v)
+    # Deduplicate while preserving order
+    seen=set(); candidates=[x for x in candidates if not (x in seen or seen.add(x))]
     mr_hits = []
+    chosen_outcome = None
+    for outcome in candidates or [efo]:
+        mr_api = f"https://api.epigraphdb.org/mr?exposure={quote(gene)}&outcome={quote(outcome)}"
+        try:
+            mj = await _get_json(mr_api, tries=1); cites.append(mr_api)
+            rows = (mj.get("results") or mj.get("data") or []) if isinstance(mj, dict) else (mj if isinstance(mj, list) else [])
+            if rows:
+                mr_hits = rows
+                chosen_outcome = outcome
+                break
+        except Exception:
+            continue
+    # OpenGWAS: fetch search hits for transparency + template
+    search_q = (efo_id or efo_label or efo).replace(":", "_")
+    og_search = f"https://gwas.mrcieu.ac.uk/api/v1/studies?query={quote(search_q)}"
+    og_hits = []
     try:
-        mj = await _get_json(mr_api, tries=1); cites.append(mr_api)
-        if isinstance(mj, dict): mr_hits = mj.get("results") or mj.get("data") or []
-        elif isinstance(mj, list): mr_hits = mj
-    except Exception: pass
-    search_url = f"https://gwas.mrcieu.ac.uk/api/v1/studies?query={quote(efo_norm)}"; cites.append(search_url)
+        og = await _get_json(og_search, tries=1); cites.append(og_search)
+        og_hits = (og.get("data") or og.get("studies") or []) if isinstance(og, dict) else (og if isinstance(og, list) else [])
+    except Exception:
+        pass
     mr_tpl = "https://api.opengwas.io/api/v1/mr?exposure={exposure_id}&outcome={outcome_id}"
-    payload = {"gene": gene, "efo_id": efo_norm, "mr_epigraphdb": mr_hits[:limit],
-               "openGWAS_search_url": search_url, "mr_endpoint_template": mr_tpl}
-    return Evidence(status=("OK" if mr_hits else "NO_DATA"), source="EpiGraphDB MR-Base + OpenGWAS link",
-                    fetched_n=len(mr_hits), data=payload, citations=cites, fetched_at=_now())
+    payload = {"gene": gene, "efo_id": efo_id or "", "efo_label": efo_label or efo, "mr_epigraphdb": mr_hits[:limit],
+               "chosen_outcome": chosen_outcome, "candidate_outcomes": candidates, "openGWAS_hits": og_hits[:10],
+               "openGWAS_search_url": og_search, "mr_endpoint_template": mr_tpl}
+    status = "OK" if (mr_hits or og_hits) else "NO_DATA"
+    return Evidence(status=status, source="EpiGraphDB MR-Base + OpenGWAS link", fetched_n=len(mr_hits),
+                    data=payload, citations=cites, fetched_at=_now())
+
 
 @router.get("/genetics/lncrna", response_model=Evidence)
 async def genetics_lncrna(gene: str, limit: int = Query(50, ge=1, le=200)) -> Evidence:
     validate_symbol(gene, field_name="gene")
-    url = f"https://rnacentral.org/api/v1/rna?q={urllib.parse.quote(gene)}&page_size={limit}"
+    q = f"{gene} AND taxon:9606"
+    url = f"https://rnacentral.org/api/v1/rna?q={urllib.parse.quote(q)}&page_size={limit}"
     try:
         js = await _get_json(url, tries=1)
         results = js.get("results", []) if isinstance(js, dict) else []
@@ -1042,7 +1109,7 @@ async def mech_ppi(symbol: str, species: int = Query(9606, ge=1), cutoff: float 
 @router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
-    url = "https://omnipathdb.org/interactions?format=json&genes={gene}&substrate_only=false"
+    url = "https://omnipathdb.org/interactions?format=json&genes={gene}&organisms=9606&fields=sources,dorothea_level&substrate_only=false"
     try:
         js = await _get_json(url.format(gene=urllib.parse.quote(sym_norm)), tries=1)
         interactions = js if isinstance(js, list) else []
@@ -1119,8 +1186,8 @@ async def tract_ligandability_sm(symbol: str, limit: int = Query(100, ge=1, le=5
 async def tract_ligandability_ab(symbol: str, limit: int = Query(50, ge=1, le=200)) -> Evidence:
     """SAbDab/Thera-SAbDab primary; PDBe supplemental."""
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
-    sabdab_url = f"http://opig.stats.ox.ac.uk/webapps/newsabdab/sabdab/search/?target={urllib.parse.quote(sym_norm)}&output=json"
-    ther_url = f"http://opig.stats.ox.ac.uk/webapps/therasabdab/search/?target={urllib.parse.quote(sym_norm)}&output=json"
+    sabdab_url = f"https://opig.stats.ox.ac.uk/webapps/newsabdab/sabdab/search/?target={urllib.parse.quote(sym_norm)}&output=json"
+    ther_url = f"https://opig.stats.ox.ac.uk/webapps/therasabdab/search/?target={urllib.parse.quote(sym_norm)}&output=json"
     cites = []; sab_hits = []; ther_hits = []
     try:
         sj = await _get_json(sabdab_url, tries=1); cites.append(sabdab_url)
@@ -1259,11 +1326,17 @@ async def tract_immunogenicity(symbol: str, limit: int = Query(50, ge=1, le=200)
 # --------------------- B6: Clinical Translation & Safety ---------------------
 
 @router.get("/clin/endpoints", response_model=Evidence)
-async def clin_endpoints(condition: str, limit: int = Query(5, ge=1, le=100)) -> Evidence:
-    validate_condition(condition, field_name="condition")
-    ct_url = f"https://clinicaltrials.gov/api/v2/studies?query.cond={urllib.parse.quote(condition)}&pageSize={limit}"
-    who_url = f"https://trialsearch.who.int/api/Trial?query={urllib.parse.quote(condition)}"
-    eu_url = f"https://www.clinicaltrialsregister.eu/ctr-search/rest/search?query={urllib.parse.quote(condition)}"
+async def clin_endpoints(condition: Optional[str] = Query(None), symbol: Optional[str] = Query(None), limit: int = Query(5, ge=1, le=100)) -> Evidence:
+    # Prefer a disease/condition string; if missing, fall back to gene symbol
+    cond = (condition or "").strip()
+    if not cond and symbol:
+        cond = (await _normalize_symbol(symbol))
+    if not cond:
+        return Evidence(status="ERROR", source="CT.gov/WHO/EU-CTR", fetched_n=0,
+                        data={"message": "Provide either condition or symbol"}, citations=[], fetched_at=_now())
+    ct_url = f"https://clinicaltrials.gov/api/v2/studies?query.cond={urllib.parse.quote(cond)}&pageSize={limit}"
+    who_url = f"https://trialsearch.who.int/api/Trial?query={urllib.parse.quote(cond)}"
+    eu_url = f"https://www.clinicaltrialsregister.eu/ctr-search/rest/search?query={urllib.parse.quote(cond)}"
     studies, cites = [], []
     try:
         js = await _get_json(ct_url, tries=1); cites.append(ct_url)
@@ -1279,46 +1352,103 @@ async def clin_endpoints(condition: str, limit: int = Query(5, ge=1, le=100)) ->
             eu = await _get_json(eu_url, tries=1); cites.append(eu_url)
             studies = (eu if isinstance(eu, list) else eu.get("trials") or eu.get("results") or [])
         except Exception: pass
+    # If still nothing and we had both a condition and a symbol, try a second pass with the symbol text
+    if not studies and symbol and cond != symbol:
+        cond2 = await _normalize_symbol(symbol)
+        ct2 = f"https://clinicaltrials.gov/api/v2/studies?query.term={urllib.parse.quote(cond2)}&pageSize={limit}"
+        try:
+            j2 = await _get_json(ct2, tries=1); cites.append(ct2)
+            studies = j2.get("studies", []) if isinstance(j2, dict) else []
+        except Exception: pass
     return Evidence(status=("OK" if studies else "NO_DATA"), source="CT.gov v2 + WHO ICTRP + EU CTR",
-                    fetched_n=len(studies), data={"condition": condition, "studies": studies[:limit]},
+                    fetched_n=len(studies), data={"condition": cond, "studies": studies[:limit], "truncated": bool(len(studies) > limit)},
                     citations=cites, fetched_at=_now())
+
 
 @router.get("/clin/rwe", response_model=Evidence)
 async def clin_rwe(condition: str, symbol: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=200)) -> Evidence:
     validate_condition(condition, field_name="condition")
     faers_base = "https://api.fda.gov/drug/event.json"
+    # Count-first: get frequency of MedDRA PT events for the condition
+    q = f"patient.reaction.reactionmeddrapt.exact:{urllib.parse.quote(condition)}"
+    count_url = f"{faers_base}?search={q}&count=patient.reaction.reactionmeddrapt.exact"
+    cites: List[str] = [count_url]
+    counts = []
+    try:
+        cj = await _get_json(count_url, tries=1)
+        counts = cj.get("results", []) if isinstance(cj, dict) else []
+    except Exception:
+        counts = []
+    total_events = sum([int(r.get("count") or 0) for r in counts]) if counts else 0
+    top_counts = counts[:limit] if isinstance(counts, list) else []
+    # If a symbol is provided, filter example cases by drug name as well (stricter query)
+    examples: List[Any] = []
+    if top_counts:
+        # Fetch up to 5 example cases per top event (capped globally to ~50)
+        per_term_cap = max(1, min(5, 50 // len(top_counts)))
+        for r in top_counts:
+            term = r.get("term")
+            if not term: continue
+            term_q = f"patient.reaction.reactionmeddrapt.exact:\"{urllib.parse.quote(term)}\""
+            if symbol:
+                sym_norm = await _normalize_symbol(symbol)
+                term_q += f"+AND+patient.drug.openfda.generic_name:\"{urllib.parse.quote(sym_norm)}\""
+            ex_url = f"{faers_base}?search={term_q}&limit={per_term_cap}"
+            try:
+                ej = await _get_json(ex_url, tries=1); cites.append(ex_url)
+                for it in (ej.get(\"results\", []) if isinstance(ej, dict) else []):
+                    examples.append({"event": term, "safety_report_id": it.get("safetyreportid"), "receivedate": it.get("receivedate")})
+            except Exception:
+                continue
+    # ClinicalTrials.gov observational trials (context)
     ct_url = f"https://clinicaltrials.gov/api/v2/studies?query.cond={urllib.parse.quote(condition)}&pageSize={min(100, limit)}"
-    faers_url = f"{faers_base}?search=patient.reaction.reactionmeddrapt.exact:{urllib.parse.quote(condition)}&limit={min(100, limit)}"
-    async def _get(url):
-        try: j = await _get_json(url, tries=1); return j.get("results", []) if isinstance(j, dict) else []
-        except Exception: return []
-    faers_list_task = _get(faers_url)
-    async def _ct():
-        try: c = await _get_json(ct_url, tries=1); return c.get("studies", []) if isinstance(c, dict) else []
-        except Exception: return []
-    faers_list, trials = await asyncio.gather(faers_list_task, _ct())
-    total = len(faers_list) + len(trials)
-    cites = [faers_url, ct_url]
-    return Evidence(status=("OK" if total > 0 else "NO_DATA"),
-                    source="openFDA FAERS + ClinicalTrials.gov v2",
-                    fetched_n=total, data={"condition": condition, "faers_events": faers_list[:limit], "observational_trials": trials[:limit]},
-                    citations=cites, fetched_at=_now())
+    trials = []
+    try:
+        ct = await _get_json(ct_url, tries=1); cites.append(ct_url)
+        trials = ct.get("studies", []) if isinstance(ct, dict) else []
+    except Exception:
+        trials = []
+    data = {
+        "condition": condition,
+        "top_events": top_counts,
+        "total_events": total_events,
+        "examples": {"faers_cases": examples[:min(50, len(examples))], "observational_trials": trials[:limit]},
+        "truncated": bool(counts and len(counts) > len(top_counts))
+    }
+    return Evidence(status=("OK" if (total_events or trials) else "NO_DATA"),
+                    source="openFDA FAERS (count-first) + ClinicalTrials.gov v2",
+                    fetched_n=(total_events + len(trials)),
+                    data=data, citations=cites, fetched_at=_now())
+
 
 @router.get("/clin/safety", response_model=Evidence)
 async def clin_safety(symbol: str, limit: int = Query(50, ge=1, le=500)) -> Evidence:
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
-    url = ("https://api.fda.gov/drug/event.json?"
-           f"search=patient.drug.openfda.generic_name:{urllib.parse.quote(sym_norm)}&limit={limit}")
+    base = "https://api.fda.gov/drug/event.json"
+    q = f"patient.drug.openfda.generic_name:{urllib.parse.quote(sym_norm)}"
+    count_url = f"{base}?search={q}&count=patient.reaction.reactionmeddrapt.exact"
+    cites: List[str] = [count_url]
+    counts = []
     try:
-        js = await _get_json(url, tries=1)
-        results = js.get("results", []) if isinstance(js, dict) else []
-        return Evidence(status=("OK" if results else "NO_DATA"), source="openFDA FAERS", fetched_n=len(results),
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "reports": results[:limit]},
-                        citations=[url], fetched_at=_now())
+        cj = await _get_json(count_url, tries=1)
+        counts = cj.get("results", []) if isinstance(cj, dict) else []
     except Exception:
-        return Evidence(status="NO_DATA", source="FAERS empty/unavailable", fetched_n=0,
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "reports": []},
-                        citations=[url], fetched_at=_now())
+        counts = []
+    total_events = sum([int(r.get("count") or 0) for r in counts]) if counts else 0
+    # Fetch a paged sample of raw reports, but cap tight to avoid huge payloads
+    list_url = f"{base}?search={q}&limit={min(100, limit)}"
+    reports = []
+    try:
+        lj = await _get_json(list_url, tries=1); cites.append(list_url)
+        reports = lj.get("results", []) if isinstance(lj, dict) else []
+    except Exception:
+        reports = []
+    data = {"symbol": symbol, "normalized_symbol": sym_norm,
+            "top_events": counts[:limit], "total_events": total_events,
+            "reports": reports[:limit], "truncated": bool(counts and len(counts) > min(limit, len(counts)))}
+    return Evidence(status=("OK" if (total_events or reports) else "NO_DATA"), source="openFDA FAERS",
+                    fetched_n=(total_events + len(reports)), data=data, citations=cites, fetched_at=_now())
+
 
 @router.get("/clin/pipeline", response_model=Evidence)
 async def clin_pipeline(symbol: str, limit: int = Query(50, ge=1, le=500)) -> Evidence:
