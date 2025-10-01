@@ -344,44 +344,62 @@ def status() -> Dict[str, Any]:
 
 # --------------------------- Literature layer --------------------------------
 
+
+
 async def _lit_search(query: str, limit: int = 25) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Europe PMC JSON REST; returns articles with pmid/pmcid/title/journal/year."""
-    base = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-    qs = f"query={urllib.parse.quote(query)}&format=json&pageSize={min(100, limit)}"
-    url = f"{base}?{qs}"
-    cites = [url]
+    """Europe PMC free-text search with PubMed E-utilities fallback.
+
+    Returns a list of dicts with: pmid, pmcid, title, journal, year, doi.
+    """
+    cites: List[str] = []
+    out: List[Dict[str, Any]] = []
+    # Europe PMC primary
+    base_epmc = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    url_epmc = f"{base_epmc}?query={urllib.parse.quote(query)}&format=json&pageSize={{min(100, limit)}}".format(min=min)
+    cites.append(url_epmc)
     try:
-        js = await _get_json(url, tries=1)
-        hits = (js.get("resultList", {}) or {}).get("result", []) if isinstance(js, dict) else []
-        out = [{"pmid": r.get("pmid") or r.get("id"),
-                "pmcid": r.get("pmcid"),
-                "title": r.get("title"),
-                "journal": r.get("journalTitle"),
-                "year": r.get("pubYear"),
-                "doi": r.get("doi")} for r in hits[:limit]]
-        return out, cites
+        js = await _get_json(url_epmc, tries=1)
+        if isinstance(js, dict):
+            hits = (js.get("resultList", {}) or {}).get("result", []) or []
+            out = [{"pmid": r.get("pmid") or r.get("id"),
+                    "pmcid": r.get("pmcid"),
+                    "title": r.get("title"),
+                    "journal": r.get("journalTitle"),
+                    "year": r.get("pubYear"),
+                    "doi": r.get("doi")} for r in hits[:limit]]
     except Exception:
-        return [], cites
+        pass
+    if out:
+        return out, cites
 
-def _angle_queries(symbol: str, condition: Optional[str], is_gpcr: bool) -> List[str]:
-    base_terms = [symbol]
-    if condition: base_terms.append(condition)
-    motifs = [
-        "allosteric", "biased agonism", "negative allosteric modulator", "PROTAC", "molecular glue",
-        "isoform", "splice variant", "synthetic lethality", "haploinsufficiency", "post-translational modification",
-        "cell-type specific", "microenvironment", "ligandability", "tractability"
-    ]
-    if is_gpcr:
-        motifs += ["ECL2", "\"extracellular loop 2\"", "orthosteric", "bitopic", "biased signaling"]
-    # build combined queries that EuropePMC can handle
-    qs = []
-    for m in motifs:
-        if condition:
-            qs.append(f'({symbol}) AND ("{condition}") AND ({m})')
-        else:
-            qs.append(f'({symbol}) AND ({m})')
-    return qs
-
+    # PubMed E-utilities fallback (ESearch + ESummary)
+    try:
+        base_ncbi = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+        url_esearch = f"{base_ncbi}/esearch.fcgi?db=pubmed&retmode=json&retmax={{min(100, limit)}}&term={{urllib.parse.quote(query)}}"
+        url_esearch = url_esearch.format(min=min, urllib=urllib)
+        ej = await _get_json(url_esearch, tries=1); cites.append(url_esearch)
+        ids = ((ej.get("esearchresult") or {}).get("idlist") or []) if isinstance(ej, dict) else []
+        if ids:
+            id_csv = ",".join(ids[:limit])
+            url_esum = f"{base_ncbi}/esummary.fcgi?db=pubmed&retmode=json&id={id_csv}"
+            sj = await _get_json(url_esum, tries=1); cites.append(url_esum)
+            recs = []
+            if isinstance(sj, dict):
+                uidlist = (sj.get("result") or {}).get("uids") or []
+                resmap = sj.get("result") or {}
+                for uid in uidlist[:limit]:
+                    r = resmap.get(uid) or {}
+                    recs.append({"pmid": uid,
+                                 "pmcid": None,
+                                 "title": r.get("title"),
+                                 "journal": (r.get("fulljournalname") or r.get("source")),
+                                 "year": r.get("pubdate", "")[:4],
+                                 "doi": (r.get("elocationid") if isinstance(r.get("elocationid"), str) and r.get("elocationid","").lower().startswith("doi") else None)})
+            if recs:
+                return recs, cites
+    except Exception:
+        pass
+    return out, cites
 @router.get("/lit/search", response_model=Evidence)
 async def lit_search(query: str, limit: int = Query(25, ge=1, le=100)) -> Evidence:
     hits, cites = await _lit_search(query, limit=limit)
@@ -633,9 +651,10 @@ async def genetics_mirna(gene: str, limit: int = Query(100, ge=1, le=500)) -> Ev
         return Evidence(status="NO_DATA", source=f"ENCORI unavailable: {e}", fetched_n=0,
                         data={"gene": gene, "interactions": []}, citations=[mirnet_url, encori_url], fetched_at=_now())
 
+
 @router.get("/genetics/sqtl", response_model=Evidence)
 async def genetics_sqtl(gene: str, limit: int = Query(50, ge=1, le=200), ensembl: Optional[str] = None) -> Evidence:
-    """EQTLCatalogue first; fallback to GTEx v2 s/eQTL."""
+    """s/eQTL evidence. Primary: eQTL Catalogue sQTL API; Fallback: GTEx v2 independent sQTL → eQTL."""
     from urllib.parse import urlencode, quote
     validate_symbol(gene, field_name="gene")
     ensg = ensembl; sym_cites: List[str] = []
@@ -645,33 +664,51 @@ async def genetics_sqtl(gene: str, limit: int = Query(50, ge=1, le=200), ensembl
         return Evidence(status="ERROR", source="EQTLCatalogue/GTEx", fetched_n=0,
                         data={"message": "Could not resolve Ensembl gene id", "input": gene},
                         citations=sym_cites, fetched_at=_now())
+
+    citations = list(sym_cites)
+    rows: List[Any] = []
+
+    # Primary: eQTL Catalogue sQTL
     cat_url = f"https://www.ebi.ac.uk/eqtl/api/stats/gene-sqtl?gene_id={quote(ensg)}"
-    citations = sym_cites + [cat_url]; rows = []
     try:
-        js = await _get_json(cat_url, tries=1)
-        if isinstance(js, list): rows = js
-        elif isinstance(js, dict): rows = js.get("results") or js.get("data") or []
-    except Exception: rows = []
+        js = await _get_json(cat_url, tries=1); citations.append(cat_url)
+        if isinstance(js, dict):
+            rows = js.get("results") or js.get("data") or js.get("sqtls") or []
+        elif isinstance(js, list):
+            rows = js
+    except Exception:
+        pass
+
+    # Fallback: GTEx v2 independent sQTL / eQTL
     if not rows:
+        # get gencodeId with version if possible
+        gencode_id = ensg
         try:
-            gencode_id = ensg
-            lookup_url = f"https://rest.ensembl.org/lookup/id/{quote(ensg)}?expand=0;content-type=application/json"
-            info = await _get_json(lookup_url, tries=1); citations.append(lookup_url)
+            url_lookup = f"https://rest.ensembl.org/lookup/id/{quote(ensg)}?expand=0;content-type=application/json"
+            info = await _get_json(url_lookup, tries=1); citations.append(url_lookup)
             if isinstance(info, dict) and info.get("version"):
                 gencode_id = f"{ensg}.{int(info.get('version'))}"
-        except Exception: gencode_id = ensg
+        except Exception:
+            gencode_id = ensg
         url_sqtl = f"https://gtexportal.org/api/v2/association/independentSqtl?{urlencode({'gencodeId': gencode_id})}"
         url_eqtl = f"https://gtexportal.org/api/v2/association/independentEqtl?{urlencode({'gencodeId': gencode_id})}"
         try:
             js = await _get_json(url_sqtl, tries=1); citations.append(url_sqtl)
-            rows = js.get("data") or js.get("sqtls") or js.get("associations") or [] if isinstance(js, dict) else (js if isinstance(js, list) else [])
+            if isinstance(js, dict):
+                rows = js.get("data") or js.get("sqtls") or []
+            elif isinstance(js, list):
+                rows = js
             if not rows:
                 js2 = await _get_json(url_eqtl, tries=1); citations.append(url_eqtl)
-                rows = js2.get("data") or js2.get("eqtls") or js2.get("associations") or [] if isinstance(js2, dict) else (js2 if isinstance(js2, list) else [])
+                if isinstance(js2, dict):
+                    rows = js2.get("data") or js2.get("eqtls") or []
+                elif isinstance(js2, list):
+                    rows = js2
         except Exception as e:
             return Evidence(status="ERROR", source=f"GTEx API error: {e}", fetched_n=0,
                             data={"gene": gene, "ensembl_id": ensg}, citations=citations, fetched_at=_now())
-    return Evidence(status=("OK" if rows else "NO_DATA"), source="EQTLCatalogue → GTEx fallback", fetched_n=len(rows),
+
+    return Evidence(status=("OK" if rows else "NO_DATA"), source="eQTL Catalogue → GTEx fallback", fetched_n=len(rows),
                     data={"gene": gene, "ensembl_id": ensg, "sqtl": rows[:limit]}, citations=citations, fetched_at=_now())
 
 @router.get("/genetics/epigenetics", response_model=Evidence)
@@ -1128,6 +1165,120 @@ async def mech_ligrec(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evi
 
 # ---------------------- B5: Tractability & Modality --------------------------
 
+
+
+@router.get("/mech/structure", response_model=Evidence)
+async def mech_structure(symbol: str, limit: int = Query(100, ge=1, le=1000)) -> Evidence:
+    """Structural motifs/domains: UniProt features (TM helices, topo domains, binding), PDBe structures, AlphaFold prediction.
+    If target appears to be a GPCR, tries to enrich with loop/topology heuristics.
+    """
+    validate_symbol(symbol, field_name="symbol"); sym = await _normalize_symbol(symbol)
+    cites: List[str] = []
+
+    async def _uniprot_accession() -> str:
+        url = ("https://rest.uniprot.org/uniprotkb/search"
+               f"?query=gene_exact:{urllib.parse.quote(sym)}+AND+organism_id:9606&size=1&format=json&fields=accession")
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            if isinstance(js, dict) and js.get("results"):
+                r = js["results"][0]
+                return r.get("primaryAccession") or r.get("accession") or ""
+        except Exception:
+            return ""
+        return ""
+
+    async def _uniprot_features(acc: str) -> Dict[str, Any]:
+        if not acc: return {}
+        url = ("https://rest.uniprot.org/uniprotkb/stream?compressed=false&format=json&"
+               f"query=accession:{urllib.parse.quote(acc)}&fields=ft_transmem,ft_topo_dom,ft_domain,ft_binding,cc_subcellular_location,protein_name")
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            return js if isinstance(js, dict) else {}
+        except Exception:
+            return {}
+
+    async def _pdbe_entries(acc: str) -> List[Dict[str, Any]]:
+        if not acc: return []
+        url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(acc)}"
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            if isinstance(js, dict):
+                return js.get(acc.lower(), []) or js.get(acc.upper(), []) or []
+        except Exception:
+            return []
+        return []
+
+    async def _alphafold(acc: str) -> Any:
+        if not acc: return None
+        url = f"https://alphafold.ebi.ac.uk/api/prediction/{urllib.parse.quote(acc)}"
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            return js
+        except Exception:
+            return None
+
+    acc = await _uniprot_accession()
+    up = await _uniprot_features(acc)
+    pdbe = await _pdbe_entries(acc)
+    af = await _alphafold(acc)
+    is_gpcr = await _is_gpcr(sym)
+
+    def _extract_features(up_json: Dict[str, Any]) -> Dict[str, Any]:
+        out = {"tm_helices": [], "topological_domains": [], "domains": [], "binding_sites": []}
+        try:
+            # UniProt stream returns {"results":[{...}]}
+            recs = up_json.get("results") or []
+            if recs:
+                r = recs[0]
+                features = r.get("features") or []
+                for f in features:
+                    ftype = (f.get("type") or "").upper()
+                    loc = f.get("location") or {}
+                    start = ((loc.get("start") or {}).get("value")) if isinstance(loc.get("start"), dict) else loc.get("start")
+                    end = ((loc.get("end") or {}).get("value")) if isinstance(loc.get("end"), dict) else loc.get("end")
+                    desc = f.get("description") or f.get("ftId") or f.get("evidences") or ""
+                    row = {"start": start, "end": end, "description": desc}
+                    if ftype == "TRANSMEM":
+                        out["tm_helices"].append(row)
+                    elif ftype == "TOPO_DOM":
+                        out["topological_domains"].append({"region": desc or "", **row})
+                    elif ftype == "DOMAIN":
+                        out["domains"].append(row)
+                    elif ftype == "BINDING":
+                        out["binding_sites"].append(row)
+        except Exception:
+            pass
+        return out
+
+    feats = _extract_features(up)
+
+    # Heuristic annotations for GPCRs (loop labels)
+    ecl_icls = {}
+    if is_gpcr and feats["topological_domains"]:
+        try:
+            for td in feats["topological_domains"]:
+                desc = (td.get("region") or td.get("description") or "").lower()
+                if "extracellular" in desc:
+                    # label as ECL (no exact numbering in UniProt; keep raw)
+                    td["loop_class"] = "ECL"
+                elif "cytoplasmic" in desc or "cytosolic" in desc:
+                    td["loop_class"] = "ICL"
+        except Exception:
+            pass
+
+    return Evidence(status=("OK" if (feats["tm_helices"] or feats["topological_domains"] or feats["domains"] or feats["binding_sites"] or pdbe or af) else "NO_DATA"),
+                    source="UniProt features + PDBe + AlphaFold",
+                    fetched_n=sum(len(v) for v in [feats["tm_helices"], feats["topological_domains"], feats["domains"], feats["binding_sites"]]) + len(pdbe or []),
+                    data={"symbol": symbol, "normalized_symbol": sym,
+                          "uniprot_accession": acc,
+                          "features": feats,
+                          "pdbe_entries": (pdbe or [])[:limit],
+                          "alphafold": af,
+                          "gpcr": is_gpcr},
+                    citations=cites, fetched_at=_now())
+
+
+
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
@@ -1220,10 +1371,12 @@ async def tract_ligandability_ab(symbol: str, limit: int = Query(50, ge=1, le=20
                     data={"symbol": symbol, "normalized_symbol": sym_norm, "antibody_targets": out},
                     citations=cites, fetched_at=_now())
 
+
 @router.get("/tract/ligandability-oligo", response_model=Evidence)
 async def tract_ligandability_oligo(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
     api_url = f"https://aptamer.ribocentre.org/api/?search={urllib.parse.quote(sym_norm)}"
+    citations: List[str] = [api_url]
     try:
         js = await _get_json(api_url, tries=1)
         items = js.get("results") or js.get("items") or js.get("data") or js.get("entries") or []
@@ -1236,13 +1389,31 @@ async def tract_ligandability_oligo(symbol: str, limit: int = Query(100, ge=1, l
                             "kd": it.get("Affinity (Kd)") or it.get("Kd") or it.get("affinity"),
                             "year": it.get("Discovery Year") or it.get("year"),
                             "ref": it.get("Article name") or it.get("reference")})
-        return Evidence(status=("OK" if out else "NO_DATA"), source="Ribocentre Aptamer API", fetched_n=len(out),
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": out[:limit]},
-                        citations=[api_url], fetched_at=_now())
+        if out:
+            return Evidence(status="OK", source="Ribocentre Aptamer API", fetched_n=len(out),
+                            data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": out[:limit]},
+                            citations=citations, fetched_at=_now())
     except Exception:
-        return Evidence(status="NO_DATA", source="Aptamer API empty/unavailable", fetched_n=0,
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": []},
-                        citations=[api_url], fetched_at=_now())
+        pass
+
+    # PubMed fallback: search for aptamer papers mentioning the symbol
+    q = f'("{sym_norm}"[Title/Abstract]) AND (aptamer[Title/Abstract])'
+    try:
+        base_ncbi = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+        url_esearch = f"{base_ncbi}/esearch.fcgi?db=pubmed&retmode=json&retmax={{limit}}&term={{urllib.parse.quote(q)}}"
+        url_esearch = url_esearch.format(limit=min(100, limit), urllib=urllib)
+        ej = await _get_json(url_esearch, tries=1); citations.append(url_esearch)
+        pmids = ((ej.get("esearchresult") or {}).get("idlist") or []) if isinstance(ej, dict) else []
+        # We don’t parse sequences from PubMed; provide references as evidence of oligo tractability
+        refs = [{"pmid": pmid} for pmid in pmids[:limit]]
+        return Evidence(status=("OK" if refs else "NO_DATA"), source="PubMed E-utilities (fallback)",
+                        fetched_n=len(refs),
+                        data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamer_refs": refs},
+                        citations=citations, fetched_at=_now())
+    except Exception:
+        return Evidence(status="NO_DATA", source="Aptamer API empty/unavailable; PubMed fallback failed", fetched_n=0,
+                        data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": []}, citations=citations, fetched_at=_now())
+
 
 @router.get("/tract/modality", response_model=Evidence)
 async def tract_modality(symbol: str,
@@ -1252,55 +1423,119 @@ async def tract_modality(symbol: str,
                          w_sm: Optional[float] = Query(None, ge=0.0, le=1.0),
                          w_ab: Optional[float] = Query(None, ge=0.0, le=1.0),
                          w_oligo: Optional[float] = Query(None, ge=0.0, le=1.0)) -> Evidence:
+    """Modality recommender with defensive error handling.
+    Signals: COMPARTMENTS (localization), ChEMBL (targets), PDBe (structures), UniProt (topology), IEDB (immunogenicity).
+    """
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
     comp_url = f"https://compartments.jensenlab.org/Service?gene_names={urllib.parse.quote(sym_norm)}&format=json"
     chembl_url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(sym_norm)}&format=json"
     pdbe_url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(sym_norm)}"
+
     async def _get_comp():
         try:
-            js = await _get_json(comp_url, tries=1); return js.get(sym_norm, []) if isinstance(js, dict) else []
-        except Exception: return []
+            js = await _get_json(comp_url, tries=1)
+            return js.get(sym_norm, []) if isinstance(js, dict) else []
+        except Exception:
+            return []
+
     async def _get_chembl():
         try:
-            js = await _get_json(chembl_url, tries=1); return js.get("targets", []) if isinstance(js, dict) else []
-        except Exception: return []
+            js = await _get_json(chembl_url, tries=1)
+            if isinstance(js, dict):
+                return (js.get("targets") or js.get("items") or js.get("data") or [])
+            return []
+        except Exception:
+            return []
+
     async def _get_pdbe():
         try:
             js = await _get_json(pdbe_url, tries=1)
-            entries: List[Any] = []
+            return js.get(sym_norm.lower(), []) if isinstance(js, dict) else []
+        except Exception:
+            return []
+
+    async def _get_uniprot_acc():
+        url = ("https://rest.uniprot.org/uniprotkb/search"
+               f"?query=gene_exact:{urllib.parse.quote(sym_norm)}+AND+organism_id:9606&size=1&format=json&fields=accession,cc_subcellular_location,ft_topo_dom,ft_transmem")
+        try:
+            js = await _get_json(url, tries=1)
             if isinstance(js, dict):
-                for _, vals in js.items():
-                    if isinstance(vals, list): entries.extend(vals)
-            return entries
-        except Exception: return []
-    compres, chemblres, pdberes = await asyncio.gather(_get_comp(), _get_chembl(), _get_pdbe())
-    loc_terms = " ".join([str(x) for x in compres]).lower()
-    is_extracellular = any(t in loc_terms for t in ["secreted", "extracellular", "extracellular space"])
-    is_membrane = any(t in loc_terms for t in ["plasma membrane", "cell membrane", "membrane"])
-    in_nucleus_or_cytosol = any(t in loc_terms for t in ["nucleus", "nuclear", "cytosol"])
-    has_chembl = len(chemblres) > 0; has_structure = len(pdberes) > 0
-    accession = await _uniprot_primary_accession(sym_norm)
-    extracellular_len = await _extracellular_len_from_uniprot(accession) if accession else 0
+                res = (js.get("results") or [])
+                if res:
+                    return res[0].get("primaryAccession") or res[0].get("accession") or ""
+        except Exception:
+            return ""
+        return ""
+
+    async def _get_uniprot_feats(accession: str):
+        if not accession:
+            return {}
+        url = ("https://rest.uniprot.org/uniprotkb/search"
+               f"?query=accession:{urllib.parse.quote(accession)}&format=json&fields=cc_subcellular_location,ft_topo_dom,ft_transmem,ft_binding")
+        try:
+            js = await _get_json(url, tries=1)
+            return js if isinstance(js, dict) else {}
+        except Exception:
+            return {}
+
+    compres, chemblres, pdberes, accession = await asyncio.gather(_get_comp(), _get_chembl(), _get_pdbe(), _get_uniprot_acc())
+    up_feats = await _get_uniprot_feats(accession)
+
+    # Derive features
+    is_extracellular = False; is_membrane = False; in_nucleus_or_cytosol = False
+    extracellular_len = 0
+    try:
+        # COMPARTMENTS labels
+        labels = [ (r.get("name") or r.get("term") or "").lower() for r in (compres or []) ]
+        is_extracellular = any("extracellular" in l or "secreted" in l for l in labels)
+        in_nucleus_or_cytosol = any(("nucleus" in l) or ("cytosol" in l) for l in labels)
+    except Exception:
+        pass
+    try:
+        # UniProt transmembrane features
+        feats = json.dumps(up_feats).lower()
+        is_membrane = ("transmembrane" in feats) or ("cell membrane" in feats)
+        # crude estimate of extracellular aa length from topological domains
+        # (when available in the JSON blob; otherwise 0)
+        if "topological" in feats and "extracellular" in feats:
+            extracellular_len = 100  # heuristic presence marker
+    except Exception:
+        pass
+
+    has_chembl = bool(chemblres)
+    has_structure = bool(pdberes)
     epi_n, tc_n = await _iedb_counts(sym_norm, limit=25)
-    immunogenicity_signal = min((epi_n + tc_n) / 50.0, 0.20)
-    def clamp(x: float) -> float: return max(0.0, min(1.0, round(x, 3)))
-    sm_score = prior_sm + (0.15 if has_chembl else 0.0) + (0.10 if has_structure else 0.0) - (0.20 if (is_extracellular and not is_membrane) else 0.0)
-    ab_score = prior_ab + (0.20 if (is_membrane or is_extracellular) else 0.0) + (0.10 if has_structure else 0.0) + (0.10 if extracellular_len >= 100 else 0.0) + immunogenicity_signal
-    oligo_score = prior_oligo + (0.10 if in_nucleus_or_cytosol else 0.0) + (0.10 if has_structure else 0.0) + (0.05 if has_chembl else 0.0)
+    immunogenicity_signal = 0.05 if (epi_n + tc_n) > 0 else 0.0
+
+    def clamp(x: float) -> float: return max(0.0, min(1.0, round(float(x), 3)))
+
+    # Scores (defensive)
+    try:
+        sm_score = prior_sm + (0.15 if has_chembl else 0.0) + (0.10 if has_structure else 0.0) - (0.20 if (is_extracellular and not is_membrane) else 0.0)
+        ab_score = prior_ab + (0.20 if (is_membrane or is_extracellular) else 0.0) + (0.10 if extracellular_len >= 100 else 0.0) + immunogenicity_signal
+        oligo_score = prior_oligo + (0.10 if in_nucleus_or_cytosol else 0.0) + (0.10 if not has_structure else 0.0) + (0.05 if has_chembl else 0.0)
+    except Exception:
+        # last-resort: only priors
+        sm_score, ab_score, oligo_score = prior_sm, prior_ab, prior_oligo
+
+    # Apply user overrides and clamp
     sm_score = clamp(w_sm) if (w_sm is not None) else clamp(sm_score)
     ab_score = clamp(w_ab) if (w_ab is not None) else clamp(ab_score)
     oligo_score = clamp(w_oligo) if (w_oligo is not None) else clamp(oligo_score)
-    recommendation = sorted([("small_molecule", sm_score), ("antibody", ab_score), ("oligo", oligo_score)], key=lambda kv: kv[1], reverse=True)
+
+    recommendation = sorted([("small_molecule", sm_score), ("antibody", ab_score), ("oligo", oligo_score)],
+                            key=lambda kv: kv[1], reverse=True)
+
     return Evidence(status="OK", source="Modality scorer (COMPARTMENTS + ChEMBL + PDBe + UniProt + IEDB)",
                     fetched_n=len(recommendation),
                     data={"symbol": symbol, "normalized_symbol": sym_norm, "recommendation": recommendation,
                           "rationale": {"priors": {"sm": prior_sm, "ab": prior_ab, "oligo": prior_oligo},
-                                        "is_extracellular": is_extracellular, "is_membrane": is_membrane, "nucleus_or_cytosol": in_nucleus_or_cytosol,
-                                        "chembl_targets_n": len(chemblres), "pdbe_structures_n": len(pdberes),
-                                        "uniprot_accession": accession, "extracellular_aa": extracellular_len,
+                                        "is_extracellular": is_extracellular, "membrane": is_membrane, "nucleus_or_cytosol": in_nucleus_or_cytosol,
+                                        "chembl_targets_n": len(chemblres or []), "pdbe_structures_n": len(pdberes or []),
+                                        "uniprot_accession": accession, "extracellular_aa_flag": extracellular_len,
                                         "iedb_epitopes_n": epi_n, "iedb_tcell_assays_n": tc_n,
                                         "user_overrides": {"w_sm": w_sm, "w_ab": w_ab, "w_oligo": w_oligo}},
-                          "snippets": {"compartments": compres[:25], "chembl_targets": chemblres[:10], "pdbe_entries": pdberes[:10]}},
+                          "snippets": {"compartments": (compres or [])[:10], "chembl_targets": (chemblres or [])[:10], "pdbe_entries": (pdberes or [])[:10]}},
                     citations=[comp_url, chembl_url, pdbe_url], fetched_at=_now())
 
 @router.get("/tract/immunogenicity", response_model=Evidence)
@@ -1472,66 +1707,102 @@ async def clin_pipeline(symbol: str, limit: int = Query(50, ge=1, le=500)) -> Ev
                     data={"symbol": symbol, "pipeline": drugs.data.get("interactions", [])[:limit]},
                     citations=drugs.citations, fetched_at=drugs.fetched_at)
 
+
 @router.get("/clin/biomarker-fit", response_model=Evidence)
 async def clin_biomarker_fit(symbol: str, condition: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=500)) -> Evidence:
-    """HPA + UniProt + ClinicalTrials.gov + WHO; FDA BQP best-effort (if dataset reachable)."""
+    """Biomarker fit: HPA + UniProt + Trials; Fallbacks via GTEx (assayability proxy) and OpenTargets biomarkers lookup."""
     validate_symbol(symbol, field_name="symbol"); sym = await _normalize_symbol(symbol)
     cites: List[str] = []; payload: Dict[str, Any] = {"symbol": symbol, "normalized_symbol": sym}
+
+    # HPA baseline/secretome
     hpa = ("https://www.proteinatlas.org/api/search_download.php"
-           f"?format=json&columns=gene,secretome,subcell_location,plasma_protein,rna_tissue,rna_gtex&search={urllib.parse.quote(sym)}")
+           f"?format=json&columns=gene,secretome,subcell_location,protein_class,uniprot,main_tissue,main_tissue_rna,main_tissue_protein,rna_tissue,rna_gtex&search={urllib.parse.quote(sym)}")
     hpa_rows: List[Dict[str, Any]] = []
     try:
-        hj = await _get_json(hpa, tries=1); cites.append(hpa); hpa_rows = hj if isinstance(hj, list) else []
-    except Exception: pass
+        hj = await _get_json(hpa, tries=1); cites.append(hpa)
+        hpa_rows = hj if isinstance(hj, list) else []
+    except Exception:
+        pass
     payload["hpa"] = hpa_rows[:limit]
+
+    # UniProt keywords (biomarker, secreted, extracellular)
     uni = ("https://rest.uniprot.org/uniprotkb/search"
-           f"?query=gene:{urllib.parse.quote(sym)}+AND+organism_id:9606&fields=accession,protein_name,keyword,cc_disease,cc_subcellular_location")
+           f"?query=gene:{urllib.parse.quote(sym)}+AND+organism_id:9606&format=json&fields=accession,keyword,cc_subcellular_location")
     unij = None
     try:
         unij = await _get_json(uni, tries=1); cites.append(uni)
-    except Exception: pass
-    payload["uniprot"] = unij
-    trials: List[Any] = []
-    ct1 = f"https://clinicaltrials.gov/api/v2/studies?query.term={urllib.parse.quote(sym)}&pageSize={min(100,limit)}"
-    try:
-        ctj = await _get_json(ct1, tries=1); cites.append(ct1)
-        trials = ctj.get("studies", []) if isinstance(ctj, dict) else []
-    except Exception: pass
-    if not trials:
-        who = f"https://trialsearch.who.int/api/Trial?query={urllib.parse.quote(sym)}"
+    except Exception:
+        unij = None
+    payload["uniprot"] = unij if isinstance(unij, dict) else None
+
+    # GTEx expression (assayability proxy) — best effort
+    # Needs Ensembl id
+    ensg, _, ensg_cites = await _ensembl_from_symbol_or_id(sym)
+    cites.extend(ensg_cites)
+    gtex = []
+    if ensg:
         try:
-            wt = await _get_json(who, tries=1); cites.append(who)
-            trials = (wt if isinstance(wt, list) else wt.get("Trials", [])) or []
-        except Exception: pass
-    payload["trials"] = trials[:limit]
-    # FDA Biomarker Qualification Program (best-effort; if dataset is not present, it will just be None)
-    bqp_url = "https://api.fda.gov/device/biomarker.json?search=" + urllib.parse.quote(sym)
-    bqp = None
+            url_gtex = ("https://gtexportal.org/api/v2/expression/medianGeneExpression?datasetId=GTEx_v8&"
+                        f"tissueSiteDetailId=all&gencodeId={urllib.parse.quote(ensg)}")
+            gj = await _get_json(url_gtex, tries=1); cites.append(url_gtex)
+            if isinstance(gj, dict):
+                gtex = gj.get("data") or gj.get("medianGeneExpression") or []
+        except Exception:
+            gtex = []
+    payload["gtex_median_tpm"] = (gtex or [])[:limit]
+
+    # Trials signals
+    trials = []
     try:
-        bj = await _get_json(bqp_url, tries=1); cites.append(bqp_url)
-        bqp = bj
-    except Exception: pass
-    payload["fda_bqp"] = bqp
-    detectable = any(r.get("plasma_protein") or r.get("secretome") for r in (hpa_rows or []))
+        ct = await clin_endpoints(condition or sym, limit=min(limit, 100))
+        trials = (ct.data or {}).get("trials") or [] if isinstance(ct, Evidence) else []
+        cites.extend(ct.citations if isinstance(ct, Evidence) else [])
+    except Exception:
+        trials = []
+    payload["trials"] = trials[:limit]
+
+    # OpenTargets biomarkers (lookup only, as a hint)
+    ot_search = f"https://www.targetvalidation.org/search?query={urllib.parse.quote(sym)}"
+    cites.append(ot_search)
+
+    # Scoring
+    detectable = False
+    try:
+        # If HPA reports protein class or secretome/extracellular, mark detectable
+        hpa_txt = json.dumps(hpa_rows).lower()
+        uniprot_txt = json.dumps(unij or {}).lower()
+        detectable = any(k in hpa_txt for k in ["secretome", "plasma", "blood"]) or ("extracellular" in uniprot_txt)
+        # Boost if GTEx has many tissues with non-zero TPM
+        if gtex:
+            nz = sum(1 for r in gtex if float(r.get("median", 0) or r.get("medianExpression", 0) or 0) > 0.5)
+            detectable = detectable or (nz >= 5)
+    except Exception:
+        pass
+
     uniprot_flags = False
     try:
         txt = json.dumps(unij) if unij else ""
         uniprot_flags = ("Biomarker" in txt) or ("Secreted" in txt) or ("Extracellular" in txt)
-    except Exception: pass
+    except Exception:
+        pass
+
     trials_signal = len(trials) > 0
     score = (0.4 if detectable else 0.0) + (0.3 if uniprot_flags else 0.0) + (0.3 if trials_signal else 0.0)
-    return Evidence(status=("OK" if (hpa_rows or unij or trials or bqp) else "NO_DATA"),
-                    source="HPA + UniProt + Trials (+ FDA BQP try)",
-                    fetched_n=(len(hpa_rows) + (1 if unij else 0) + len(trials) + (1 if bqp else 0)),
+    return Evidence(status=("OK" if (hpa_rows or unij or trials or gtex) else "NO_DATA"),
+                    source="HPA + UniProt + Trials (+ GTEx/OT hint)",
+                    fetched_n=(len(hpa_rows) + (1 if unij else 0) + len(trials) + (1 if gtex else 0)),
                     data={"symbol": symbol, "normalized_symbol": sym, "score": round(score, 2), **payload},
                     citations=cites, fetched_at=_now())
 
-# ------------------------ B7: Competition & IP (public) ----------------------
-
 @router.get("/comp/intensity", response_model=Evidence)
 async def comp_intensity(symbol: str, condition: Optional[str] = None, limit: int = Query(100, ge=1, le=1000)) -> Evidence:
+    """How crowded is the competitive/IP space?
+    Primary: PatentsView. Secondary: SureChEMBL. Fallback: Drugs+Trials counts and EuropePMC signals.
+    """
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
     cond = condition or ""; citations: List[str] = []; results: List[Any] = []
+
+    # PatentsView
     query = {"_and": [{"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}]}]}
     if cond:
         query["_and"].append({"_or": [{"patent_title": {"_text_any": cond}}, {"patent_abstract": {"_text_any": cond}}]})
@@ -1541,32 +1812,55 @@ async def comp_intensity(symbol: str, condition: Optional[str] = None, limit: in
         js = await _get_json(pat_url, tries=1); citations.append(pat_url)
         patents = js.get("patents", []) if isinstance(js, dict) else []
         for p in patents: results.append({"patent_id": p.get("patent_id")})
-    except Exception: pass
+    except Exception:
+        pass
+
+    # SureChEMBL (chemical patents)
     if not results:
         try:
-            sc = f"https://www.ebi.ac.uk/surechembl/api/search?query={urllib.parse.quote(sym_norm)}"
-            sj = await _get_json(sc, tries=1); citations.append(sc)
-            items = sj.get("results", []) if isinstance(sj, dict) else []
-            for it in items: results.append({"surechembl_id": it.get("id")})
-        except Exception: pass
+            sc_url = f"https://www.surechembl.org/api/search?query={urllib.parse.quote(sym_norm)}"
+            sj = await _get_json(sc_url, tries=1); citations.append(sc_url)
+            items = (sj.get("results") or sj.get("items") or sj.get("data") or []) if isinstance(sj, dict) else []
+            for it in items:
+                results.append({"surechembl_id": it.get("id")})
+        except Exception:
+            pass
+
+    # Fallback signals
     if not results:
+        # 1) Drugs + Trials as proxy for competitive intensity
         drug_res = await tract_drugs(symbol, limit=limit)
         trial_res = await clin_endpoints(condition or symbol, limit=limit)
         count = (drug_res.fetched_n if drug_res else 0) + (trial_res.fetched_n if trial_res else 0)
-        return Evidence(status=("OK" if count > 0 else "NO_DATA"), source="Drugs+Trials fallback", fetched_n=count,
+
+        # 2) EuropePMC "activity" papers
+        epmc_q = f'("{sym_norm}") AND (inhibitor OR antagonist OR agonist OR PROTAC OR degraders)'
+        ep_hits, ep_cites = await _lit_search(epmc_q, limit=min(100, limit))
+        citations.extend(ep_cites)
+        papers_n = len(ep_hits)
+
+        return Evidence(status=("OK" if (count > 0 or papers_n > 0) else "NO_DATA"),
+                        source="Drugs+Trials+EuropePMC fallback",
+                        fetched_n=(count + papers_n),
                         data={"symbol": symbol, "normalized_symbol": sym_norm, "condition": condition,
-                              "drugs_n": drug_res.fetched_n if drug_res else 0, "trials_n": trial_res.fetched_n if trial_res else 0},
-                        citations=(drug_res.citations if drug_res else []) + (trial_res.citations if trial_res else []),
+                              "drugs_n": (drug_res.fetched_n if drug_res else 0),
+                              "trials_n": (trial_res.fetched_n if trial_res else 0),
+                              "epmc_signals_n": papers_n},
+                        citations=(drug_res.citations if drug_res else []) + (trial_res.citations if trial_res else []) + citations,
                         fetched_at=_now())
+
     return Evidence(status="OK", source="PatentsView + SureChEMBL", fetched_n=len(results),
                     data={"symbol": symbol, "normalized_symbol": sym_norm, "condition": condition, "patents": results[:limit]},
                     citations=citations, fetched_at=_now())
 
+
 @router.get("/comp/freedom", response_model=Evidence)
 async def comp_freedom(symbol: str, limit: int = Query(100, ge=1, le=1000)) -> Evidence:
-    """PatentsView with assignee & CPC summaries; SureChEMBL as secondary."""
+    """Freedom-to-operate summary: PatentsView with assignee/CPC summaries; fallbacks via SureChEMBL and Google Patents link."""
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
-    citations: List[str] = []; results: List[Any] = []; patents = []
+    citations: List[str] = []; results: List[Dict[str, Any]] = []; patents: List[Dict[str, Any]] = []
+
+    # PatentsView primary
     query = {"_or": [{"patent_title": {"_text_any": sym_norm}}, {"patent_abstract": {"_text_any": sym_norm}}]}
     query_str = urllib.parse.quote(json.dumps(query))
     fields = urllib.parse.quote(json.dumps(["patent_id", "assignees.assignee_organization", "cpcs.cpc_subsection_id"]))
@@ -1574,32 +1868,48 @@ async def comp_freedom(symbol: str, limit: int = Query(100, ge=1, le=1000)) -> E
     try:
         js = await _get_json(url, tries=1); citations.append(url)
         patents = js.get("patents", []) if isinstance(js, dict) else []
-        for p in patents: results.append({"patent_id": p.get("patent_id")})
-    except Exception: patents = []
+        for p in patents:
+            results.append({"patent_id": p.get("patent_id")})
+    except Exception:
+        patents = []
+
+    # SureChEMBL secondary
     if not results:
         try:
-            sc = f"https://www.ebi.ac.uk/surechembl/api/search?query={urllib.parse.quote(sym_norm)}"
-            sj = await _get_json(sc, tries=1); citations.append(sc)
-            items = sj.get("results", []) if isinstance(sj, dict) else []
-            for it in items: results.append({"surechembl_id": it.get("id")})
-        except Exception: pass
-    assignee_counts: Dict[str, int] = {}; cpc_counts: Dict[str, int] = {}
-    if patents:
-        for p in patents:
-            for a in (p.get("assignees") or []):
-                org = (a.get("assignee_organization") or "").strip()
-                if org: assignee_counts[org] = assignee_counts.get(org, 0) + 1
-            for c in (p.get("cpcs") or []):
-                sec = c.get("cpc_subsection_id")
-                if sec: cpc_counts[sec] = cpc_counts.get(sec, 0) + 1
+            sc_url = f"https://www.surechembl.org/api/search?query={urllib.parse.quote(sym_norm)}"
+            sj = await _get_json(sc_url, tries=1); citations.append(sc_url)
+            items = (sj.get("results") or sj.get("items") or sj.get("data") or []) if isinstance(sj, dict) else []
+            for it in items:
+                pid = it.get("id")
+                if pid:
+                    results.append({"surechembl_id": pid})
+        except Exception:
+            pass
+
+    # Always include a Google Patents search link (manual follow-up)
+    gpat_url = f"https://patents.google.com/?q={urllib.parse.quote(sym_norm)}"
+    citations.append(gpat_url)
+
+    # Summaries from PatentsView data if available
+    assignee_counts: Dict[str,int] = {}
+    cpc_counts: Dict[str,int] = {}
+    for p in patents:
+        for a in (p.get("assignees") or []):
+            org = (a.get("assignee_organization") or "").strip()
+            if org:
+                assignee_counts[org] = assignee_counts.get(org, 0) + 1
+        for c in (p.get("cpcs") or []):
+            sec = c.get("cpc_subsection_id")
+            if sec:
+                cpc_counts[sec] = cpc_counts.get(sec, 0) + 1
+
     summary = {"assignees_top": sorted([[k, v] for k, v in assignee_counts.items()], key=lambda kv: kv[1], reverse=True)[:25],
                "cpc_top": sorted([[k, v] for k, v in cpc_counts.items()], key=lambda kv: kv[1], reverse=True)[:25],
                "counts": {"patentsview_n": len(patents), "total_ids_returned": len(results)}}
-    return Evidence(status=("OK" if results else "NO_DATA"), source="PatentsView (+ SureChEMBL)", fetched_n=len(results),
+
+    return Evidence(status=("OK" if results else "NO_DATA"), source="PatentsView (+ SureChEMBL; Google Patents link)", fetched_n=len(results),
                     data={"symbol": symbol, "normalized_symbol": sym_norm, "patents": results[:limit], "summary": summary},
                     citations=citations, fetched_at=_now())
-
-# --------------------------- Synthesis endpoints -----------------------------
 
 @router.get("/synth/targetcard", response_model=Evidence)
 async def synth_targetcard(symbol: str, condition: Optional[str] = None,
