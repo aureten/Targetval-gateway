@@ -2007,3 +2007,616 @@ async def synth_graph(symbol: str, condition: Optional[str] = None, limit: int =
                     fetched_n=len(nodes) + len(edges),
                     data={"symbol": sym, "condition": condition, "nodes": nodes[:500], "edges": edges[:1000]},
                     citations=list(dict.fromkeys(cites))[:200], fetched_at=_now())
+
+
+# =====================
+# Knowledge-Graph Synthesis (bucket-level, no scoring)
+# =====================
+from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional, Tuple
+import asyncio
+import networkx as nx
+from fastapi import Query
+
+# ---- Shared models for synthesis ----
+class KGHighlight(BaseModel):
+    pattern: str
+    nodes: Optional[List[str]] = None
+    detail: Optional[Dict[str, Any]] = None
+
+class BucketInsight(BaseModel):
+    claim: str
+    rationale: Optional[str] = None
+    orthogonal_angles: Optional[List[str]] = None
+    citations: Optional[List[str]] = None
+
+class BucketContradiction(BaseModel):
+    issue: str
+    hypotheses: Optional[List[str]] = None
+    tests: Optional[List[str]] = None
+
+class BucketSynthesis(BaseModel):
+    bucket: str
+    graph: Dict[str, Any]
+    insights: List[BucketInsight] = Field(default_factory=list)
+    contradictions: List[BucketContradiction] = Field(default_factory=list)
+    gaps: List[Dict[str, Any]] = Field(default_factory=list)
+    fetched_at: str
+
+# ---- Utility helpers ----
+def _kg():
+    return nx.MultiDiGraph()
+
+def _kg_add(g, ntype: str, nid: str, **attrs):
+    key = f"{ntype}:{nid}"
+    if not g.has_node(key):
+        g.add_node(key, type=ntype, id=nid, **attrs)
+    else:
+        # merge attrs (non-destructive)
+        g.nodes[key].update({k: v for k, v in attrs.items() if v is not None})
+    return key
+
+def _kg_edge(g, a, b, kind: str, **attrs):
+    g.add_edge(a, b, kind=kind, **attrs)
+
+def _kg_summary(g):
+    return {"nodes": g.number_of_nodes(), "edges": g.number_of_edges()}
+
+def _flatten_url_list(*chunks):
+    out = []
+    for ch in chunks:
+        if not ch:
+            continue
+        if isinstance(ch, list):
+            out.extend([c for c in ch if isinstance(c, str)])
+        elif isinstance(ch, str):
+            out.append(ch)
+    # de-dup
+    return list(dict.fromkeys(out))
+
+def _claim(text: str, rationale: str = None, angles: List[str] = None, cites: List[str] = None) -> BucketInsight:
+    return BucketInsight(claim=text, rationale=rationale, orthogonal_angles=angles or [], citations=cites or [])
+
+def _contradiction(issue: str, hypotheses: List[str] = None, tests: List[str] = None) -> BucketContradiction:
+    return BucketContradiction(issue=issue, hypotheses=hypotheses or [], tests=tests or [])
+
+# ---- Synthesis builders (per consolidated bucket) ----
+
+async def _synth_genetics(gene: str, condition: Optional[str] = None, tissue: Optional[str] = None):
+    """
+    Uses existing genetics endpoints in this router + new live endpoints (coloc, functional, cross)
+    to build a causal evidence graph and emit insights (no scoring).
+    """
+    g = _kg()
+    citations = []
+
+    # Always create the focal gene node
+    n_gene = _kg_add(g, "Gene", gene)
+
+    # Fan-out calls (silently ignore failures)
+    tasks = []
+    # Existing endpoints in this file
+    try:
+        tasks.append(genetics_sqtl(gene=gene))  # sQTL/eQTL-like
+    except Exception:
+        pass
+    try:
+        tasks.append(genetics_mr(gene=gene, efo=condition))
+    except Exception:
+        pass
+    try:
+        tasks.append(genetics_mendelian(gene=gene))
+    except Exception:
+        pass
+    try:
+        tasks.append(genetics_rare(gene=gene))
+    except Exception:
+        pass
+    try:
+        tasks.append(genetics_l2g(gene=gene, efo=condition, disease=condition))
+    except Exception:
+        pass
+    try:
+        tasks.append(genetics_epigenetics(gene=gene))
+    except Exception:
+        pass
+    # New ones we added (may or may not exist if running against the base without append)
+    try:
+        tasks.append(genetics_coloc(gene=gene, trait_filter=condition))
+    except Exception:
+        pass
+    try:
+        tasks.append(genetics_functional(gene=gene))
+    except Exception:
+        pass
+    try:
+        tasks.append(genetics_cross_species(gene=gene))
+    except Exception:
+        pass
+
+    results = []
+    for coro in tasks:
+        try:
+            res = await coro
+            results.append(res)
+            citations += (res.citations or [])
+        except Exception:
+            continue
+
+    # Heuristic graph projection from Evidence.data of each module
+    for res in results:
+        src = (res.source or "").lower()
+        data = res.data or {}
+        # Generic add of any credible set / coloc information
+        if "coloc" in src or "colocalis" in src or "colocalisations" in data:
+            items = data.get("colocalisations") or []
+            for it in items:
+                lv = ((it.get("left") or {}).get("lead_variant"))
+                rv = ((it.get("right") or {}).get("lead_variant"))
+                ltrait = ((it.get("left") or {}).get("trait"))
+                rtype = ((it.get("right") or {}).get("study_type"))
+                h4 = ((it.get("metrics") or {}).get("h4"))
+                if lv:
+                    n_lv = _kg_add(g, "Variant", lv)
+                    _kg_edge(g, n_lv, n_gene, "cis-QTL-coloc", trait=ltrait, h4=h4, study_type=rtype)
+        # sQTL / eQTL
+        if res.status == "OK" and ("sqtl" in src or "eqtl" in src or "genetics_sqtl" in (res.title or "").lower() if hasattr(res, "title") else False):
+            # best effort: look for list under "rows" or "results"
+            hits = data.get("rows") or data.get("results") or []
+            for h in hits:
+                var = h.get("variant") or h.get("snp") or h.get("rsid")
+                tis = h.get("tissue") or tissue
+                direction = h.get("direction") or h.get("beta_dir") or None
+                if var:
+                    n_var = _kg_add(g, "Variant", var)
+                    _kg_edge(g, n_var, n_gene, "cis-QTL", tissue=tis, direction=direction)
+        # MR
+        if "mr" in src or ("mr" in (res.title or "").lower() if hasattr(res, "title") else False):
+            assoc = data.get("associations") or data.get("results") or []
+            for a in assoc:
+                beta = a.get("beta") or a.get("estimate")
+                efo = a.get("efo") or condition
+                _kg_edge(g, n_gene, _kg_add(g, "Trait", efo or "condition"), "MR", beta=beta)
+        # Rare / Mendelian
+        if "mendelian" in src or "orphanet" in src or "clinvar" in src or "rare" in src:
+            conds = data.get("conditions") or data.get("diseases") or []
+            for c in conds:
+                _kg_edge(g, n_gene, _kg_add(g, "Trait", str(c)), "Mendelian/Rare")
+        # Functional noncoding (MPRA/CRISPR-QTL)
+        if "encode" in src or "mpra" in src or "functional" in src:
+            exps = data.get("experiments") or []
+            for e in exps[:5]:
+                acc = e.get("accession") or e.get("href")
+                if acc:
+                    _kg_edge(g, _kg_add(g, "Assay", acc), n_gene, "MPRA/Reporter")
+        # Cross-species IMPC
+        if "impc" in src:
+            phenos = data.get("phenotypes") or []
+            for p in phenos[:10]:
+                mp = p.get("mp_term_id") or p.get("mp_term_name")
+                if mp:
+                    _kg_edge(g, n_gene, _kg_add(g, "Phenotype", str(mp)), "MouseKO")
+
+    # --- Motif detection (lightweight, signature-based) ---
+    highlights: List[KGHighlight] = []
+    insights: List[BucketInsight] = []
+    contradictions: List[BucketContradiction] = []
+    gaps: List[Dict[str, Any]] = []
+
+    # Causal chain motif: cis-QTL + MR edge to condition
+    has_qtl = any(d.get("kind") in ("cis-QTL", "cis-QTL-coloc") for _,_,d in g.edges(data=True))
+    has_mr = any(d.get("kind") == "MR" for _,_,d in g.edges(data=True))
+    if has_qtl and has_mr:
+        insights.append(_claim(
+            f"Causal chain present: variants affecting {gene} expression and MR linking {gene} to the condition.",
+            rationale="cis-QTL + MR",
+            angles=["direction-of-effect", "tissue relevance"],
+            cites=_flatten_url_list(citations)
+        ))
+        highlights.append(KGHighlight(pattern="causal_chain", nodes=[f"Gene:{gene}"]))
+
+    # Protein-level confirmation: any MPRA + (implied) QTL
+    has_mpra = any(d.get("kind") == "MPRA/Reporter" for _,_,d in g.edges(data=True))
+    if has_qtl and has_mpra:
+        insights.append(_claim(
+            "Regulatory variant evidence converges (cis-QTL with functional reporter assays).",
+            rationale="MPRA/STARR-seq near credible variants",
+            angles=["regulatory mechanism"],
+            cites=_flatten_url_list(citations)
+        ))
+        highlights.append(KGHighlight(pattern="regulatory_validation"))
+
+    # Cross-species echo
+    has_impc = any(d.get("kind") == "MouseKO" for _,_,d in g.edges(data=True))
+    if has_impc:
+        insights.append(_claim(
+            "Mouse knockout phenotypes overlap disease-relevant axes.",
+            rationale="IMPC genotype–phenotype associations",
+            angles=["evolutionary conservation"],
+            cites=_flatten_url_list(citations)
+        ))
+
+    if not insights:
+        gaps.append({"missing": "No convergent motifs detected", "next_action": "Fetch more QTL/coloc/MR or disease-tissue functional assays"})
+
+    return BucketSynthesis(
+        bucket="genetics",
+        graph={**_kg_summary(g), "highlights": [h.dict() for h in highlights]},
+        insights=insights,
+        contradictions=contradictions,
+        gaps=gaps,
+        fetched_at=_now()
+    )
+
+
+async def _synth_association(gene: str, condition: Optional[str] = None):
+    g = _kg(); n_gene = _kg_add(g, "Gene", gene)
+    citations = []
+    res = []
+    # Use assoc endpoints as observational signal sources
+    for fn in (assoc_bulk_rna, assoc_bulk_prot, assoc_sc, assoc_geo_arrayexpress, assoc_depmap_achilles, assoc_tabula_hca):
+        try:
+            r = await fn(gene=gene)
+            res.append(r); citations += (r.citations or [])
+        except Exception:
+            continue
+    # Build a simple signal breadth
+    for r in res:
+        src = (r.source or "").lower(); data = r.data or {}
+        # generic: create Dataset node
+        ds = data.get("dataset") or r.source
+        n_ds = _kg_add(g, "Dataset", ds)
+        _kg_edge(g, n_gene, n_ds, "Association", source=r.source)
+    insights = []
+    if res:
+        insights.append(_claim("Multiple observational signals across cohorts/datasets.", rationale="bulk/scRNA/proteomics/perturbation", cites=_flatten_url_list(citations)))
+    else:
+        insights.append(_claim("No observational associations available from configured sources.", cites=_flatten_url_list(citations)))
+    return BucketSynthesis(bucket="association", graph=_kg_summary(g), insights=insights, contradictions=[], gaps=[], fetched_at=_now())
+
+
+async def _synth_biology(gene: str, tissue: Optional[str] = None):
+    g = _kg(); n_gene = _kg_add(g, "Gene", gene)
+    citations = []
+    res = []
+    for fn in (expression_baseline, expr_inducibility, expr_localization, mech_pathways, mech_ppi, mech_structure):
+        try:
+            # pathways/ppi likely require symbol param names; we pass what we have
+            r = await fn(symbol=gene) if "mech_" in fn.__name__ else await fn(gene=gene)
+            res.append(r); citations += (r.citations or [])
+        except Exception:
+            continue
+    for r in res:
+        src = (r.source or "").lower(); data = r.data or {}
+        if "pathway" in src:
+            for p in data.get("pathways", [])[:10]:
+                n_pw = _kg_add(g, "Pathway", str(p))
+                _kg_edge(g, n_gene, n_pw, "PathwayMember")
+        if "ppi" in src or "string" in src:
+            for p in data.get("partners", [])[:20]:
+                n_p = _kg_add(g, "Gene", str(p))
+                _kg_edge(g, n_gene, n_p, "PPI")
+        if "localization" in src:
+            loc = data.get("localization") or data.get("locations") or []
+            for L in (loc if isinstance(loc, list) else [loc]):
+                _kg_edge(g, n_gene, _kg_add(g, "Localization", str(L)), "Localization")
+        if "induc" in src or "baseline" in src:
+            ctxs = data.get("contexts") or []
+            for c in ctxs[:10]:
+                _kg_edge(g, n_gene, _kg_add(g, "Context", str(c)), "ExpressionContext")
+    insights = []
+    if any(k for _,_,k in g.edges(data=True) if k.get("kind") in ("PPI","PathwayMember")):
+        insights.append(_claim("Mechanistic context is populated (pathways and PPIs present).", angles=["complex membership","pathway convergence"], cites=_flatten_url_list(citations)))
+    if not insights:
+        insights.append(_claim("Biology context underpopulated; add spatial/proteogenomic sources."))
+    return BucketSynthesis(bucket="biology", graph=_kg_summary(g), insights=insights, contradictions=[], gaps=[], fetched_at=_now())
+
+
+async def _synth_tractability(gene: str, tissue: Optional[str] = None):
+    g = _kg(); n_gene = _kg_add(g, "Gene", gene); citations = []
+    res = []
+    for fn in (tract_drugs, tract_ligandability_sm, tract_ligandability_ab, tract_ligandability_oligo, tract_modality, tract_immunogenicity):
+        try:
+            r = await fn(symbol=gene) if "tract_" in fn.__name__ else await fn(gene=gene)
+            res.append(r); citations += (r.citations or [])
+        except Exception:
+            continue
+    for r in res:
+        data = r.data or {}
+        if "compounds" in data:
+            for c in data["compounds"][:20]:
+                _kg_edge(g, _kg_add(g, "Compound", str(c)), n_gene, "Binder")
+        if "pockets" in data:
+            for pk in data["pockets"][:10]:
+                _kg_edge(g, n_gene, _kg_add(g, "Pocket", str(pk)), "StructurePocket")
+        if "modality" in data:
+            _kg_edge(g, n_gene, _kg_add(g, "Modality", str(data["modality"])), "ModalityFit")
+    insights = []
+    if any(d.get("kind") == "Binder" for _,_,d in g.edges(data=True)):
+        insights.append(_claim("Known binders/chemotypes present; tractability supported.", angles=["SM/Ab/Oligo options"], cites=_flatten_url_list(citations)))
+    else:
+        insights.append(_claim("No known binders found; consider structure-based or modality alternatives."))
+    return BucketSynthesis(bucket="tractability", graph=_kg_summary(g), insights=insights, contradictions=[], gaps=[], fetched_at=_now())
+
+
+async def _synth_clinical(gene: str, condition: Optional[str] = None):
+    g = _kg(); n_gene = _kg_add(g, "Gene", gene); citations = []
+    res = []
+    for fn in (clin_endpoints, clin_pipeline, clin_rwe, clin_biomarker_fit):
+        try:
+            r = await fn(symbol=gene, condition=condition) if "endpoint" in fn.__name__ else await fn(gene=gene)
+            res.append(r); citations += (r.citations or [])
+        except Exception:
+            continue
+    for r in res:
+        data = r.data or {}
+        if "endpoints" in data:
+            for ep in data["endpoints"][:10]:
+                _kg_edge(g, n_gene, _kg_add(g, "Endpoint", str(ep)), "Endpoint")
+        if "biomarkers" in data:
+            for bm in data["biomarkers"][:10]:
+                _kg_edge(g, n_gene, _kg_add(g, "Biomarker", str(bm)), "Biomarker")
+        if "trials" in data:
+            _kg_edge(g, n_gene, _kg_add(g, "Trials", "present"), "Trials")
+    insights = []
+    if any(d.get("kind") == "Endpoint" for _,_,d in g.edges(data=True)):
+        insights.append(_claim("Clinical endpoints/biomarkers identified; translational hooks exist.", cites=_flatten_url_list(citations)))
+    else:
+        insights.append(_claim("No mature endpoints found; consider surrogate development."))
+    return BucketSynthesis(bucket="clinical_landscape", graph=_kg_summary(g), insights=insights, contradictions=[], gaps=[], fetched_at=_now())
+
+
+async def _synth_readiness(gene: str):
+    g = _kg(); n_gene = _kg_add(g, "Gene", gene); citations=[]
+    res = []
+    for fn in (clin_safety,):
+        try:
+            r = await fn(gene=gene); res.append(r); citations += (r.citations or [])
+        except Exception:
+            continue
+    for r in res:
+        data = r.data or {}
+        if "safety_signals" in data:
+            for s in data["safety_signals"][:10]:
+                _kg_edge(g, n_gene, _kg_add(g, "SafetySignal", str(s)), "Safety")
+    insights = []
+    if any(d.get("kind") == "Safety" for _,_,d in g.edges(data=True)):
+        insights.append(_claim("Safety liabilities present; design around critical tissues/PD windows.", angles=["local delivery","conditional activation"], cites=_flatten_url_list(citations)))
+    else:
+        insights.append(_claim("No major safety flags identified in configured sources."))
+    return BucketSynthesis(bucket="development_readiness", graph=_kg_summary(g), insights=insights, contradictions=[], gaps=[], fetched_at=_now())
+
+
+# ---- Public synthesis endpoints ----
+
+@router.get("/synth/bucket", response_model=BucketSynthesis)
+async def synth_bucket(
+    name: str = Query(..., description="One of: genetics, association, biology, tractability, clinical, readiness"),
+    gene: str = Query(...),
+    condition: Optional[str] = Query(None),
+    tissue: Optional[str] = Query(None)
+) -> BucketSynthesis:
+    name = name.lower().strip()
+    if name == "genetics":
+        return await _synth_genetics(gene=gene, condition=condition, tissue=tissue)
+    if name == "association":
+        return await _synth_association(gene=gene, condition=condition)
+    if name == "biology":
+        return await _synth_biology(gene=gene, tissue=tissue)
+    if name == "tractability":
+        return await _synth_tractability(gene=gene, tissue=tissue)
+    if name in ("clinical", "clinical_landscape"):
+        return await _synth_clinical(gene=gene, condition=condition)
+    if name in ("readiness", "development_readiness"):
+        return await _synth_readiness(gene=gene)
+    raise HTTPException(status_code=400, detail=f"Unknown bucket '{name}'")
+
+
+# ------------------------ NEW: Colocalisation (Open Targets v4) ---------------
+
+@router.get("/genetics/coloc", response_model=Evidence)
+async def genetics_coloc(
+    gene: str,
+    trait_filter: Optional[str] = Query(None, description="Filter by left/right trait substring"),
+    study_types: Optional[str] = Query("eqtl,pqtl,sqtl,tuqtl", description="Comma-separated StudyTypeEnum list"),
+    limit: int = Query(200, ge=1, le=500)
+) -> Evidence:
+    validate_symbol(gene, field_name="gene")
+    ensg, sym_norm, citations = await _ensembl_from_symbol_or_id(gene)
+    if not ensg:
+        return Evidence(status="ERROR", source="Ensembl resolver empty", fetched_n=0,
+                        data={"gene": gene}, citations=citations, fetched_at=_now())
+
+    stypes = [s.strip() for s in (study_types or "").split(",") if s.strip()]
+    gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
+    query = {
+        "query": """
+        query Coloc($ensg: String!, $studyTypes: [StudyTypeEnum!]) {
+          target(ensemblId: $ensg) {
+            credibleSets(page: {index: 0, size: 400}) {
+              rows {
+                study { id traitFromSource studyType }
+                leadVariant { id }
+                studyLocusId
+                colocalisation(studyTypes: $studyTypes, page: {index: 0, size: 400}) {
+                  rows {
+                    h4 h3 clpp rightStudyType colocalisationMethod
+                    otherStudyLocus {
+                      study { id studyType traitFromSource }
+                      leadVariant { id }
+                      qtlGeneId
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }""",
+        "variables": {"ensg": ensg, "studyTypes": stypes or None}
+    }
+    try:
+        body = await _post_json(gql_url, query, tries=1); citations.append(gql_url)
+    except Exception as e:
+        return Evidence(status="ERROR", source=f"OpenTargets GraphQL error: {e}", fetched_n=0,
+                        data={"gene": gene}, citations=citations, fetched_at=_now())
+
+    rows = (((body or {}).get("data") or {}).get("target") or {}).get("credibleSets", {}) or {}
+    rows = rows.get("rows") or []
+    out = []
+    ensg_root = ensg.split(".")[0]
+    tf = (trait_filter or "").lower().strip() if trait_filter else None
+
+    for r in rows:
+        lstudy = (r.get("study") or {})
+        if (lstudy.get("studyType") or "").lower() != "gwas":
+            continue
+        ltrait = (lstudy.get("traitFromSource") or "")
+        for c in (((r.get("colocalisation") or {}).get("rows")) or []):
+            other = (c.get("otherStudyLocus") or {})
+            qtl_gene = (other.get("qtlGeneId") or "").split(".")[0]
+            if qtl_gene != ensg_root:
+                continue  # enforce cis-QTL for the requested gene
+            rstudy = (other.get("study") or {})
+            rtrait = (rstudy.get("traitFromSource") or "")
+            if tf and (tf not in ltrait.lower()) and (tf not in rtrait.lower()):
+                continue
+            out.append({
+                "left": {
+                    "study_id": lstudy.get("id"),
+                    "trait": ltrait,
+                    "lead_variant": (r.get("leadVariant") or {}).get("id")
+                },
+                "right": {
+                    "study_id": rstudy.get("id"),
+                    "study_type": rstudy.get("studyType"),
+                    "trait": rtrait,
+                    "lead_variant": (other.get("leadVariant") or {}).get("id")
+                },
+                "metrics": {
+                    "h4": c.get("h4"),
+                    "h3": c.get("h3"),
+                    "clpp": c.get("clpp"),
+                    "method": c.get("colocalisationMethod")
+                }
+            })
+            if len(out) >= limit:
+                break
+        if len(out) >= limit:
+            break
+
+    status = "OK" if out else "NO_DATA"
+    return Evidence(status=status, source="OpenTargets Platform GraphQL (credibleSet.colocalisation)",
+                    fetched_n=len(out),
+                    data={"gene": gene, "ensembl_id": ensg, "colocalisations": out[:limit],
+                          "study_types": (stypes or ["eqtl", "pqtl", "sqtl", "tuqtl"]), "trait_filter": trait_filter},
+                    citations=citations, fetched_at=_now())
+
+
+# --------- Functional noncoding assays (ENCODE MPRA / STARR-seq) --------------
+
+@router.get("/genetics/functional", response_model=Evidence)
+async def genetics_functional(gene: str, limit: int = Query(50, ge=1, le=200)) -> Evidence:
+    validate_symbol(gene, field_name="gene")
+    from urllib.parse import quote
+    queries = [
+        f"https://www.encodeproject.org/search/?type=FunctionalCharacterizationExperiment&assay_title=MPRA&target.label={quote(gene)}&status=released&format=json",
+        f"https://www.encodeproject.org/search/?type=FunctionalCharacterizationExperiment&assay_title=MPRA&searchTerm={quote(gene)}&status=released&format=json",
+        f"https://www.encodeproject.org/search/?type=FunctionalCharacterizationExperiment&assay_title=STARR-seq&searchTerm={quote(gene)}&status=released&format=json",
+    ]
+    items, cites = [], []
+    for url in queries:
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            hits = js.get("@graph") or js.get("graph") or []
+            if isinstance(hits, list):
+                for r in hits:
+                    items.append({
+                        "accession": r.get("accession"),
+                        "assay_title": r.get("assay_title"),
+                        "lab": (r.get("lab") or {}).get("title"),
+                        "biosample": (r.get("biosample_ontology") or {}).get("term_name"),
+                        "target": (r.get("target") or {}).get("label"),
+                        "href": r.get("@id") or r.get("url"),
+                    })
+        except Exception:
+            continue
+    # de-duplicate by accession
+    seen, uniq = set(), []
+    for it in items:
+        acc = it.get("accession") or it.get("href")
+        if acc and acc not in seen:
+            seen.add(acc); uniq.append(it)
+    return Evidence(status=("OK" if uniq else "NO_DATA"), source="ENCODE search (MPRA/STARR-seq)",
+                    fetched_n=len(uniq),
+                    data={"gene": gene, "experiments": uniq[:limit]}, citations=cites, fetched_at=_now())
+
+
+# --------- Cross-species knockouts (Ensembl orthology + IMPC Solr) -------------
+
+@router.get("/genetics/cross", response_model=Evidence)
+async def genetics_cross_species(gene: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
+    validate_symbol(gene, field_name="gene")
+    from urllib.parse import quote
+    ensg, sym_norm, cites = await _ensembl_from_symbol_or_id(gene)
+    if not ensg:
+        return Evidence(status="ERROR", source="Ensembl resolver empty", fetched_n=0,
+                        data={"gene": gene}, citations=cites, fetched_at=_now())
+
+    # Orthologue in mouse
+    homo_url = f"https://rest.ensembl.org/homology/id/homo_sapiens/{quote(ensg)}?target_species=mus_musculus;type=orthologues;content-type=application/json"
+    try:
+        hj = await _get_json(homo_url, tries=1); cites.append(homo_url)
+        mouse_symbol = None
+        d = hj.get("data", []) if isinstance(hj, dict) else []
+        if d:
+            for h in (d[0].get("homologies") or []):
+                if (h.get("target") or {}).get("species") == "mus_musculus":
+                    mouse_symbol = (h.get("target") or {}).get("display_id") or (h.get("target") or {}).get("gene_symbol")
+                    break
+    except Exception:
+        mouse_symbol = None
+
+    if not mouse_symbol:
+        # Try symbol-based
+        homo2_url = f"https://rest.ensembl.org/homology/symbol/homo_sapiens/{quote(sym_norm)}?target_species=mus_musculus;type=orthologues;content-type=application/json"
+        try:
+            hj2 = await _get_json(homo2_url, tries=1); cites.append(homo2_url)
+            d2 = hj2.get("data", []) if isinstance(hj2, dict) else []
+            if d2:
+                for h in (d2[0].get("homologies") or []):
+                    if (h.get("target") or {}).get("species") == "mus_musculus":
+                        mouse_symbol = (h.get("target") or {}).get("display_id") or (h.get("target") or {}).get("gene_symbol")
+                        break
+        except Exception:
+            pass
+
+    if not mouse_symbol:
+        return Evidence(status="NO_DATA", source="Ensembl homology (mouse) empty", fetched_n=0,
+                        data={"gene": gene, "ensembl_id": ensg, "mouse_symbol": None, "phenotypes": []},
+                        citations=cites, fetched_at=_now())
+
+    # IMPC Solr genotype-phenotype
+    impc_url = f"https://www.ebi.ac.uk/mi/impc/solr/genotype-phenotype/select?q=marker_symbol:{quote(mouse_symbol)}&rows={min(500, limit)}&wt=json"
+    try:
+        impc = await _get_json(impc_url, tries=1); cites.append(impc_url)
+        docs = (((impc.get('response') or {}).get('docs')) or []) if isinstance(impc, dict) else []
+        simple = [{
+            "marker_symbol": d.get("marker_symbol"),
+            "mp_term_id": d.get("mp_term_id"),
+            "mp_term_name": d.get("mp_term_name"),
+            "zygosity": d.get("zygosity"),
+            "sex": d.get("sex"),
+            "p_value": d.get("p_value"),
+            "procedure": d.get("procedure_name"),
+            "phenotyping_center": d.get("phenotyping_center"),
+        } for d in docs][:limit]
+        return Evidence(status=("OK" if simple else "NO_DATA"),
+                        source="Ensembl Homology + IMPC Solr (genotype-phenotype)",
+                        fetched_n=len(simple),
+                        data={"gene": gene, "ensembl_id": ensg, "mouse_symbol": mouse_symbol,
+                              "phenotypes": simple},
+                        citations=cites, fetched_at=_now())
+    except Exception as e:
+        return Evidence(status="ERROR", source=f"IMPC Solr error: {e}", fetched_n=0,
+                        data={"gene": gene, "ensembl_id": ensg, "mouse_symbol": mouse_symbol},
+                        citations=cites, fetched_at=_now())
