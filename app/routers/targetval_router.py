@@ -2006,4 +2006,3 @@ async def synth_graph(symbol: str, condition: Optional[str] = None, limit: int =
     return Evidence(status=("OK" if nodes else "NO_DATA"), source="Synthesis graph",
                     fetched_n=len(nodes) + len(edges),
                     data={"symbol": sym, "condition": condition, "nodes": nodes[:500], "edges": edges[:1000]},
-                    citations=list(dict.fromkeys(cites))[:200], fetched_at=_now())
