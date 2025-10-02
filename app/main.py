@@ -29,10 +29,20 @@ except Exception:
 APP_VERSION = os.getenv("APP_VERSION", "2.0.0")
 app = FastAPI(title="TARGETVAL Gateway", version=APP_VERSION)
 
+# CORS: honor explicit origins; if "*" is used, disable credentials per Starlette rules
+_cors_origins_raw = os.getenv("CORS_ALLOW_ORIGINS", "*")
+_allow_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+_allow_origin_regex = os.getenv("CORS_ALLOW_ORIGIN_REGEX") or None
+_allow_credentials_env = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true"
+# Starlette forbids allow_credentials=True with wildcard origins
+if _allow_origins == ["*"] and _allow_credentials_env:
+    _allow_credentials_env = False
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o],
-    allow_credentials=True,
+    allow_origins=_allow_origins,
+    allow_origin_regex=_allow_origin_regex,
+    allow_credentials=_allow_credentials_env,
     allow_methods=["*"],
     allow_headers=["*"],
 )
