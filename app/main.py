@@ -1,355 +1,181 @@
+# main.py
 """
-TargetVal Gateway — ASGI entrypoint (Render-safe, version-proof)
+TargetVal Gateway — main application entrypoint (revised)
 
-Key features
-------------
-- Uses Uvicorn's ProxyHeadersMiddleware *safely* (works across uvicorn versions).
-- Tolerant `APIRouter` discovery:
-    - APP_ROUTER_MODULE (env) takes precedence
-    - tries: app.routers.targetval_router, app.routers.router, app.router,
-             routers.targetval_router, routers.router, targetval_router, router
-- CORS + GZip + request_id + timing headers (no extra deps).
-- Shared httpx.AsyncClient (connection pooling, timeouts) via app.state.http.
-- Health, routes listing, env fingerprint (redacted), root -> /docs redirect.
-- Defensive exception handling that always returns x-request-id.
+Goal: expose *all* capabilities defined in the router (buckets, modules, synth, etc.)
+without introducing any restrictions. This file only wires and configures the app.
 
-Env toggles
------------
-APP_NAME=TargetVal Gateway
-API_PREFIX=              (optional, e.g. "/api")
-APP_ROUTER_MODULE=       (e.g. "app.routers.targetval_router")
-LOG_LEVEL=INFO
-CORS_ALLOW_ORIGINS=*     (comma-separated; if "*" and credentials true -> coerced to false)
-CORS_ALLOW_CREDENTIALS=true
-FORWARDED_ALLOW_IPS=*    (comma-separated IPs or "*")
-HTTPX_TIMEOUT=20
-HTTPX_MAX_KEEPALIVE=20
-HTTPX_MAX_CONNECTIONS=100
-RENDER_GIT_COMMIT=...    (Render sets this; used as version)
+Key properties:
+- Sets the router's env-based knobs BEFORE importing the router module (so defaults apply).
+- Adds permissive CORS by default (ALLOWED_ORIGINS="*"; override via env for prod).
+- Includes helpful meta endpoints: /, /healthz, /livez, /readyz, /_debug/import, /meta/routes.
+- Does NOT impose any request-size or rate limits that could block router functions.
 """
 
 from __future__ import annotations
 
 import importlib
-import inspect
 import logging
 import os
-import sys
-import time
-import uuid
-from contextlib import asynccontextmanager
-from typing import Any, Dict, Iterable, List, Optional
+from typing import List, Tuple
 
-from fastapi import APIRouter, FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
-# ------------------------------------------------------------------------------
-# Logging
-# ------------------------------------------------------------------------------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
-    stream=sys.stdout,
-)
-log = logging.getLogger("targetval.main")
+APP_NAME = os.getenv("APP_NAME", "targetval-gateway")
+APP_VERSION = os.getenv("APP_VERSION", "best-of")
 
-# ------------------------------------------------------------------------------
-# Config helpers
-# ------------------------------------------------------------------------------
-APP_NAME = os.getenv("APP_NAME", "TargetVal Gateway")
-API_PREFIX = os.getenv("API_PREFIX", "").strip()
-FORWARDED_ALLOW_IPS = os.getenv("FORWARDED_ALLOW_IPS", "*").strip()
 
-def _csv(value: str) -> List[str]:
-    return [p.strip() for p in value.split(",") if p.strip()]
-
-def _parse_trusted(value: str) -> Any:
+def _configure_env() -> None:
     """
-    "*" -> "*" else -> List[str]
-    (Both shapes are accepted by newer uvicorn; older builds use 'trusted_downstream')
+    Configure environment defaults the router depends on.
+    These MUST be set before importing the router module, because the router reads them at import time.
     """
-    v = value.strip()
-    if v == "*":
-        return "*"
-    items = _csv(v)
-    return items if items else "*"
+    defaults = {
+        # Router runtime knobs (see router code)
+        "CACHE_TTL_SECONDS": "86400",  # 24h cache
+        "OUTBOUND_TIMEOUT_S": "12.0",
+        "REQUEST_BUDGET_S": "25.0",
+        "OUTBOUND_TRIES": "2",
+        "BACKOFF_BASE_S": "0.6",
+        "MAX_CONCURRENT_REQUESTS": "8",
+        "OUTBOUND_USER_AGENT": "TargetVal/2.0 (+https://github.com/aureten/Targetval-gateway)",
+        # App-level knobs
+        "ALLOWED_ORIGINS": "*",  # comma-separated list or "*" (recommended to scope in prod)
+        # Optional: set TRUSTED_HOSTS to a comma-separated list for TrustedHostMiddleware (empty => disabled)
+        "TRUSTED_HOSTS": "",
+    }
+    for k, v in defaults.items():
+        os.environ.setdefault(k, v)
 
-def _safe_bool(env: str, default: bool) -> bool:
-    v = os.getenv(env)
-    if v is None:
-        return default
-    return v.lower() in ("1", "true", "yes", "y", "on")
 
-def _version() -> str:
-    return os.getenv("APP_VERSION") or os.getenv("RENDER_GIT_COMMIT") or "dev"
-
-# ------------------------------------------------------------------------------
-# Lifespan (shared httpx client)
-# ------------------------------------------------------------------------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.http = None
-    client = None
-    try:
-        import httpx  # optional dependency
-        timeout = float(os.getenv("HTTPX_TIMEOUT", "20"))
-        limits = httpx.Limits(
-            max_keepalive_connections=int(os.getenv("HTTPX_MAX_KEEPALIVE", "20")),
-            max_connections=int(os.getenv("HTTPX_MAX_CONNECTIONS", "100")),
-        )
-        client = httpx.AsyncClient(
-            timeout=timeout,
-            limits=limits,
-            headers={"User-Agent": "targetval-gateway"},
-            http2=True,
-        )
-        app.state.http = client
-        log.info("httpx.AsyncClient ready (timeout=%s, keepalive=%s, max=%s).",
-                 timeout, limits.max_keepalive_connections, limits.max_connections)
-    except Exception as e:
-        log.info("httpx not available or failed to init (%r). Continuing without pooled client.", e)
-
-    try:
-        yield
-    finally:
-        if client is not None:
-            try:
-                await client.aclose()
-                log.info("httpx client closed.")
-            except Exception:
-                log.exception("Error closing httpx client")
-
-# ------------------------------------------------------------------------------
-# Middleware wiring
-# ------------------------------------------------------------------------------
-def _add_proxy_headers_middleware(app: FastAPI) -> None:
+def _import_router() -> Tuple[str, APIRouter]:
     """
-    Enable proxy header handling behind Render's proxy/load balancer,
-    but do so *version‑agnostically* across uvicorn builds.
+    Import the APIRouter from common locations.
+    Returns (qualified_module_name, router).
+    Raises RuntimeError if not found.
     """
-    try:
-        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-    except Exception as e:
-        log.warning("Uvicorn ProxyHeadersMiddleware not importable (%r). Skipping.", e)
-        return
-
-    try:
-        params = inspect.signature(ProxyHeadersMiddleware.__init__).parameters
-        value = _parse_trusted(FORWARDED_ALLOW_IPS)
-
-        if "trusted_hosts" in params:
-            app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=value)
-            log.info("ProxyHeadersMiddleware enabled (trusted_hosts=%s).", value)
-        elif "trusted_downstream" in params:
-            app.add_mmiddleware(ProxyHeadersMiddleware, trusted_downstream=value)  # type: ignore[attr-defined]
-            # NOTE: Some linters complain about add_mmiddleware; fix typo just in case:
-        else:
-            # As a safety, try without kwargs (works on some versions)
-            app.add_middleware(ProxyHeadersMiddleware)
-            log.info("ProxyHeadersMiddleware enabled (default args).")
-    except AttributeError:
-        # Fix a rare typo path in case the previous branch mis-typed add_mmiddleware
+    candidates: List[Tuple[str, str]] = [
+        ("app.routers.targetval_router", "router"),
+        ("app.routers.router", "router"),
+        ("routers.targetval_router", "router"),
+        ("routers.router", "router"),
+        ("targetval_router", "router"),
+        ("router", "router"),
+    ]
+    errors: List[str] = []
+    for mod_name, attr in candidates:
         try:
-            app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=value)  # fallback
-            log.info("ProxyHeadersMiddleware enabled via fallback (trusted_hosts=%s).", value)
-        except Exception as e:
-            log.warning("ProxyHeadersMiddleware setup failed (fallback): %r", e)
-    except Exception as e:
-        log.warning("ProxyHeadersMiddleware setup failed: %r", e)
-
-def _configure_cors(app: FastAPI) -> None:
-    raw = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
-    origins = ["*"] if raw == "*" else _csv(raw)
-    allow_credentials = _safe_bool("CORS_ALLOW_CREDENTIALS", True)
-
-    # Starlette disallows allow_credentials=True with wildcard origins.
-    if origins == ["*"] and allow_credentials:
-        log.warning("CORS: '*' with credentials is not allowed; forcing allow_credentials=False.")
-        allow_credentials = False
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=allow_credentials,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["x-request-id", "x-process-time-ms"],
-    )
-    app.add_middleware(GZipMiddleware, minimum_size=1024)
-
-# ------------------------------------------------------------------------------
-# Router discovery
-# ------------------------------------------------------------------------------
-def _discover_router() -> Optional[APIRouter]:
-    """
-    Returns an APIRouter. Prefers APP_ROUTER_MODULE if provided.
-    Also searches for any APIRouter in the module if `router` attr is missing.
-    """
-    candidates: List[str] = []
-    env_mod = os.getenv("APP_ROUTER_MODULE")
-    if env_mod:
-        candidates.append(env_mod)
-
-    candidates.extend([
-        "app.routers.targetval_router",
-        "app.routers.router",
-        "app.router",
-        "routers.targetval_router",
-        "routers.router",
-        "targetval_router",
-        "router",
-    ])
-
-    last_err: Optional[BaseException] = None
-    for mod in candidates:
-        try:
-            module = importlib.import_module(mod)
-            # Try canonical name first
-            r = getattr(module, "router", None)
+            module = importlib.import_module(mod_name)
+            r = getattr(module, attr, None)
             if isinstance(r, APIRouter):
-                log.info("Using APIRouter from %s: 'router'", mod)
-                return r
-
-            # Fallback: pick the first APIRouter in the module namespace
-            for name, obj in vars(module).items():
-                if isinstance(obj, APIRouter):
-                    log.info("Using APIRouter from %s: '%s'", mod, name)
-                    return obj
-            log.debug("Module %s imported but no APIRouter found.", mod)
+                return mod_name, r
+            errors.append(f"{mod_name}.{attr}: attribute not APIRouter (got {type(r).__name__})")
         except Exception as e:
-            last_err = e
-            log.debug("Router import failed from %s: %r", mod, e)
+            errors.append(f"{mod_name}.{attr}: {e}")
+    raise RuntimeError("Unable to import router. Tried:\n" + "\n".join(errors))
 
-    if last_err:
-        log.error("No APIRouter found. Last import error: %r", last_err)
-    else:
-        log.error("No APIRouter found in any of: %s", ", ".join(candidates))
-    return None
 
-# ------------------------------------------------------------------------------
-# App factory
-# ------------------------------------------------------------------------------
-START_TIME = time.time()
+# --------------- App factory ---------------
 
 def create_app() -> FastAPI:
+    _configure_env()
+
     app = FastAPI(
-        title=APP_NAME,
-        version=_version(),
-        openapi_url="/openapi.json",
+        title="TargetVal Gateway",
+        version=APP_VERSION,
+        description="Public-only gateway that exposes genetics, association, biology, tractability, clinical, and readiness modules via APIRouter.",
+        default_response_class=JSONResponse,
         docs_url="/docs",
         redoc_url="/redoc",
-        lifespan=lifespan,
+        openapi_url="/openapi.json",
     )
 
-    # Middlewares
-    _configure_cors(app)
-    _add_proxy_headers_middleware(app)
+    # Middleware — permissive & safe; tune via env for production
+    allow_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
+    allowed = [o.strip() for o in allow_origins_env.split(",") if o.strip()] or ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+        max_age=86400,
+    )
+    app.add_middleware(GZipMiddleware, minimum_size=500)
+    # Respect X-Forwarded-* headers when running behind a proxy / load balancer
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
-    # Correlation ID + timing middleware (always returns x-request-id)
-    @app.middleware("http")
-    async def add_request_id_and_timing(request: Request, call_next):
-        rid = request.headers.get("x-request-id") or str(uuid.uuid4())
-        request.state.request_id = rid
-        started = time.perf_counter()
-        try:
-            response = await call_next(request)
-        except Exception as e:
-            log.exception("Unhandled error (rid=%s): %r", rid, e)
-            # Always return JSON with the request id
-            return JSONResponse(
-                status_code=500,
-                content={"detail": "Internal Server Error", "request_id": rid},
-            )
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        response.headers["x-request-id"] = rid
-        response.headers["x-process-time-ms"] = f"{elapsed_ms:.2f}"
-        return response
+    trusted_hosts = [h.strip() for h in os.getenv("TRUSTED_HOSTS", "").split(",") if h.strip()]
+    if trusted_hosts:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
 
-    # Exception normalization
-    @app.exception_handler(StarletteHTTPException)
-    async def http_exc_handler(request: Request, exc: StarletteHTTPException):
-        rid = getattr(request.state, "request_id", "")
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail, "request_id": rid},
-        )
-
-    @app.exception_handler(RequestValidationError)
-    async def validation_exc_handler(request: Request, exc: RequestValidationError):
-        rid = getattr(request.state, "request_id", "")
-        return JSONResponse(
-            status_code=422,
-            content={"detail": exc.errors(), "request_id": rid},
-        )
-
-    # Meta routes
-    @app.get("/", include_in_schema=False)
+    # Meta endpoints (do not collide with router's internal /health + /status)
+    @app.get("/", tags=["meta"])
     async def root():
-        return RedirectResponse(url="/docs", status_code=307)
-
-    @app.get("/health", tags=["meta"])
-    async def health():
-        # Basic availability & fingerprint; add more checks if needed.
-        uptime = time.time() - START_TIME
-        has_http = bool(getattr(app.state, "http", None))
         return {
-            "status": "ok",
-            "app": APP_NAME,
-            "version": _version(),
-            "uptime_s": round(uptime, 2),
-            "pooled_http": has_http,
-            "api_prefix": API_PREFIX or "",
+            "service": APP_NAME,
+            "version": APP_VERSION,
+            "docs": "/docs",
+            "redoc": "/redoc",
+            "openapi": "/openapi.json",
+            "meta": ["/healthz", "/livez", "/readyz", "/_debug/import", "/meta/routes"],
         }
 
-    @app.get("/routes", tags=["meta"])
-    async def routes():
-        data: List[Dict[str, Any]] = []
+    @app.get("/healthz", tags=["meta"])
+    async def healthz():
+        return {"ok": True}
+
+    @app.get("/livez", tags=["meta"])
+    async def livez():
+        return {"live": True}
+
+    @app.get("/readyz", tags=["meta"])
+    async def readyz():
+        # If the router import succeeds, we consider the app "ready".
+        return {"ready": True}
+
+    # Try to import & include the router
+    mod_name, router = _import_router()
+    app.include_router(router)
+
+    @app.get("/_debug/import", tags=["meta"])
+    async def debug_import():
+        return {"imported_router": mod_name, "routes_added": True}
+
+    @app.get("/meta/routes", tags=["meta"])
+    async def meta_routes():
+        out = []
         for r in app.router.routes:
-            path = getattr(r, "path", getattr(r, "path_format", ""))
-            methods = sorted(list(getattr(r, "methods", []) or []))
-            name = getattr(r, "name", "")
-            data.append({"path": path, "methods": methods, "name": name})
-        return {"routes": data, "count": len(data)}
-
-    @app.get("/env", tags=["meta"])
-    async def env_fingerprint():
-        # Redacted environment snapshot useful for debugging in Render
-        safe = {
-            "app_name": APP_NAME,
-            "version": _version(),
-            "api_prefix": API_PREFIX or "",
-            "log_level": LOG_LEVEL,
-            "cors_allow_origins": os.getenv("CORS_ALLOW_ORIGINS", "*"),
-            "cors_allow_credentials": _safe_bool("CORS_ALLOW_CREDENTIALS", True),
-            "forwarded_allow_ips": FORWARDED_ALLOW_IPS,
+            if isinstance(r, Route):
+                methods = sorted(list(getattr(r, "methods", set()) or []))
+                out.append({
+                    "path": r.path,
+                    "name": r.name,
+                    "methods": methods,
+                })
+        # Sort for stability
+        out.sort(key=lambda x: (x["path"], ",".join(x["methods"])))
+        return {
+            "count": len(out),
+            "routes": out,
         }
-        return safe
-
-    # Business router
-    r = _discover_router()
-    if r is not None:
-        app.include_router(r, prefix=API_PREFIX)
-        log.info("Router mounted with prefix '%s'.", API_PREFIX)
-    else:
-        log.error("No APIRouter mounted; service will expose only meta endpoints.")
 
     return app
 
-# ASGI application
+
 app = create_app()
 
 if __name__ == "__main__":
-    try:
-        import uvicorn
-    except Exception:
-        print("uvicorn is not installed. For local dev: pip install 'uvicorn[standard]'")
-        sys.exit(1)
+    # Optional: run with uvicorn when executed directly
+    import uvicorn
 
+    host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
-    # You can also pass --proxy-headers/--forwarded-allow-ips via CLI if you prefer.
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("main:app", host=host, port=port, reload=bool(os.getenv("RELOAD", "")))
