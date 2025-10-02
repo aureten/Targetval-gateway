@@ -1,10 +1,42 @@
-{
-  "openapi": "3.1.0",
+
+  "openapi": "3.0.1",
   "info": {
-    "title": "TargetVal Gateway (Public)",
-    "version": "1.6.0",
-    "description": "Public OpenAPI aligned to the v1.6.0 router/main refresh.\nGenetics B1 now use: GWAS Catalog (l2g), OMIM primary with Orphanet/ClinGen links (mendelian), MR-Base / IEU OpenGWAS (mr), eQTL Catalogue v2 (sqtl), Roadmap/BLUEPRINT (epigenetics). Assoc & perturbation: GEO/ArrayExpress, CPTAC/ProteomeXchange, Tabula Sapiens/HCA, DepMap/Achilles. Mechanistic: Reactome + KEGG + WikiPathways; LigRec via OmniPath. Tractability: ChEMBL/DrugBank/Inxight, SAbDab/Thera-SAbDab for antibodies. Clinical: CT.gov v2 + WHO ICTRP + EU CTR; adds /clin/biomarker-fit. Competition/IP via Lens.org search.\n\n[2025-09-28] Hybrid mode enabled across GETs (+mode=auto|live|snapshot). Aggregate body now accepts {species, cutoff, extra, mode}. Evidence allows optional {provenance, diagnostics}."
+    "title": "TargetVal Gateway API",
+    "version": "2.0.0",
+    "description": "Public OpenAPI aligned to the v2.0 router/main refresh (live-first).\nEndpoints reflect the six core buckets (B1–B6), Synthesis, Literature, and Utility.\nEvidence envelopes remain backward compatible and include citations to all upstream calls."
   },
+  "tags": [
+    {
+      "name": "Utility"
+    },
+    {
+      "name": "Synthesis"
+    },
+    {
+      "name": "Literature"
+    },
+    {
+      "name": "B1 Genetics & Causality"
+    },
+    {
+      "name": "B2 Assoc & Perturbation"
+    },
+    {
+      "name": "B3 Expression & Localization"
+    },
+    {
+      "name": "B4 Mechanistic Wiring"
+    },
+    {
+      "name": "B5 Tractability & Modality"
+    },
+    {
+      "name": "B6 Clinical & Safety"
+    },
+    {
+      "name": "B7 Competition & IP"
+    }
+  ],
   "servers": [
     {
       "url": "https://targetval-gateway.onrender.com"
@@ -44,18 +76,11 @@
           },
           "error": {
             "type": "string"
-          },
-          "provenance": {
-            "$ref": "#/components/schemas/Provenance"
-          },
-          "diagnostics": {
-            "$ref": "#/components/schemas/Diagnostics"
           }
         },
         "required": [
           "status"
-        ],
-        "additionalProperties": true
+        ]
       },
       "AggregateEnvelope": {
         "type": "object",
@@ -92,6 +117,14 @@
               },
               "cutoff": {
                 "type": "number"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "live",
+                  "snapshot"
+                ]
               }
             }
           },
@@ -126,6 +159,9 @@
                 },
                 "fetched_at": {
                   "type": "number"
+                },
+                "error": {
+                  "type": "string"
                 }
               },
               "required": [
@@ -137,60 +173,23 @@
         "required": [
           "results"
         ]
-      },
-      "Provenance": {
-        "type": "object",
-        "properties": {
-          "mode": {
-            "type": "string",
-            "enum": [
-              "auto",
-              "live",
-              "snapshot"
-            ]
-          },
-          "source": {
-            "type": "string"
-          },
-          "source_version": {
-            "type": "string"
-          },
-          "snapshot_id": {
-            "type": "string"
-          },
-          "retrieved_at": {
-            "type": "string"
-          },
-          "router_reason": {
-            "type": "string"
-          }
-        }
-      },
-      "Diagnostics": {
-        "type": "object",
-        "properties": {
-          "latency_ms": {
-            "type": "integer"
-          },
-          "cache": {
-            "type": "string"
-          },
-          "fallbacks": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": true
-            }
-          }
-        }
+      }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
       }
     }
   },
   "paths": {
-    "/": {
+    "/healthz": {
       "get": {
-        "operationId": "root",
-        "summary": "Service root",
+        "summary": "Health check",
+        "tags": [
+          "Utility"
+        ],
         "responses": {
           "200": {
             "description": "OK"
@@ -198,57 +197,54 @@
         }
       }
     },
-    "/healthz": {
+    "/": {
       "get": {
-        "operationId": "healthz",
-        "summary": "Service health",
+        "summary": "Gateway info",
+        "tags": [
+          "Utility"
+        ],
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    },
-                    "modules": {
-                      "type": "integer"
-                    }
-                  }
-                }
-              }
-            }
+            "description": "OK"
           }
         }
       }
     },
     "/modules": {
       "get": {
-        "operationId": "list_modules",
         "summary": "List module ids",
+        "tags": [
+          "Utility"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode."
+          }
+        ],
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
+            "description": "OK"
           }
         }
       }
     },
     "/module/{name}": {
       "get": {
-        "operationId": "run_single_module",
         "summary": "Run a single module by id",
+        "tags": [
+          "Utility"
+        ],
         "parameters": [
           {
             "in": "path",
@@ -321,7 +317,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -334,19 +330,18 @@
                 }
               }
             }
-          },
-          "404": {
-            "description": "Unknown module"
           }
         }
       }
     },
     "/aggregate": {
       "post": {
-        "operationId": "aggregate",
-        "summary": "Run multiple modules and return results",
+        "summary": "Run multiple modules in one request",
+        "tags": [
+          "Utility"
+        ],
         "requestBody": {
-          "required": true,
+          "required": false,
           "content": {
             "application/json": {
               "schema": {
@@ -368,10 +363,7 @@
                     "type": "string"
                   },
                   "limit": {
-                    "type": "integer",
-                    "default": 50,
-                    "minimum": 1,
-                    "maximum": 1000
+                    "type": "integer"
                   },
                   "modules": {
                     "type": "array",
@@ -385,10 +377,6 @@
                   "cutoff": {
                     "type": "number"
                   },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
                   "mode": {
                     "type": "string",
                     "enum": [
@@ -397,8 +385,7 @@
                       "snapshot"
                     ]
                   }
-                },
-                "required": []
+                }
               }
             }
           }
@@ -417,28 +404,28 @@
         }
       }
     },
-    "/genetics/l2g": {
+    "/synth/targetcard": {
       "get": {
-        "operationId": "genetics_l2g",
-        "summary": "Locus-to-Gene via NHGRI-EBI GWAS Catalog (credible sets)",
+        "summary": "Curated multi-module target summary",
+        "tags": [
+          "Synthesis"
+        ],
         "parameters": [
           {
             "in": "query",
             "name": "gene",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
-            },
-            "description": "Gene symbol or Ensembl gene id (ENSGâ¦ )"
+            }
           },
           {
             "in": "query",
-            "name": "efo",
-            "required": true,
+            "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
-            },
-            "description": "EFO disease/trait id; free-text resolved on server"
+            }
           },
           {
             "in": "query",
@@ -446,8 +433,23 @@
             "required": false,
             "schema": {
               "type": "string"
-            },
-            "description": "Explicit Ensembl gene id override (ENSGâ¦ )"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "in": "query",
@@ -456,7 +458,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -472,7 +474,355 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/synth/graph": {
+      "get": {
+        "summary": "Relationship graph for the target",
+        "tags": [
+          "Synthesis"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lit/search": {
+      "get": {
+        "summary": "Literature search (Europe PMC + PubMed fallback)",
+        "tags": [
+          "Literature"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lit/angles": {
+      "get": {
+        "summary": "Mechanistic angles mining (literature)",
+        "tags": [
+          "Literature"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/l2g": {
+      "get": {
+        "summary": "GWAS locus-to-gene associations",
+        "tags": [
+          "B1 Genetics & Causality"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -491,13 +841,47 @@
     },
     "/genetics/rare": {
       "get": {
-        "operationId": "genetics_rare",
-        "summary": "Rare variant lookups (ClinVar â gnomAD fallback)",
+        "summary": "Rare variants (ClinVar/gnomAD)",
+        "tags": [
+          "B1 Genetics & Causality"
+        ],
         "parameters": [
           {
             "in": "query",
             "name": "gene",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -509,7 +893,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -525,7 +909,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -544,26 +928,26 @@
     },
     "/genetics/mendelian": {
       "get": {
-        "operationId": "genetics_mendelian",
-        "summary": "Mendelian/rare (OMIM primary; Orphanet/ClinGen links)",
+        "summary": "Mendelian validity (ClinGen/Orphanet)",
+        "tags": [
+          "B1 Genetics & Causality"
+        ],
         "parameters": [
           {
             "in": "query",
             "name": "gene",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Gene symbol or Ensembl gene id"
-          },
-          {
-            "in": "query",
-            "name": "efo",
             "required": false,
             "schema": {
               "type": "string"
-            },
-            "description": "EFO disease id (optional)"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "in": "query",
@@ -571,8 +955,23 @@
             "required": false,
             "schema": {
               "type": "string"
-            },
-            "description": "Explicit Ensembl gene id override"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "in": "query",
@@ -581,7 +980,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -597,7 +996,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -616,13 +1015,31 @@
     },
     "/genetics/mr": {
       "get": {
-        "operationId": "genetics_mr",
-        "summary": "Mendelian randomization (MR-Base / IEU OpenGWAS endpoints)",
+        "summary": "Mendelian randomization (MR-Base/EpiGraphDB)",
+        "tags": [
+          "B1 Genetics & Causality"
+        ],
         "parameters": [
           {
             "in": "query",
             "name": "gene",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -630,7 +1047,15 @@
           {
             "in": "query",
             "name": "efo",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -642,7 +1067,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -658,113 +1083,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/genetics/lncrna": {
-      "get": {
-        "operationId": "genetics_lncrna",
-        "summary": "lncRNA associations (RNAcentral)",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "gene",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
-              "default": 50
-            }
-          },
-          {
-            "in": "query",
-            "name": "mode",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/genetics/mirna": {
-      "get": {
-        "operationId": "genetics_mirna",
-        "summary": "miRNA interactions (ENCORI/starBase)",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "gene",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 500,
-              "default": 100
-            }
-          },
-          {
-            "in": "query",
-            "name": "mode",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -783,13 +1102,31 @@
     },
     "/genetics/sqtl": {
       "get": {
-        "operationId": "genetics_sqtl",
-        "summary": "Splicing QTLs (eQTL Catalogue v2; eQTL fallback)",
+        "summary": "Splicing QTLs (eQTL Catalogue/GTEx)",
+        "tags": [
+          "B1 Genetics & Causality"
+        ],
         "parameters": [
           {
             "in": "query",
             "name": "gene",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -804,12 +1141,20 @@
           },
           {
             "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -825,7 +1170,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -844,13 +1189,31 @@
     },
     "/genetics/epigenetics": {
       "get": {
-        "operationId": "genetics_epigenetics",
-        "summary": "Epigenetic support (Roadmap + BLUEPRINT curated links)",
+        "summary": "Epigenetic signals near the gene",
+        "tags": [
+          "B1 Genetics & Causality"
+        ],
         "parameters": [
           {
             "in": "query",
             "name": "gene",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -865,12 +1228,20 @@
           },
           {
             "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -886,7 +1257,181 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/lncrna": {
+      "get": {
+        "summary": "lncRNA associations",
+        "tags": [
+          "B1 Genetics & Causality"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/genetics/mirna": {
+      "get": {
+        "summary": "miRNA interactions (miRNet)",
+        "tags": [
+          "B1 Genetics & Causality"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -905,13 +1450,47 @@
     },
     "/assoc/bulk-rna": {
       "get": {
-        "operationId": "assoc_bulk_rna",
-        "summary": "Bulk RNA associations (GEO/ArrayExpress; tissue-mapped)",
+        "summary": "Bulk transcriptomics associations (GTEx/Atlas)",
+        "tags": [
+          "B2 Assoc & Perturbation"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "condition",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -923,7 +1502,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -939,7 +1518,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -958,13 +1537,47 @@
     },
     "/assoc/bulk-prot": {
       "get": {
-        "operationId": "assoc_bulk_prot",
-        "summary": "Bulk protein associations (CPTAC/ProteomeXchange)",
+        "summary": "Bulk proteomics associations",
+        "tags": [
+          "B2 Assoc & Perturbation"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "condition",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -976,7 +1589,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -992,7 +1605,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1009,15 +1622,49 @@
         }
       }
     },
-    "/assoc/sc": {
+    "/assoc/geo-arrayexpress": {
       "get": {
-        "operationId": "assoc_sc",
-        "summary": "Single-cell signal (Tabula Sapiens / Human Cell Atlas)",
+        "summary": "GEO & ArrayExpress studies (BioStudies)",
+        "tags": [
+          "B2 Assoc & Perturbation"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "condition",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1029,8 +1676,8 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 500,
-              "default": 100
+              "maximum": 1000,
+              "default": 50
             }
           },
           {
@@ -1045,7 +1692,268 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/assoc/cptac": {
+      "get": {
+        "summary": "CPTAC/PDC proteomics (GraphQL wrapper)",
+        "tags": [
+          "B2 Assoc & Perturbation"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/assoc/tabula-hca": {
+      "get": {
+        "summary": "Single-cell atlases (Tabula Sapiens/HCA)",
+        "tags": [
+          "B2 Assoc & Perturbation"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/assoc/depmap-achilles": {
+      "get": {
+        "summary": "DepMap/Achilles dataset hits",
+        "tags": [
+          "B2 Assoc & Perturbation"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1064,13 +1972,47 @@
     },
     "/assoc/perturb": {
       "get": {
-        "operationId": "assoc_perturb",
-        "summary": "CRISPR/RNAi perturbation (DepMap/Achilles)",
+        "summary": "Perturbation evidence (DepMap + OpenTargets)",
+        "tags": [
+          "B2 Assoc & Perturbation"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "condition",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1082,8 +2024,8 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 500,
-              "default": 100
+              "maximum": 1000,
+              "default": 50
             }
           },
           {
@@ -1098,7 +2040,94 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/assoc/sc": {
+      "get": {
+        "summary": "Single-cell associations for gene/condition",
+        "tags": [
+          "B2 Assoc & Perturbation"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1117,17 +2146,50 @@
     },
     "/expr/baseline": {
       "get": {
-        "operationId": "expr_baseline",
-        "summary": "Baseline expression (HPA â UniProt â GXA)",
+        "summary": "Baseline expression (tissues/cell types)",
+        "tags": [
+          "B3 Expression & Localization"
+        ],
         "parameters": [
           {
             "in": "query",
-            "name": "symbol",
-            "required": true,
+            "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
-            },
-            "description": "Preferred: HGNC symbol"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "in": "query",
@@ -1136,7 +2198,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 500,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -1152,7 +2214,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1171,13 +2233,47 @@
     },
     "/expr/localization": {
       "get": {
-        "operationId": "expr_localization",
-        "summary": "Subcellular localization (COMPARTMENTS â UniProt)",
+        "summary": "Subcellular localization (HPA/UniProt)",
+        "tags": [
+          "B3 Expression & Localization"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "symbol",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1189,7 +2285,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -1205,7 +2301,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1224,13 +2320,47 @@
     },
     "/expr/inducibility": {
       "get": {
-        "operationId": "expr_inducibility",
-        "summary": "Inducible datasets (GEO)",
+        "summary": "Inducible expression/contrasts",
+        "tags": [
+          "B3 Expression & Localization"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "symbol",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1242,7 +2372,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -1258,7 +2388,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1277,13 +2407,47 @@
     },
     "/mech/pathways": {
       "get": {
-        "operationId": "mech_pathways",
-        "summary": "Reactome pathway membership (+ KEGG, WikiPathways)",
+        "summary": "Pathway memberships (Reactome/KEGG)",
+        "tags": [
+          "B4 Mechanistic Wiring"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "symbol",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1295,7 +2459,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -1311,7 +2475,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1330,36 +2494,49 @@
     },
     "/mech/ppi": {
       "get": {
-        "operationId": "mech_ppi",
-        "summary": "STRING proteinâprotein interactions",
+        "summary": "Protein–protein interactions (STRING)",
+        "tags": [
+          "B4 Mechanistic Wiring"
+        ],
         "parameters": [
           {
             "in": "query",
-            "name": "symbol",
-            "required": true,
+            "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "species",
+            "name": "symbol",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "default": 9606
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "cutoff",
+            "name": "ensembl",
             "required": false,
             "schema": {
-              "type": "number",
-              "minimum": 0.0,
-              "maximum": 1.0,
-              "default": 0.9
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -1369,7 +2546,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -1385,7 +2562,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1404,13 +2581,47 @@
     },
     "/mech/ligrec": {
       "get": {
-        "operationId": "mech_ligrec",
-        "summary": "Ligandâreceptor interactions (OmniPath)",
+        "summary": "Ligand–receptor relationships",
+        "tags": [
+          "B4 Mechanistic Wiring"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "symbol",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1422,8 +2633,8 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 500,
-              "default": 100
+              "maximum": 1000,
+              "default": 50
             }
           },
           {
@@ -1438,7 +2649,94 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mech/structure": {
+      "get": {
+        "summary": "Structural motifs/domains (UniProt/PDBe/AlphaFold)",
+        "tags": [
+          "B4 Mechanistic Wiring"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1457,66 +2755,47 @@
     },
     "/tract/drugs": {
       "get": {
-        "operationId": "tract_drugs",
-        "summary": "Known/experimental drugs (ChEMBL / DrugBank / Inxight)",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "symbol",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 500,
-              "default": 100
-            }
-          },
-          {
-            "in": "query",
-            "name": "mode",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
-          }
+        "summary": "Known/experimental drugs (OpenTargets/DGIdb/ChEMBL)",
+        "tags": [
+          "B5 Tractability & Modality"
         ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/tract/ligandability-sm": {
-      "get": {
-        "operationId": "tract_ligandability_sm",
-        "summary": "Small-molecule ligandability (ChEMBL)",
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "symbol",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1528,60 +2807,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 500,
-              "default": 100
-            }
-          },
-          {
-            "in": "query",
-            "name": "mode",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/tract/ligandability-ab": {
-      "get": {
-        "operationId": "tract_ligandability_ab",
-        "summary": "Antibody ligandability (SAbDab / Thera-SAbDab)",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "symbol",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -1597,7 +2823,268 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tract/ligandability_sm": {
+      "get": {
+        "summary": "Small-molecule ligandability",
+        "tags": [
+          "B5 Tractability & Modality"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tract/ligandability_ab": {
+      "get": {
+        "summary": "Antibody ligandability",
+        "tags": [
+          "B5 Tractability & Modality"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tract/ligandability_oligo": {
+      "get": {
+        "summary": "Oligonucleotide ligandability",
+        "tags": [
+          "B5 Tractability & Modality"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1616,78 +3103,60 @@
     },
     "/tract/modality": {
       "get": {
-        "operationId": "tract_modality",
-        "summary": "Heuristic modality scorer (SM/AB/OLIGO) with tunable priors",
+        "summary": "Modality suggestions",
+        "tags": [
+          "B5 Tractability & Modality"
+        ],
         "parameters": [
           {
             "in": "query",
-            "name": "symbol",
-            "required": true,
+            "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "prior_sm",
+            "name": "symbol",
             "required": false,
             "schema": {
-              "type": "number",
-              "minimum": 0.0,
-              "maximum": 1.0,
-              "default": 0.55
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "prior_ab",
+            "name": "ensembl",
             "required": false,
             "schema": {
-              "type": "number",
-              "minimum": 0.0,
-              "maximum": 1.0,
-              "default": 0.5
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "prior_oligo",
+            "name": "efo",
             "required": false,
             "schema": {
-              "type": "number",
-              "minimum": 0.0,
-              "maximum": 1.0,
-              "default": 0.35
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "w_sm",
+            "name": "condition",
             "required": false,
             "schema": {
-              "type": "number",
-              "minimum": 0.0,
-              "maximum": 1.0
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "w_ab",
+            "name": "limit",
             "required": false,
             "schema": {
-              "type": "number",
-              "minimum": 0.0,
-              "maximum": 1.0
-            }
-          },
-          {
-            "in": "query",
-            "name": "w_oligo",
-            "required": false,
-            "schema": {
-              "type": "number",
-              "minimum": 0.0,
-              "maximum": 1.0
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
             }
           },
           {
@@ -1702,7 +3171,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1721,13 +3190,47 @@
     },
     "/tract/immunogenicity": {
       "get": {
-        "operationId": "tract_immunogenicity",
-        "summary": "IEDB immunogenicity proxies",
+        "summary": "Immunogenicity considerations",
+        "tags": [
+          "B5 Tractability & Modality"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "symbol",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1739,7 +3242,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -1755,7 +3258,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1774,13 +3277,47 @@
     },
     "/clin/endpoints": {
       "get": {
-        "operationId": "clin_endpoints",
-        "summary": "Clinical endpoints (CT.gov v2 + WHO ICTRP + EU CTR)",
+        "summary": "Clinical trials / endpoints",
+        "tags": [
+          "B6 Clinical & Safety"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "condition",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1792,8 +3329,8 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 100,
-              "default": 3
+              "maximum": 1000,
+              "default": 50
             }
           },
           {
@@ -1808,7 +3345,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1827,13 +3364,47 @@
     },
     "/clin/rwe": {
       "get": {
-        "operationId": "clin_rwe",
-        "summary": "Real-world evidence (openFDA FAERS + CTs)",
+        "summary": "Real-world evidence",
+        "tags": [
+          "B6 Clinical & Safety"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "condition",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1845,7 +3416,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 200,
+              "maximum": 1000,
               "default": 50
             }
           },
@@ -1861,7 +3432,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1880,119 +3451,39 @@
     },
     "/clin/safety": {
       "get": {
-        "operationId": "clin_safety",
-        "summary": "Safety signals (FAERS)",
+        "summary": "Safety liabilities",
+        "tags": [
+          "B6 Clinical & Safety"
+        ],
         "parameters": [
           {
             "in": "query",
-            "name": "symbol",
-            "required": true,
+            "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 500,
-              "default": 50
-            }
-          },
-          {
-            "in": "query",
-            "name": "mode",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/clin/pipeline": {
-      "get": {
-        "operationId": "clin_pipeline",
-        "summary": "Pipeline (Inxight + ClinicalTrials.gov)",
-        "parameters": [
-          {
-            "in": "query",
             "name": "symbol",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "limit",
+            "name": "ensembl",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 500,
-              "default": 50
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "mode",
+            "name": "efo",
             "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/comp/intensity": {
-      "get": {
-        "operationId": "comp_intensity",
-        "summary": "Competition intensity (Lens.org; qualitative)",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "symbol",
-            "required": true,
             "schema": {
               "type": "string"
             }
@@ -2013,7 +3504,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 1000,
-              "default": 100
+              "default": 50
             }
           },
           {
@@ -2028,7 +3519,268 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clin/pipeline": {
+      "get": {
+        "summary": "Pipeline programs for target",
+        "tags": [
+          "B6 Clinical & Safety"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clin/biomarker_fit": {
+      "get": {
+        "summary": "Biomarker fitness",
+        "tags": [
+          "B6 Clinical & Safety"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/comp/intensity": {
+      "get": {
+        "summary": "Competition intensity (Lens.org/EuropePMC fallback)",
+        "tags": [
+          "B7 Competition & IP"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -2047,13 +3799,47 @@
     },
     "/comp/freedom": {
       "get": {
-        "operationId": "comp_freedom",
-        "summary": "Freedom-to-operate (PatentsView; qualitative)",
+        "summary": "Freedom-to-operate (PatentsView/SureChEMBL)",
+        "tags": [
+          "B7 Competition & IP"
+        ],
         "parameters": [
           {
             "in": "query",
+            "name": "gene",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "symbol",
-            "required": true,
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2066,7 +3852,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 1000,
-              "default": 100
+              "default": 50
             }
           },
           {
@@ -2081,60 +3867,7 @@
                 "snapshot"
               ]
             },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/clin/biomarker-fit": {
-      "get": {
-        "operationId": "clin_biomarker_fit",
-        "summary": "Biomarker fit (assayability, analyte availability, tissue specificity, precedent)",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "symbol",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "default": 10
-            }
-          },
-          {
-            "in": "query",
-            "name": "mode",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            },
-            "description": "Hybrid source mode: auto (default), live or snapshot."
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -2151,5 +3884,10 @@
         }
       }
     }
-  }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ]
 }
