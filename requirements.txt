@@ -1,15 +1,16 @@
-# TargetVal Gateway — pinned runtime (fixes Uvicorn CLI option + math deps)
+# TargetVal Gateway runtime (pinned for Render)
 fastapi==0.114.2
 pydantic==2.8.2
 uvicorn[standard]==0.30.6
+gunicorn==21.2.0
 h11==0.14.0
 httpx==0.27.2
 
-# Math synthesis layer
+# Math / synthesis layer
 numpy==1.26.4
 scipy==1.13.1
 scikit-learn==1.3.2
 networkx==3.2.1
 
-# Faster JSON (optional)
+# Optional faster JSON (FastAPI detects automatically)
 orjson==3.10.7
