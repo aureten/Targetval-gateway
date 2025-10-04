@@ -164,10 +164,10 @@ app.state.has_v2 = has_v2
 async def livez():
     return {"ok": True, "router": app.state.router_location, "import_ok": app.state.router_import_error is None, "synthesis_v2": app.state.has_v2}
 
-    @app.get("/readyz", tags=["_meta"])
-    async def readyz():
-        if app.state.router_import_error is not None:
-            return JSONResponse(
+@app.get("/readyz", tags=["_meta"])
+async def readyz():
+    if app.state.router_import_error is not None:
+        return JSONResponse(
                 status_code=503,
                 content={"ok": False, "reason": "router import failed", "details": "See /_debug/import", "synthesis_v2": app.state.has_v2},
             )
@@ -188,16 +188,16 @@ async def about():
     }
     return tip
 @app.get("/_debug/import", tags=["_meta"])
-    async def debug_import():
-        return {
+async def debug_import():
+    return {
             "attempted": app.state.router_location,
             "error": app.state.router_import_error,
             "sys_path": sys.path,
-        }
+    }
 
-    @app.get("/meta/routes", tags=["_meta"])
-    async def list_routes() -> Dict[str, Any]:
-        routes = []
+@app.get("/meta/routes", tags=["_meta"])
+async def list_routes() -> Dict[str, Any]:
+    routes = []
         for r in app.router.routes:
             try:
                 routes.append({
@@ -207,8 +207,8 @@ async def about():
                 })
             except Exception:
                 pass
-        routes.sort(key=lambda x: (x["path"] or ""))
-        return {"count": len(routes), "routes": routes, "router": app.state.router_location,
+    routes.sort(key=lambda x: (x["path"] or ""))
+    return {"count": len(routes), "routes": routes, "router": app.state.router_location,
                 "import_ok": app.state.router_import_error is None}
 
     # ---------------- Module aggregator wiring ----------------
