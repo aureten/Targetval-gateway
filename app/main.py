@@ -52,6 +52,23 @@ HAS_INSIGHT = False  # set True if you include an insight router elsewhere
 
 
 # -----------------------------------------------------------------------------
+# Pydantic models (must be at module scope; FastAPI resolves here)
+# -----------------------------------------------------------------------------
+class AggregateRequest(BaseModel):
+    gene: Optional[str] = None
+    symbol: Optional[str] = None
+    ensembl_id: Optional[str] = None
+    efo: Optional[str] = None
+    condition: Optional[str] = None
+    modules: Optional[List[str]] = None
+    limit: Optional[int] = 50
+    # Passthroughs used by specific modules
+    species: Optional[int] = None
+    cutoff: Optional[float] = None
+    extra: Optional[Dict[str, Any]] = None  # arbitrary passthrough
+
+
+# -----------------------------------------------------------------------------
 # Import helpers
 # -----------------------------------------------------------------------------
 def _import_router_module():
@@ -261,19 +278,6 @@ def create_app() -> FastAPI:
 
     MODULE_MAP: Dict[str, Any] = _build_module_map()
     app.state.module_map = MODULE_MAP  # expose for debug
-
-    class AggregateRequest(BaseModel):
-        gene: Optional[str] = None
-        symbol: Optional[str] = None
-        ensembl_id: Optional[str] = None
-        efo: Optional[str] = None
-        condition: Optional[str] = None
-        modules: Optional[List[str]] = None
-        limit: Optional[int] = 50
-        # Passthroughs used by specific modules
-        species: Optional[int] = None
-        cutoff: Optional[float] = None
-        extra: Optional[Dict[str, Any]] = None  # arbitrary passthrough
 
     SYMBOLISH = re.compile(r"^[A-Za-z0-9-]+$")
 
