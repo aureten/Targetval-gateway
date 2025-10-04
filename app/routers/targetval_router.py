@@ -2041,6 +2041,8 @@ class BucketSynthesis(BaseModel):
     insights: List[BucketInsight] = Field(default_factory=list)
     contradictions: List[BucketContradiction] = Field(default_factory=list)
     gaps: List[Dict[str, Any]] = Field(default_factory=list)
+    scores: Optional[Dict[str, Any]] = None
+    components: Optional[Dict[str, float]] = None
     fetched_at: str
 
 # ---- Utility helpers ----
@@ -2405,7 +2407,41 @@ async def synth_bucket(
         return await _synth_biology(gene=gene, tissue=tissue)
     if name == "tractability":
         return await _synth_tractability(gene=gene, tissue=tissue)
-    if name in ("clinical", "clinical_landscape"):
+    if name in ("clinical", "clinical_landscape",
+    mode: str = Query('kg', description='kg|math|hybrid')):
+    name = name.lower().strip()
+    if name in ("clinical_landscape",): name = "clinical"
+
+    # Compute KG path (existing behavior) and optionally math
+    if name == "genetics":
+        kg = await _synth_genetics(gene=gene, condition=condition, tissue=tissue)
+        math_scores = await _math_genetics(gene=gene, condition=condition, tissue=tissue) if mode in ("math","hybrid") else None
+    elif name == "association":
+        kg = await _synth_association(gene=gene, condition=condition)
+        math_scores = await _math_association(gene=gene, condition=condition) if mode in ("math","hybrid") else None
+    elif name == "biology":
+        kg = await _synth_biology(gene=gene, tissue=tissue)
+        math_scores = await _math_biology(gene=gene, tissue=tissue) if mode in ("math","hybrid") else None
+    elif name == "tractability":
+        kg = await _synth_tractability(gene=gene, tissue=tissue)
+        math_scores = await _math_tractability(symbol=gene) if mode in ("math","hybrid") else None
+    elif name == "clinical":
+        kg = await _synth_clinical(gene=gene, condition=condition)
+        math_scores = await _math_clinical(symbol=gene, condition=condition) if mode in ("math","hybrid") else None
+    elif name == "readiness":
+        kg = await _synth_readiness(gene=gene, condition=condition)
+        math_scores = await _math_readiness(symbol=gene, condition=condition) if mode in ("math","hybrid") else None
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown bucket: {name}")
+
+    if mode == "kg" or not math_scores:
+        return kg
+
+    merged = kg.copy(update={
+        "scores": math_scores.get("scores"),
+        "components": math_scores.get("components")
+    })
+    return merged
         return await _synth_clinical(gene=gene, condition=condition)
     if name in ("readiness", "development_readiness"):
         return await _synth_readiness(gene=gene)
@@ -2620,3 +2656,393 @@ async def genetics_cross_species(gene: str, limit: int = Query(100, ge=1, le=500
         return Evidence(status="ERROR", source=f"IMPC Solr error: {e}", fetched_n=0,
                         data={"gene": gene, "ensembl_id": ensg, "mouse_symbol": mouse_symbol},
                         citations=cites, fetched_at=_now())
+
+
+# ========================== Targetval Registry & Synthesis (2025-10) ==========================
+# Non-breaking additions: registry endpoints + synthesis plan stub, keeping layout intact.
+# This implements Alp's 38 modules / 55 sources spec with NEW markers and TTL policy.
+
+from typing import Literal, TypedDict, Optional
+from fastapi import Body
+
+# ---- Registry (constants; replace with file-backed registries later if desired) ----
+
+MODULES: list[dict] = [
+    # TARGET_CHARACTERIZATION (5)
+    {"id":"expr_baseline","bucket":"TARGET_CHARACTERIZATION","new":False,
+     "sources":["hpa","expression_atlas","cellxgene","mygene","compartments"]},
+    {"id":"expr_localization","bucket":"TARGET_CHARACTERIZATION","new":False,
+     "sources":["compartments","hpa","uniprot"]},
+    {"id":"mech_structure","bucket":"TARGET_CHARACTERIZATION","new":False,
+     "sources":["alphafold","pdbe","uniprot"]},
+    {"id":"mech_ppi","bucket":"TARGET_CHARACTERIZATION","new":False,
+     "sources":["string","omnipath"]},
+    {"id":"mech_pathways","bucket":"TARGET_CHARACTERIZATION","new":False,
+     "sources":["reactome","kegg","wikipathways","omnipath"]},
+    # GENETIC_CAUSALITY (8)
+    {"id":"genetics_l2g","bucket":"GENETIC_CAUSALITY","new":False,
+     "sources":["opentargets","gwas_catalog"]},
+    {"id":"genetics_coloc","bucket":"GENETIC_CAUSALITY","new":True,
+     "sources":["gtex","eqtl_catalogue","gwas_catalog"]},
+    {"id":"genetics_mr","bucket":"GENETIC_CAUSALITY","new":False,
+     "sources":["mrbase_open_gwas","gwas_catalog","gtex"]},
+    {"id":"genetics_sqtl","bucket":"GENETIC_CAUSALITY","new":False,
+     "sources":["gtex","eqtl_catalogue"]},
+    {"id":"genetics_rare","bucket":"GENETIC_CAUSALITY","new":False,
+     "sources":["gnomad","clinvar"]},
+    {"id":"genetics_mendelian","bucket":"GENETIC_CAUSALITY","new":False,
+     "sources":["clinvar","clingen","orphanet"]},
+    {"id":"genetics_functional","bucket":"GENETIC_CAUSALITY","new":True,
+     "sources":["encode","depmap"]},
+    {"id":"genetics_cross","bucket":"GENETIC_CAUSALITY","new":True,
+     "sources":["gwas_catalog","mrbase_open_gwas"]},
+    # MULTI_OMICS_ASSOCIATION (7)
+    {"id":"assoc_bulk_rna","bucket":"MULTI_OMICS_ASSOCIATION","new":False,
+     "sources":["expression_atlas","geo","arrayexpress"]},
+    {"id":"assoc_sc","bucket":"MULTI_OMICS_ASSOCIATION","new":False,
+     "sources":["cellxgene","scea"]},
+    {"id":"spatial_expression","bucket":"MULTI_OMICS_ASSOCIATION","new":True,
+     "sources":["stomicsdb","htan","cellxgene"]},
+    {"id":"assoc_bulk_prot","bucket":"MULTI_OMICS_ASSOCIATION","new":False,
+     "sources":["proteomicsdb","pride"]},
+    {"id":"omics_phosphoproteomics","bucket":"MULTI_OMICS_ASSOCIATION","new":True,
+     "sources":["phosphositeplus","pride"]},
+    {"id":"omics_metabolites","bucket":"MULTI_OMICS_ASSOCIATION","new":True,
+     "sources":["metabolights","hmdb"]},
+    {"id":"assoc_perturb","bucket":"MULTI_OMICS_ASSOCIATION","new":False,
+     "sources":["lincs","depmap"]},
+    # MECHANISM_BIOLOGY (5)
+    {"id":"expr_inducibility","bucket":"MECHANISM_BIOLOGY","new":False,
+     "sources":["expression_atlas","hpa","encode"]},
+    {"id":"mech_ligrec","bucket":"MECHANISM_BIOLOGY","new":False,
+     "sources":["omnipath","reactome"]},
+    {"id":"genetics_lncrna","bucket":"MECHANISM_BIOLOGY","new":False,
+     "sources":["rnacentral"]},
+    {"id":"genetics_mirna","bucket":"MECHANISM_BIOLOGY","new":False,
+     "sources":["mirnet","encori"]},
+    {"id":"spatial_neighborhoods","bucket":"MECHANISM_BIOLOGY","new":True,
+     "sources":["stomicsdb","htan"]},
+    # TRACTABILITY_MODALITY (6)
+    {"id":"tract_drugs","bucket":"TRACTABILITY_MODALITY","new":False,
+     "sources":["chembl","dgidb","inxight"]},
+    {"id":"tract_ligandability_sm","bucket":"TRACTABILITY_MODALITY","new":False,
+     "sources":["pdbe","alphafold","chembl"]},
+    {"id":"tract_ligandability_ab","bucket":"TRACTABILITY_MODALITY","new":False,
+     "sources":["sabdab","thera_sabdab","hpa"]},
+    {"id":"tract_ligandability_oligo","bucket":"TRACTABILITY_MODALITY","new":False,
+     "sources":["ribocentre","iedb"]},
+    {"id":"tract_modality","bucket":"TRACTABILITY_MODALITY","new":False,
+     "sources":["uniprot","hpa","iedb"]},
+    {"id":"tract_immunogenicity","bucket":"TRACTABILITY_MODALITY","new":False,
+     "sources":["iedb"]},
+    # CLINICAL_READINESS (5)
+    {"id":"clin_endpoints","bucket":"CLINICAL_READINESS","new":False,
+     "sources":["clinicaltrials","who_ictrp","eu_ctr"]},
+    {"id":"clin_biomarker_fit","bucket":"CLINICAL_READINESS","new":False,
+     "sources":["hpa","expression_atlas","cellxgene"]},
+    {"id":"clin_safety","bucket":"CLINICAL_READINESS","new":False,
+     "sources":["faers","gnomad","clinvar"]},
+    {"id":"clin_rwe","bucket":"CLINICAL_READINESS","new":False,
+     "sources":["faers"]},
+    {"id":"clin_pipeline","bucket":"CLINICAL_READINESS","new":False,
+     "sources":["clinicaltrials","inxight"]},
+    # COMPETITIVE_LANDSCAPE (2)
+    {"id":"comp_intensity","bucket":"COMPETITIVE_LANDSCAPE","new":False,
+     "sources":["clinicaltrials","chembl","inxight"]},
+    {"id":"comp_freedom","bucket":"COMPETITIVE_LANDSCAPE","new":False,
+     "sources":["patentsview","surechembl"], "optional_sources":["google_patents"]},
+]
+assert len(MODULES) == 38
+
+SOURCES: list[dict] = [
+    # Core Biological Databases (10)
+    {"id":"uniprot","name":"UniProt","category":"core","ttl":"monthly","tags":["protein"]},
+    {"id":"pdbe","name":"PDBe","category":"core","ttl":"quarterly","tags":["structure"]},
+    {"id":"alphafold","name":"AlphaFold","category":"core","ttl":"quarterly","tags":["structure","prediction"]},
+    {"id":"string","name":"STRING","category":"core","ttl":"quarterly","tags":["ppi"]},
+    {"id":"reactome","name":"Reactome","category":"core","ttl":"quarterly","tags":["pathway"]},
+    {"id":"kegg","name":"KEGG","category":"core","ttl":"quarterly","tags":["pathway"]},
+    {"id":"wikipathways","name":"WikiPathways","category":"core","ttl":"quarterly","tags":["pathway"]},
+    {"id":"omnipath","name":"OmniPath","category":"core","ttl":"quarterly","tags":["ligrec","pathway"]},
+    {"id":"compartments","name":"COMPARTMENTS","category":"core","ttl":"quarterly","tags":["localization"]},
+    {"id":"mygene","name":"MyGene.info","category":"core","ttl":"monthly","tags":["gene","annotation"]},
+    # Genetics & Genomics (10)
+    {"id":"gwas_catalog","name":"GWAS Catalog","category":"genetics","ttl":"monthly","tags":["gwas"]},
+    {"id":"opentargets","name":"OpenTargets Platform","category":"genetics","ttl":"monthly","tags":["l2g","association"]},
+    {"id":"gtex","name":"GTEx","category":"genetics","ttl":"monthly","tags":["eqtl","sqtl","expression"]},
+    {"id":"eqtl_catalogue","name":"eQTL Catalogue","category":"genetics","ttl":"monthly","tags":["eqtl"],"new":True},
+    {"id":"clinvar","name":"ClinVar","category":"genetics","ttl":"monthly","tags":["clinical_variation"]},
+    {"id":"gnomad","name":"gnomAD","category":"genetics","ttl":"monthly","tags":["constraint","variants"]},
+    {"id":"encode","name":"ENCODE","category":"genetics","ttl":"monthly","tags":["functional"]},
+    {"id":"impc","name":"IMPC","category":"genetics","ttl":"monthly","tags":["mouse","phenotype"],"new":True},
+    {"id":"mrbase_open_gwas","name":"MR-Base/OpenGWAS","category":"genetics","ttl":"monthly","tags":["mr","instruments"],"new":True},
+    {"id":"clingen","name":"ClinGen","category":"genetics","ttl":"monthly","tags":["curation"]},
+    # Omics & Expression (12) — Tabula Sapiens alias -> cellxgene
+    {"id":"hpa","name":"HPA","category":"omics","ttl":"monthly","tags":["protein_expression"]},
+    {"id":"expression_atlas","name":"Expression Atlas","category":"omics","ttl":"monthly","tags":["bulk_rna"]},
+    {"id":"geo","name":"GEO","category":"omics","ttl":"monthly","tags":["bulk_rna"]},
+    {"id":"arrayexpress","name":"ArrayExpress (BioStudies)","category":"omics","ttl":"monthly","tags":["bulk_rna"]},
+    {"id":"cellxgene","name":"cellxgene","category":"omics","ttl":"monthly","tags":["scRNA","atlas"],"aliases":["tabula_sapiens"]},
+    {"id":"scea","name":"SCEA","category":"omics","ttl":"monthly","tags":["single_cell"]},
+    {"id":"htan","name":"HTAN","category":"omics","ttl":"monthly","tags":["spatial","tumor_atlas"],"new":True},
+    {"id":"stomicsdb","name":"STOmicsDB","category":"omics","ttl":"monthly","tags":["spatial"],"new":True},
+    {"id":"proteomicsdb","name":"ProteomicsDB","category":"omics","ttl":"monthly","tags":["proteomics"]},
+    {"id":"pride","name":"PRIDE","category":"omics","ttl":"monthly","tags":["proteomics"]},
+    {"id":"metabolights","name":"MetaboLights","category":"omics","ttl":"monthly","tags":["metabolomics"],"new":True},
+    {"id":"hmdb","name":"HMDB","category":"omics","ttl":"monthly","tags":["metabolomics"],"new":True},
+    # Perturbation & Regulation (6)
+    {"id":"depmap","name":"DepMap","category":"perturbation","ttl":"monthly","tags":["dependency"]},
+    {"id":"lincs","name":"LINCS (SigCom/LDP3)","category":"perturbation","ttl":"monthly","tags":["perturbation"]},
+    {"id":"rnacentral","name":"RNAcentral","category":"perturbation","ttl":"monthly","tags":["lncrna"]},
+    {"id":"mirnet","name":"miRNet","category":"perturbation","ttl":"monthly","tags":["miRNA"]},
+    {"id":"encori","name":"ENCORI/starBase","category":"perturbation","ttl":"monthly","tags":["miRNA_interactions"]},
+    {"id":"phosphositeplus","name":"PhosphoSitePlus","category":"perturbation","ttl":"monthly","tags":["phospho"],"new":True},
+    # Tractability & Drugs (7)
+    {"id":"chembl","name":"ChEMBL","category":"tractability","ttl":"monthly","tags":["compounds"]},
+    {"id":"dgidb","name":"DGIdb","category":"tractability","ttl":"monthly","tags":["drug_gene"]},
+    {"id":"sabdab","name":"SAbDab","category":"tractability","ttl":"quarterly","tags":["antibodies"]},
+    {"id":"thera_sabdab","name":"Thera-SAbDab","category":"tractability","ttl":"quarterly","tags":["antibody_therapeutics"]},
+    {"id":"iedb","name":"IEDB","category":"tractability","ttl":"monthly","tags":["epitopes"]},
+    {"id":"ribocentre","name":"Ribocentre","category":"tractability","ttl":"quarterly","tags":["aptamers"],"new":True},
+    {"id":"inxight","name":"Inxight Drugs","category":"tractability","ttl":"monthly","tags":["drugs","synonyms"]},
+    # Clinical & Safety (5 after consolidation)
+    {"id":"clinicaltrials","name":"ClinicalTrials.gov","category":"clinical","ttl":"daily","tags":["trials"]},
+    {"id":"who_ictrp","name":"WHO ICTRP","category":"clinical","ttl":"daily","tags":["trials"]},
+    {"id":"eu_ctr","name":"EU CTR","category":"clinical","ttl":"weekly","tags":["trials"]},
+    {"id":"faers","name":"openFDA (FAERS)","category":"clinical","ttl":"weekly","tags":["safety"]},
+    {"id":"orphanet","name":"Orphanet","category":"clinical","ttl":"monthly","tags":["rare_disease"],"new":True},
+    # Competitive Intelligence (3)
+    {"id":"patentsview","name":"PatentsView","category":"competitive","ttl":"annually","tags":["patents"]},
+    {"id":"surechembl","name":"SureChEMBL","category":"competitive","ttl":"annually","tags":["patents"]},
+    {"id":"google_patents","name":"Google Patents","category":"competitive","ttl":"on_demand","tags":["patents","fulltext"]},
+    # Literature (2)
+    {"id":"europe_pmc","name":"Europe PMC","category":"literature","ttl":"monthly","tags":["papers"]},
+    {"id":"pubmed_eutils","name":"PubMed E-utilities","category":"literature","ttl":"monthly","tags":["papers"]},
+]
+assert len(SOURCES) == 55
+
+ALIASES = {"tabula_sapiens": "cellxgene"}
+
+TTL_MAP = {
+    "daily": 1*24*60*60,
+    "weekly": 7*24*60*60,
+    "monthly": 30*24*60*60,
+    "quarterly": 90*24*60*60,
+    "annually": 365*24*60*60,
+    "on_demand": None,
+}
+
+HEAVY_MODULES = {
+    "genetics_mr","genetics_coloc","assoc_sc","spatial_expression",
+    "omics_phosphoproteomics","omics_metabolites","clin_endpoints","comp_freedom"
+}
+
+def _modules_by_bucket() -> dict[str, list[dict]]:
+    d: dict[str, list[dict]] = {}
+    for m in MODULES:
+        d.setdefault(m["bucket"], []).append(m)
+    return d
+
+def _resolve_source(sid: str) -> str:
+    return ALIASES.get(sid, sid)
+
+def _ttl_seconds(sid: str) -> Optional[int]:
+    # Explicit ttl field wins; map to seconds
+    sid = _resolve_source(sid)
+    src = next((s for s in SOURCES if s["id"] == sid), None)
+    if not src:
+        return None
+    return TTL_MAP.get(src.get("ttl","monthly"), 30*24*60*60)
+
+@router.get("/registry/counts")
+def registry_counts() -> Dict[str, Any]:
+    new_mods = sum(1 for m in MODULES if m.get("new"))
+    new_srcs = sum(1 for s in SOURCES if s.get("new"))
+    buckets = _modules_by_bucket()
+    return {
+        "modules_total": len(MODULES),
+        "modules_new": new_mods,
+        "modules_by_bucket": {k: len(v) for k,v in buckets.items()},
+        "sources_total": len(SOURCES),
+        "sources_new": new_srcs,
+        "alias_map": ALIASES,
+    }
+
+@router.get("/registry/modules")
+def registry_modules() -> Dict[str, Any]:
+    return {"count": len(MODULES), "buckets": _modules_by_bucket(), "items": MODULES}
+
+@router.get("/registry/sources")
+def registry_sources() -> Dict[str, Any]:
+    # attach ttl_seconds for quick consumption by clients
+    enriched = []
+    for s in SOURCES:
+        s2 = dict(s)
+        s2["ttl_seconds"] = _ttl_seconds(s["id"])
+        enriched.append(s2)
+    return {"count": len(SOURCES), "items": enriched, "aliases": ALIASES}
+
+# ---- Synthesis plan (non-executing orchestrator) ----
+
+class SynthesisRequest(BaseModel):
+    target: str
+    disease: str
+    modules: Optional[List[str]] = None
+    buckets: Optional[List[str]] = None
+    concurrency: Optional[int] = 8
+    max_calls: Optional[int] = 110
+
+def _plan(buckets: Optional[List[str]]) -> Dict[str, Any]:
+    sel_buckets = buckets or [
+        "TARGET_CHARACTERIZATION","GENETIC_CAUSALITY","MULTI_OMICS_ASSOCIATION",
+        "MECHANISM_BIOLOGY","TRACTABILITY_MODALITY","CLINICAL_READINESS","COMPETITIVE_LANDSCAPE"
+    ]
+    mods = [m for m in MODULES if m["bucket"] in sel_buckets]
+    budgets = {m["id"]: (4 if m["id"] in HEAVY_MODULES else 2) for m in mods}
+    total_calls = sum(budgets.values())
+    return {"buckets": sel_buckets, "budgets": budgets, "estimated_calls": total_calls}
+
+@router.post("/synthesis/run")
+def synthesis_run(req: SynthesisRequest = Body(...)) -> Dict[str, Any]:
+    # NOTE: This is a planning stub only; fan-out execution stays in existing services.
+    plan = _plan(req.buckets)
+    # crude runtime estimate: assume 150ms avg per call with concurrency sem
+    conc = max(1, int(req.concurrency or 8))
+    total = plan["estimated_calls"]
+    avg_ms = 150
+    est_seq_ms = total * avg_ms
+    est_conc_ms = int(est_seq_ms / conc)
+    return {
+        "target": req.target,
+        "disease": req.disease,
+        "plan": plan,
+        "concurrency": conc,
+        "max_calls": int(req.max_calls or 110),
+        "est_runtime_ms": {"sequential": est_seq_ms, "concurrent": est_conc_ms},
+        "notes": "This endpoint plans only. Execution uses existing module endpoints and caching."
+    }
+# ======================== End Registry & Synthesis (2025-10) ========================
+
+
+
+# ===================== Synthesis v2 Add-ons =====================
+from pydantic import BaseModel
+
+async def _math_competitive(symbol: str, condition: Optional[str] = None) -> dict:
+    cites = []; trials_n=0; patents_n=0; programs_n=0; assignees=[]
+    try:
+        ev1 = await comp_intensity(symbol=symbol); d1 = ev1.data or {}; cites.extend(ev1.citations or [])
+        trials_n = d1.get("trials_count") or (len(d1.get("trials") or []) if isinstance(d1.get("trials"), list) else 0) or (ev1.fetched_n or 0)
+        programs_n = d1.get("programs_count") or 0
+    except Exception: pass
+    try:
+        ev2 = await comp_freedom(symbol=symbol); d2 = ev2.data or {}; cites.extend(ev2.citations or [])
+        pats = d2.get("patents") or d2.get("results") or []
+        patents_n = (len(pats) if isinstance(pats, list) else (d2.get("count") or d2.get("total") or 0))
+        if isinstance(pats, list):
+            for p in pats:
+                owner = (p.get("assignee") or p.get("assignee_org") or p.get("applicant") or "").strip()
+                if owner: assignees.append(owner)
+        else:
+            assignees = list(d2.get("assignees") or d2.get("owners") or [])
+    except Exception: pass
+    N = trials_n + patents_n + programs_n
+    crowd_pressure = 0.0 if N<=0 else min(1.0, (trials_n*1.0 + patents_n*0.5 + programs_n*0.7)/max(10.0, float(N)))
+    from collections import Counter
+    c = Counter([a for a in assignees if a]); tot = sum(c.values()) or 1
+    hhi = sum((v/tot)**2 for v in c.values())
+    concentration = float(hhi); novelty = 1.0 - concentration if N>0 else 0.5
+    return {"scores":{"crowd_pressure": crowd_pressure, "concentration": concentration, "novelty": novelty},
+            "components":{"trials_n":trials_n,"patents_n":patents_n,"programs_n":programs_n,"assignees":list(c.keys())[:10]},
+            "citations": list(dict.fromkeys(cites))[:200]}
+
+async def _lit_meta_angles(symbol: str, condition: Optional[str] = None, limit: int = 80) -> dict:
+    try:
+        ev = await lit_angles(symbol=symbol, condition=condition, limit=limit)
+        hits = (ev.data or {}).get("results") or []; cites = list(ev.citations or [])
+    except Exception:
+        try:
+            query = f"{symbol} {condition}" if condition else symbol
+            ev = await lit_search(query=query, limit=limit)
+            hits = (ev.data or {}).get("results") or []; cites = list(ev.citations or [])
+        except Exception:
+            hits=[]; cites=[]
+    def _ngrams(s, n=2):
+        toks = [t for t in (s or "").lower().split() if t.isalnum()]; 
+        return [" ".join(toks[i:i+n]) for i in range(len(toks)-n+1)]
+    theme_counts={}; by_year={}
+    for r in hits:
+        title = r.get("title") or ""; year = r.get("year")
+        if year and str(year).isdigit():
+            by_year[int(str(year)[:4])] = by_year.get(int(str(year)[:4]), 0) + 1
+        for bg in _ngrams(title):
+            if len(bg) < 5: continue
+            theme_counts[bg] = theme_counts.get(bg, 0) + 1
+    top_themes = sorted(theme_counts.items(), key=lambda kv: kv[1], reverse=True)[:8]
+    themes_out=[]; 
+    for theme, cnt in top_themes:
+        papers = [r for r in hits if theme in ((r.get("title") or "").lower())][:10]
+        pmids = [p.get("pmid") or p.get("pmcid") for p in papers if (p.get("pmid") or p.get("pmcid"))]
+        themes_out.append({"theme": theme, "count": cnt, "pmids": pmids})
+    contradictions=[]
+    for t in themes_out:
+        pos=neg=0
+        for p in hits:
+            title=(p.get("title") or "").lower()
+            if t["theme"] in title:
+                pos += int("activat" in title or "upregulat" in title)
+                neg += int("inhibit" in title or "downregulat" in title or "block" in title)
+        if pos and neg:
+            contradictions.append({"theme": t["theme"], "pro": pos, "contra": neg})
+    if by_year:
+        years=sorted(by_year); recent=sum(v for y,v in by_year.items() if y>= (years[-1]-2)); prior=sum(v for y,v in by_year.items() if y < (years[-1]-2))
+        recency_boost = float(recent/max(1,prior)) if prior else 1.5
+    else: recency_boost=1.0
+    return {"scores":{"angles_n": len(themes_out), "recency_boost": recency_boost},
+            "components":{"themes": themes_out, "contradictions": contradictions},
+            "citations": list(dict.fromkeys(cites))[:200]}
+
+class CrossBucketSynthesis(BaseModel):
+    target: str
+    disease: Optional[str] = None
+    evidence_strength: float
+    druggability: float
+    clinical_potential: float
+    strategic_priority: float
+    target_score: float
+    ledger: Dict[str, float]
+    pieces: Dict[str, Any]
+    fetched_at: str
+
+def _cap01(x: float) -> float:
+    try: return float(max(0.0, min(1.0, x)))
+    except Exception: return 0.0
+
+@router.get("/synth/integrate", response_model=CrossBucketSynthesis)
+async def synth_integrate(gene: str, condition: Optional[str] = None, mode: str = Query("math", description="math only (uses live endpoints)")):
+    symbol = await _normalize_symbol(gene)
+    G, A, B, T, C, K = await asyncio.gather(
+        _math_genetics(gene=symbol, condition=condition),
+        _math_association(gene=symbol, condition=condition),
+        _math_biology(gene=symbol),
+        _math_tractability(symbol=symbol),
+        _math_clinical(symbol=symbol, condition=condition),
+        _math_competitive(symbol=symbol, condition=condition)
+    )
+    g_logLR = float((G.get("components") or {}).get("mr_logLR", 0.0) + (G.get("components") or {}).get("coloc_logLR", 0.0) + (G.get("components") or {}).get("rare_logLR", 0.0) + (G.get("components") or {}).get("functional_logLR", 0.0))
+    om_p = float((A.get("scores") or {}).get("hmp_p", 1.0)); om_lr = _sbb_p_to_lr(om_p); a_logLR = 0.5 * math.log(max(1e-9, om_lr))
+    prox = float((B.get("scores") or {}).get("mechanistic_proximity", 0.5)); mech_lr = max(0.5, min(2.0, 1.0 + (prox-0.5)*1.5)); b_logLR = 0.3 * math.log(mech_lr)
+    prior=0.02; evidence_strength = _cap01(_inv_logit(_logit(prior) + g_logLR + a_logLR + b_logLR))
+    sc = T.get("scores") or {}; druggability = _cap01(max(float(sc.get("P.SM") or 0.0), float(sc.get("P.Ab") or 0.0), float(sc.get("P.Oligo") or 0.0)))
+    clinical_potential = _cap01(float((C.get("scores") or {}).get("p_PoC", 0.0)))
+    crowd = float((K.get("scores") or {}).get("crowd_pressure", 0.5)); strategic_priority = _cap01(1.0 - 0.6*crowd)
+    target_score = evidence_strength * druggability * clinical_potential * strategic_priority
+    pieces = {"genetics": G, "association": A, "biology": B, "tractability": T, "clinical": C, "competitive": K}
+    ledger = {"genetics_logLR": g_logLR, "omics_logLR": a_logLR, "mechanism_logLR": b_logLR}
+    return CrossBucketSynthesis(target=symbol, disease=condition, evidence_strength=float(evidence_strength), druggability=float(druggability), clinical_potential=float(clinical_potential), strategic_priority=float(strategic_priority), target_score=float(target_score), ledger=ledger, pieces=pieces, fetched_at=str(_now()))
+
+@router.get("/lit/meta", response_model=Evidence)
+async def lit_meta(symbol: str, condition: Optional[str] = None, limit: int = Query(80, ge=10, le=200)):
+    out = await _lit_meta_angles(symbol=symbol, condition=condition, limit=limit)
+    return Evidence(status="OK", source="Europe PMC (meta)", fetched_n=(out.get("scores") or {}).get("angles_n", 0),
+                    data=out, citations=out.get("citations") or [], fetched_at=_now())
