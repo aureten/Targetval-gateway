@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -69,11 +70,15 @@ def _import_router_module():
             return None, None, traceback.format_exc()
 
     for mod in (
-        "app.routers.targetval_router",
-        "routers.targetval_router",
-        "targetval_router",
-        "router",
-    ):
+"app.routers.targetval_router",
+"routers.targetval_router",
+"targetval_router",
+"app.routers.router",
+"app.router",
+"routers.router",
+"router",
+"router.math_synthesis",
+    ) :
         module, where, err = _try(mod)
         if module is not None:
             return module, where, None
@@ -144,10 +149,39 @@ def create_app() -> FastAPI:
     if router_module:
         app.include_router(router_module.router)
 
+# Report whether v2 math synthesis is available
+has_v2 = False
+try:
+    if router_module and hasattr(router_module, "router"):
+        for r in router_module.router.routes:
+            p = getattr(r, "path", "")
+            if p in ("/synth/integrate", "/lit/meta") or p.startswith("/synth/bucket"):
+                has_v2 = True
+                break
+except Exception:
+    has_v2 = False
+
+
+@app.get("/", tags=["_meta"])
+async def about():
+    tip = {
+        "message": "TARGETVAL Gateway â Synthesis v2 available",
+        "try": [
+            "/synth/bucket?name=genetics&gene=IL6&condition=ulcerative%20colitis&mode=math",
+            "/synth/bucket?name=association&gene=IL6&mode=hybrid",
+            "/synth/integrate?gene=IL6&condition=ulcerative%20colitis",
+            "/lit/meta?symbol=IL6&condition=ulcerative%20colitis"
+        ]
+    }
+    return tip
+
+
+
+
     # ---------------- Meta/debug endpoints ----------------
     @app.get("/livez", tags=["_meta"])
     async def livez():
-        return {"ok": True, "router": app.state.router_location, "import_ok": app.state.router_import_error is None}
+        return {"ok": True, "router": app.state.router_location, "import_ok": app.state.router_import_error is None, "synthesis_v2": has_v2}
 
     @app.get("/readyz", tags=["_meta"])
     async def readyz():
