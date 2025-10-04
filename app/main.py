@@ -70,15 +70,11 @@ def _import_router_module():
             return None, None, traceback.format_exc()
 
     for mod in (
-"app.routers.targetval_router",
-"routers.targetval_router",
-"targetval_router",
-"app.routers.router",
-"app.router",
-"routers.router",
-"router",
-"router.math_synthesis",
-    ) :
+        "app.routers.targetval_router",
+        "routers.targetval_router",
+        "targetval_router",
+        "router",
+    ):
         module, where, err = _try(mod)
         if module is not None:
             return module, where, None
@@ -149,7 +145,7 @@ def create_app() -> FastAPI:
     if router_module:
         app.include_router(router_module.router)
 
-# Report whether v2 math synthesis is available
+# Detect presence of synthesis v2 endpoints
 has_v2 = False
 try:
     if router_module and hasattr(router_module, "router"):
@@ -160,39 +156,38 @@ try:
                 break
 except Exception:
     has_v2 = False
-
-
-@app.get("/", tags=["_meta"])
-async def about():
-    tip = {
-        "message": "TARGETVAL Gateway â Synthesis v2 available",
-        "try": [
-            "/synth/bucket?name=genetics&gene=IL6&condition=ulcerative%20colitis&mode=math",
-            "/synth/bucket?name=association&gene=IL6&mode=hybrid",
-            "/synth/integrate?gene=IL6&condition=ulcerative%20colitis",
-            "/lit/meta?symbol=IL6&condition=ulcerative%20colitis"
-        ]
-    }
-    return tip
-
-
+app.state.has_v2 = has_v2
 
 
     # ---------------- Meta/debug endpoints ----------------
     @app.get("/livez", tags=["_meta"])
     async def livez():
-        return {"ok": True, "router": app.state.router_location, "import_ok": app.state.router_import_error is None, "synthesis_v2": has_v2}
+        return {"ok": True, "router": app.state.router_location, "import_ok": app.state.router_import_error is None, "synthesis_v2": app.state.has_v2}
 
     @app.get("/readyz", tags=["_meta"])
     async def readyz():
         if app.state.router_import_error is not None:
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "reason": "router import failed", "details": "See /_debug/import"},
+                content={"ok": False, "reason": "router import failed", "details": "See /_debug/import", "synthesis_v2": app.state.has_v2},
             )
-        return {"ok": True, "root_path": ROOT_PATH, "docs": DOCS_URL}
+        return {"ok": True, "root_path": ROOT_PATH, "docs": DOCS_URL, "synthesis_v2": app.state.has_v2}
 
-    @app.get("/_debug/import", tags=["_meta"])
+    
+
+@app.get("/", tags=["_meta"])
+async def about():
+    tip = {
+        "message": "TARGETVAL Gateway â Synthesis v2 available" if getattr(app.state, "has_v2", False) else "TARGETVAL Gateway",
+        "try": [
+            "/synth/bucket?name=genetics&gene=IL6&condition=ulcerative%20colitis&mode=math",
+            "/synth/bucket?name=association&gene=IL6&mode=hybrid",
+            "/synth/integrate?gene=IL6&condition=ulcerative%20colitis",
+            "/lit/meta?symbol=IL6&condition=ulcerative%20colitis"
+        ] if getattr(app.state, "has_v2", False) else ["/docs", "/redoc"]
+    }
+    return tip
+@app.get("/_debug/import", tags=["_meta"])
     async def debug_import():
         return {
             "attempted": app.state.router_location,
