@@ -160,9 +160,9 @@ app.state.has_v2 = has_v2
 
 
     # ---------------- Meta/debug endpoints ----------------
-    @app.get("/livez", tags=["_meta"])
-    async def livez():
-        return {"ok": True, "router": app.state.router_location, "import_ok": app.state.router_import_error is None, "synthesis_v2": app.state.has_v2}
+@app.get("/livez", tags=["_meta"])
+async def livez():
+    return {"ok": True, "router": app.state.router_location, "import_ok": app.state.router_import_error is None, "synthesis_v2": app.state.has_v2}
 
     @app.get("/readyz", tags=["_meta"])
     async def readyz():
