@@ -145,71 +145,89 @@ def create_app() -> FastAPI:
     if router_module:
         app.include_router(router_module.router)
 
-# Detect presence of synthesis v2 endpoints
-has_v2 = False
-try:
-    if router_module and hasattr(router_module, "router"):
-        for r in router_module.router.routes:
-            p = getattr(r, "path", "")
-            if p in ("/synth/integrate", "/lit/meta") or p.startswith("/synth/bucket"):
-                has_v2 = True
-                break
-except Exception:
+    # Detect presence of synthesis v2 endpoints
     has_v2 = False
-app.state.has_v2 = has_v2
-
+    try:
+        if router_module and hasattr(router_module, "router"):
+            for r in router_module.router.routes:
+                p = getattr(r, "path", "")
+                if p in ("/synth/integrate", "/lit/meta") or p.startswith("/synth/bucket"):
+                    has_v2 = True
+                    break
+    except Exception:
+        has_v2 = False
+    app.state.has_v2 = has_v2
 
     # ---------------- Meta/debug endpoints ----------------
-@app.get("/livez", tags=["_meta"])
-async def livez():
-    return {"ok": True, "router": app.state.router_location, "import_ok": app.state.router_import_error is None, "synthesis_v2": app.state.has_v2}
+    @app.get("/livez", tags=["_meta"])
+    async def livez():
+        return {
+            "ok": True,
+            "router": getattr(app.state, "router_location", None),
+            "import_ok": getattr(app.state, "router_import_error", None) is None,
+            "synthesis_v2": getattr(app.state, "has_v2", False),
+        }
 
-@app.get("/readyz", tags=["_meta"])
-async def readyz():
-    if app.state.router_import_error is not None:
-        return JSONResponse(
+    @app.get("/readyz", tags=["_meta"])
+    async def readyz():
+        if getattr(app.state, "router_import_error", None) is not None:
+            return JSONResponse(
                 status_code=503,
-                content={"ok": False, "reason": "router import failed", "details": "See /_debug/import", "synthesis_v2": app.state.has_v2},
+                content={
+                    "ok": False,
+                    "reason": "router import failed",
+                    "details": "See /_debug/import",
+                    "synthesis_v2": getattr(app.state, "has_v2", False),
+                },
             )
-        return {"ok": True, "root_path": ROOT_PATH, "docs": DOCS_URL, "synthesis_v2": app.state.has_v2}
+        return {
+            "ok": True,
+            "root_path": ROOT_PATH,
+            "docs": DOCS_URL,
+            "synthesis_v2": getattr(app.state, "has_v2", False),
+        }
 
-    
+    @app.get("/", tags=["_meta"])
+    async def about():
+        has_v2_local = getattr(app.state, "has_v2", False)
+        tip = {
+            "message": "TARGETVAL Gateway â Synthesis v2 available" if has_v2_local else "TARGETVAL Gateway",
+            "try": [
+                "/synth/bucket?name=genetics&gene=IL6&condition=ulcerative%20colitis&mode=math",
+                "/synth/bucket?name=association&gene=IL6&mode=hybrid",
+                "/synth/integrate?gene=IL6&condition=ulcerative%20colitis",
+                "/lit/meta?symbol=IL6&condition=ulcerative%20colitis",
+            ] if has_v2_local else ["/docs", "/redoc"],
+        }
+        return tip
 
-@app.get("/", tags=["_meta"])
-async def about():
-    tip = {
-        "message": "TARGETVAL Gateway â Synthesis v2 available" if getattr(app.state, "has_v2", False) else "TARGETVAL Gateway",
-        "try": [
-            "/synth/bucket?name=genetics&gene=IL6&condition=ulcerative%20colitis&mode=math",
-            "/synth/bucket?name=association&gene=IL6&mode=hybrid",
-            "/synth/integrate?gene=IL6&condition=ulcerative%20colitis",
-            "/lit/meta?symbol=IL6&condition=ulcerative%20colitis"
-        ] if getattr(app.state, "has_v2", False) else ["/docs", "/redoc"]
-    }
-    return tip
-@app.get("/_debug/import", tags=["_meta"])
-async def debug_import():
-    return {
-            "attempted": app.state.router_location,
-            "error": app.state.router_import_error,
+    @app.get("/_debug/import", tags=["_meta"])
+    async def debug_import():
+        return {
+            "attempted": getattr(app.state, "router_location", None),
+            "error": getattr(app.state, "router_import_error", None),
             "sys_path": sys.path,
-    }
+        }
 
-@app.get("/meta/routes", tags=["_meta"])
-async def list_routes() -> Dict[str, Any]:
-    routes = []
+    @app.get("/meta/routes", tags=["_meta"])
+    async def list_routes() -> Dict[str, Any]:
+        routes: List[Dict[str, Any]] = []
         for r in app.router.routes:
             try:
                 routes.append({
                     "path": getattr(r, "path", None),
                     "name": getattr(r, "name", None),
-                    "methods": sorted(getattr(r, "methods", []) or []),
+                    "methods": sorted(list(getattr(r, "methods", []) or [])),
                 })
             except Exception:
                 pass
-    routes.sort(key=lambda x: (x["path"] or ""))
-    return {"count": len(routes), "routes": routes, "router": app.state.router_location,
-                "import_ok": app.state.router_import_error is None}
+        routes.sort(key=lambda x: (x["path"] or ""))
+        return {
+            "count": len(routes),
+            "routes": routes,
+            "router": getattr(app.state, "router_location", None),
+            "import_ok": getattr(app.state, "router_import_error", None) is None,
+        }
 
     # ---------------- Module aggregator wiring ----------------
     def _build_module_map() -> Dict[str, Any]:
@@ -348,10 +366,6 @@ async def list_routes() -> Dict[str, Any]:
     @app.get("/healthz")
     async def healthz():
         return {"ok": True, "modules": len(MODULE_MAP), "version": APP_VERSION, "has_insight": HAS_INSIGHT}
-
-    @app.get("/")
-    async def root():
-        return {"service": "targetval-gateway", "docs": DOCS_URL, "version": app.version}
 
     @app.get("/modules")
     async def list_modules():
