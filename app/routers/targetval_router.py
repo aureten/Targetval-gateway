@@ -32,6 +32,7 @@ from pydantic import BaseModel
 try:
     from app.utils.validation import validate_symbol, validate_condition  # preferred package path
 except Exception:
+    # Fallback for deployments where validation.py sits at repo root
     from validation import validate_symbol, validate_condition
 
 router = APIRouter()
@@ -655,56 +656,65 @@ async def genetics_mirna(gene: str, limit: int = Query(100, ge=1, le=500)) -> Ev
                         data={"gene": gene, "interactions": []}, citations=[mirnet_url, encori_url], fetched_at=_now())
 
 
-@router.get("/genetics/sqtl")
-async def genetics_sqtl(
-    request: Request,
-    gene: Optional[str] = Query(None),
-    symbol: Optional[str] = Query(None),
-    ensembl: Optional[str] = Query(None),
-    tissue: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=1000),
-):
-    # Resolve to Ensembl if needed
+@router.get("/genetics/sqtl", response_model=Evidence)
+async def genetics_sqtl(gene: str, limit: int = Query(50, ge=1, le=200), ensembl: Optional[str] = None) -> Evidence:
+    """s/eQTL evidence. Primary: eQTL Catalogue sQTL API; Fallback: GTEx v2 independent sQTL → eQTL."""
+    from urllib.parse import urlencode, quote
+    validate_symbol(gene, field_name="gene")
+    ensg = ensembl; sym_cites: List[str] = []
+    if not ensg:
+        ensg, _sym, sym_cites = await _ensembl_from_symbol_or_id(gene)
+    if not ensg:
+        return Evidence(status="ERROR", source="EQTLCatalogue/GTEx", fetched_n=0,
+                        data={"message": "Could not resolve Ensembl gene id", "input": gene},
+                        citations=sym_cites, fetched_at=_now())
+
+    citations = list(sym_cites)
+    rows: List[Any] = []
+
+    # Primary: eQTL Catalogue sQTL
+    cat_url = f"https://www.ebi.ac.uk/eqtl/api/stats/gene-sqtl?gene_id={quote(ensg)}"
     try:
-        from validation import validate_symbol, resolve_gene
+        js = await _get_json(cat_url, tries=1); citations.append(cat_url)
+        if isinstance(js, dict):
+            rows = js.get("results") or js.get("data") or js.get("sqtls") or []
+        elif isinstance(js, list):
+            rows = js
     except Exception:
-        from app.utils.validation import validate_symbol, resolve_gene  # type: ignore
-    q = validate_symbol(ensembl or symbol or gene, "gene")
-    if not str(q).upper().startswith("ENSG"):
-        rg = await resolve_gene(q, http=get_http(request))
-        ensg = (rg.ensembl_id or "").upper()
-    else:
-        ensg = str(q).upper().split(".")[0]
+        pass
 
-    http = get_http(request)
-    citations = []
-    fetched = []
-
-    # GTEx splicing QTL
-    gtex_url = f"https://gtexportal.org/api/v2/association/sqtlByGene?geneId={ensg}"
-    js = await _get_json(http, gtex_url, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-    if js and isinstance(js, dict):
-        rows = js.get("data") or js.get("associations") or []
-        if isinstance(rows, list) and rows:
-            fetched.extend(rows[:limit])
-            citations.append(gtex_url)
-
-    # eQTL Catalogue fallback
-    if not fetched:
-        eqtl_url = f"https://www.ebi.ac.uk/eqtl/api/genes/{ensg}/associations?type=sqtl&size={max(25, limit)}"
-        js2 = await _get_json(http, eqtl_url, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
+    # Fallback: GTEx v2 independent sQTL / eQTL
+    if not rows:
+        # get gencodeId with version if possible
+        gencode_id = ensg
         try:
-            hits = (js2 or {}).get("_embedded", {}).get("associations", [])
-            if hits:
-                fetched.extend(hits[:limit])
-                citations.append(eqtl_url)
+            url_lookup = f"https://rest.ensembl.org/lookup/id/{quote(ensg)}?expand=0;content-type=application/json"
+            info = await _get_json(url_lookup, tries=1); citations.append(url_lookup)
+            if isinstance(info, dict) and info.get("version"):
+                gencode_id = f"{ensg}.{int(info.get('version'))}"
         except Exception:
-            pass
+            gencode_id = ensg
+        url_sqtl = f"https://gtexportal.org/api/v2/association/independentSqtl?{urlencode({'gencodeId': gencode_id})}"
+        url_eqtl = f"https://gtexportal.org/api/v2/association/independentEqtl?{urlencode({'gencodeId': gencode_id})}"
+        try:
+            js = await _get_json(url_sqtl, tries=1); citations.append(url_sqtl)
+            if isinstance(js, dict):
+                rows = js.get("data") or js.get("sqtls") or []
+            elif isinstance(js, list):
+                rows = js
+            if not rows:
+                js2 = await _get_json(url_eqtl, tries=1); citations.append(url_eqtl)
+                if isinstance(js2, dict):
+                    rows = js2.get("data") or js2.get("eqtls") or []
+                elif isinstance(js2, list):
+                    rows = js2
+        except Exception as e:
+            return Evidence(status="ERROR", source=f"GTEx API error: {e}", fetched_n=0,
+                            data={"gene": gene, "ensembl_id": ensg}, citations=citations, fetched_at=_now())
 
-    if not fetched:
-        return {"status": "OK", "fetched_n": 0, "data": {}, "citations": citations, "source": "GTEx/eQTL Catalogue"}
+    return Evidence(status=("OK" if rows else "NO_DATA"), source="eQTL Catalogue → GTEx fallback", fetched_n=len(rows),
+                    data={"gene": gene, "ensembl_id": ensg, "sqtl": rows[:limit]}, citations=citations, fetched_at=_now())
 
-    return {"status": "OK", "fetched_n": len(fetched), "data": {"sqtl": fetched[:limit]}, "citations": citations, "source": "GTEx/eQTL Catalogue"}
 @router.get("/genetics/epigenetics", response_model=Evidence)
 async def genetics_epigenetics(gene: str, flank_kb: int = Query(50, ge=0, le=1000)) -> Evidence:
     from urllib.parse import quote
@@ -785,46 +795,40 @@ async def assoc_geo_arrayexpress(condition: str, limit: int = Query(50, ge=1, le
                     data={"condition": condition, "geo_ids": geo_ids[:limit], "arrayexpress": ae_items[:limit]},
                     citations=cites, fetched_at=_now())
 
-@router.get("/assoc/bulk-prot")
-async def assoc_bulk_prot(
-    request: Request,
-    gene: Optional[str] = Query(None),
-    symbol: Optional[str] = Query(None),
-    ensembl: Optional[str] = Query(None),
-    condition: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=1000),
-):
+@router.get("/assoc/bulk-prot", response_model=Evidence)
+async def assoc_bulk_prot(condition: str, limit: int = Query(50, ge=1, le=200)) -> Evidence:
+    validate_condition(condition, field_name="condition")
+    cites: List[str] = []; records: List[Any] = []
+    url_pdb = ("https://www.proteomicsdb.org/proteomicsdb/api/v2/proteins/search"
+               f"?search={urllib.parse.quote(condition)}")
     try:
-        from validation import validate_symbol, resolve_gene
-    except Exception:
-        from app.utils.validation import validate_symbol, resolve_gene  # type: ignore
-    q = validate_symbol(ensembl or symbol or gene, "gene")
-    http = get_http(request)
-    rg = await resolve_gene(q, http=http)
-    uniprot = rg.uniprot_id
+        js = await _get_json(url_pdb, tries=1); cites.append(url_pdb)
+        if isinstance(js, dict):
+            records = js.get("items", js.get("proteins", js.get("results", []))) or []
+        elif isinstance(js, list):
+            records = js
+    except Exception: pass
+    url_pride = f"https://www.ebi.ac.uk/pride/ws/archive/project/list?keyword={urllib.parse.quote(condition)}"
+    pride_items = []
+    if not records:
+        try:
+            pj = await _get_json(url_pride, tries=1); cites.append(url_pride)
+            pride_items = pj if isinstance(pj, list) else []
+        except Exception: pass
+    px_q = f"https://proteomecentral.proteomexchange.org/cgi/GetDataset?format=JSON&query={urllib.parse.quote(condition)}"
+    px_items = []
+    try:
+        pxj = await _get_json(px_q, tries=1); cites.append(px_q)
+        if isinstance(pxj, dict):
+            px_items = (pxj.get("list") or [])[:limit]
+    except Exception: pass
+    return Evidence(status=("OK" if (records or pride_items or px_items) else "NO_DATA"),
+                    source="ProteomicsDB + PRIDE + ProteomeXchange",
+                    fetched_n=(len(records) + len(pride_items) + len(px_items)),
+                    data={"condition": condition, "proteomicsdb": (records or [])[:limit],
+                          "pride_projects": (pride_items or [])[:limit], "proteomexchange": (px_items or [])[:limit]},
+                    citations=cites, fetched_at=_now())
 
-    citations, hits = [], []
-
-    if uniprot:
-        pride_q = f"https://www.ebi.ac.uk/pride/ws/archive/v2/projects/search?accession={uniprot}&pageSize={max(25, limit)}"
-        js = await _get_json(http, pride_q, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-        if js:
-            items = js.get("list") or js.get("projects") or []
-            if isinstance(items, list) and items:
-                hits.extend(items[:limit])
-                citations.append(pride_q)
-
-    if not hits and uniprot:
-        pdb_q = f"https://www.proteomicsdb.org/proteomicsdb/logic/api/protein/identifier.json?identifier={uniprot}"
-        js2 = await _get_json(http, pdb_q, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-        if js2:
-            hits.extend([js2])
-            citations.append(pdb_q)
-
-    if not hits:
-        return {"status": "OK", "fetched_n": 0, "data": {}, "citations": citations, "source": "PRIDE/ProteomicsDB"}
-
-    return {"status": "OK", "fetched_n": len(hits), "data": {"proteomics": hits[:limit]}, "citations": citations, "source": "PRIDE/ProteomicsDB"}
 @router.post("/assoc/cptac", response_model=Evidence)
 async def assoc_cptac(condition: str, limit: int = Query(50, ge=1, le=200)) -> Evidence:
     """CPTAC via NCI PDC GraphQL; POST because GraphQL."""
@@ -1147,31 +1151,26 @@ async def mech_ppi(symbol: str, species: int = Query(9606, ge=1), cutoff: float 
                         data={"symbol": symbol, "normalized_symbol": sym_norm, "species": species, "neighbors": []},
                         citations=[map_url], fetched_at=_now())
 
-@router.get("/mech/ligrec")
-async def mech_ligrec(
-    request: Request,
-    gene: Optional[str] = Query(None),
-    symbol: Optional[str] = Query(None),
-    ensembl: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=1000),
-):
+@router.get("/mech/ligrec", response_model=Evidence)
+async def mech_ligrec(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
+    validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
+    url = "https://omnipathdb.org/interactions?format=json&genes={gene}&organisms=9606&fields=sources,dorothea_level&substrate_only=false"
     try:
-        from validation import validate_symbol, normalize_gene_symbol
+        js = await _get_json(url.format(gene=urllib.parse.quote(sym_norm)), tries=1)
+        interactions = js if isinstance(js, list) else []
+        filtered = [i for i in interactions if sym_norm in (i.get("source", ""), i.get("target", ""))]
+        return Evidence(status=("OK" if filtered else "NO_DATA"), source="OmniPath interactions", fetched_n=len(filtered),
+                        data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": filtered[:limit]},
+                        citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now())
     except Exception:
-        from app.utils.validation import validate_symbol, normalize_gene_symbol  # type: ignore
-    sym = normalize_gene_symbol(validate_symbol(symbol or gene or ensembl, "gene"))
-    http = get_http(request)
-    citations, pairs = [], []
+        return Evidence(status="NO_DATA", source="OmniPath empty/unavailable", fetched_n=0,
+                        data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": []},
+                        citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now())
 
-    url = f"https://omnipathdb.org/interactions?genes={sym}&databases=ligrecextra,celltalkdb,connectomeDB2020&fields=sources|references|n_references&format=json"
-    js = await _get_json(http, url, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-    if js and isinstance(js, list):
-        pairs = js[:limit]
-        citations.append(url)
+# ---------------------- B5: Tractability & Modality --------------------------
 
-    if not pairs:
-        return {"status": "OK", "fetched_n": 0, "data": {}, "citations": citations or [url], "source": "OmniPath"}
-    return {"status": "OK", "fetched_n": len(pairs), "data": {"ligrec": pairs}, "citations": citations, "source": "OmniPath"}
+
+
 @router.get("/mech/structure", response_model=Evidence)
 async def mech_structure(symbol: str, limit: int = Query(100, ge=1, le=1000)) -> Evidence:
     """Structural motifs/domains: UniProt features (TM helices, topo domains, binding), PDBe structures, AlphaFold prediction.
@@ -1327,133 +1326,99 @@ async def tract_drugs(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evi
                     fetched_n=len(interactions), data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": interactions[:limit]},
                     citations=cites, fetched_at=_now())
 
-@router.get("/tract/ligandability-sm")
-async def tract_ligandability_sm(
-    request: Request,
-    gene: Optional[str] = Query(None),
-    symbol: Optional[str] = Query(None),
-    ensembl: Optional[str] = Query(None),
-):
+@router.get("/tract/ligandability-sm", response_model=Evidence)
+async def tract_ligandability_sm(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
+    validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
+    url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(sym_norm)}&format=json"
     try:
-        from validation import validate_symbol, resolve_gene
+        js = await _get_json(url, tries=1)
+        targets = js.get("targets", []) if isinstance(js, dict) else []
+        return Evidence(status=("OK" if targets else "NO_DATA"), source="ChEMBL target search", fetched_n=len(targets),
+                        data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": targets[:limit]},
+                        citations=[url], fetched_at=_now())
     except Exception:
-        from app.utils.validation import validate_symbol, resolve_gene  # type: ignore
-    q = validate_symbol(symbol or gene or ensembl, "gene")
-    http = get_http(request)
-    rg = await resolve_gene(q, http=http)
-    uni = rg.uniprot_id
-    citations, data = [], {}
+        return Evidence(status="NO_DATA", source="ChEMBL empty/unavailable", fetched_n=0,
+                        data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": []},
+                        citations=[url], fetched_at=_now())
 
-    if uni:
-        map_url = f"https://www.ebi.ac.uk/pdbe/api/mappings/uniprot/{uni}"
-        m = await _get_json(http, map_url, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-        citations.append(map_url)
-        try:
-            entries = (m or {}).get(uni, {}).get("PDB", {})
-            pdbs = list(entries.keys())
-        except Exception:
-            pdbs = []
-        data["pdb_entries"] = pdbs
-
-        af_url = f"https://alphafold.ebi.ac.uk/api/prediction/{uni}"
-        af = await _get_json(http, af_url, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-        citations.append(af_url)
-        data["alphafold_available"] = bool(af)
-
-        up_url = f"https://rest.uniprot.org/uniprotkb/{uni}.json"
-        up = await _get_json(http, up_url, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-        citations.append(up_url)
-        enzyme_like = False
-        try:
-            kws = up.get("keywords") or []
-            cats = [k.get("category","") for k in kws if isinstance(k, dict)]
-            enzyme_like = any(c in ("LIGAND", "CATALYTIC ACTIVITY", "METAL-BINDING") for c in cats)
-        except Exception:
-            pass
-
-        sm_score = 0.0
-        if data.get("pdb_entries"):
-            sm_score = 0.8
-        elif data.get("alphafold_available") and enzyme_like:
-            sm_score = 0.5
-
-        return {"status": "OK", "fetched_n": len(data.get("pdb_entries") or []), "data": {"uniprot": uni, "score": sm_score, **data}, "citations": citations, "source": "PDBe/AF/UniProt"}
-
-    return {"status": "OK", "fetched_n": 0, "data": {}, "citations": citations, "source": "PDBe/AF/UniProt"}
-@router.get("/tract/ligandability-ab")
-async def tract_ligandability_ab(
-    request: Request,
-    gene: Optional[str] = Query(None),
-    symbol: Optional[str] = Query(None),
-    ensembl: Optional[str] = Query(None),
-):
+@router.get("/tract/ligandability-ab", response_model=Evidence)
+async def tract_ligandability_ab(symbol: str, limit: int = Query(50, ge=1, le=200)) -> Evidence:
+    """SAbDab/Thera-SAbDab primary; PDBe supplemental."""
+    validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
+    sabdab_url = f"https://opig.stats.ox.ac.uk/webapps/newsabdab/sabdab/search/?target={urllib.parse.quote(sym_norm)}&output=json"
+    ther_url = f"https://opig.stats.ox.ac.uk/webapps/therasabdab/search/?target={urllib.parse.quote(sym_norm)}&output=json"
+    cites = []; sab_hits = []; ther_hits = []
     try:
-        from validation import validate_symbol, resolve_gene
-    except Exception:
-        from app.utils.validation import validate_symbol, resolve_gene  # type: ignore
-    q = validate_symbol(symbol or gene or ensembl, "gene")
-    http = get_http(request)
-    rg = await resolve_gene(q, http=http)
-    uni = rg.uniprot_id
-    citations, out = [], {}
-
-    if uni:
-        up_url = f"https://rest.uniprot.org/uniprotkb/{uni}.json"
-        up = await _get_json(http, up_url, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-        citations.append(up_url)
-        feats = (up or {}).get("features", [])
-        tms = [f for f in feats if f.get("type") == "TRANSMEMBRANE"]
-        sig = [f for f in feats if f.get("type") == "SIGNAL"]
-        out["signal_peptide"] = bool(sig)
-        out["tm_segments"] = len(tms)
-        score = 0.0
-        if out["signal_peptide"]:
-            score += 0.3
-        if out["tm_segments"] >= 1:
-            score += 0.3
-        return {"status": "OK", "fetched_n": 1, "data": {"uniprot": uni, "score": min(1.0, score), **out}, "citations": citations, "source": "UniProt/HPA"}
-
-    return {"status": "OK", "fetched_n": 0, "data": {}, "citations": citations, "source": "UniProt/HPA"}
-@router.get("/tract/ligandability-oligo")
-async def tract_ligandability_oligo(
-    request: Request,
-    gene: Optional[str] = Query(None),
-    symbol: Optional[str] = Query(None),
-    ensembl: Optional[str] = Query(None),
-):
+        sj = await _get_json(sabdab_url, tries=1); cites.append(sabdab_url)
+        if isinstance(sj, list): sab_hits = sj
+        elif isinstance(sj, dict): sab_hits = sj.get("results") or sj.get("entries") or []
+    except Exception: pass
     try:
-        from validation import validate_symbol, resolve_gene
+        tj = await _get_json(ther_url, tries=1); cites.append(ther_url)
+        if isinstance(tj, list): ther_hits = tj
+        elif isinstance(tj, dict): ther_hits = tj.get("results") or tj.get("entries") or []
+    except Exception: pass
+    pdbe_url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(sym_norm)}"
+    pdbe_entries: List[Any] = []
+    try:
+        js = await _get_json(pdbe_url, tries=1); cites.append(pdbe_url)
+        if isinstance(js, dict):
+            for _, vals in js.items():
+                if isinstance(vals, list): pdbe_entries.extend(vals)
+    except Exception: pass
+    out = [{"source": "SAbDab", "entry": e} for e in sab_hits[:limit]] + [{"source": "Thera-SAbDab", "entry": e} for e in ther_hits[:limit]]
+    if not out and pdbe_entries:
+        out = [{"source": "PDBe", "entry": e} for e in pdbe_entries[:limit]]
+    return Evidence(status=("OK" if out else "NO_DATA"),
+                    source="SAbDab + Thera-SAbDab (+ PDBe)",
+                    fetched_n=len(out),
+                    data={"symbol": symbol, "normalized_symbol": sym_norm, "antibody_targets": out},
+                    citations=cites, fetched_at=_now())
+
+
+@router.get("/tract/ligandability-oligo", response_model=Evidence)
+async def tract_ligandability_oligo(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
+    validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
+    api_url = f"https://aptamer.ribocentre.org/api/?search={urllib.parse.quote(sym_norm)}"
+    citations: List[str] = [api_url]
+    try:
+        js = await _get_json(api_url, tries=1)
+        items = js.get("results") or js.get("items") or js.get("data") or js.get("entries") or []
+        out = []
+        for it in items:
+            ligand = (it.get("Ligand") or it.get("Target") or it.get("ligand") or "")
+            if isinstance(ligand, str) and sym_norm.lower() in ligand.lower():
+                out.append({"id": it.get("id") or it.get("Name") or it.get("Sequence Name") or it.get("name"),
+                            "ligand": ligand, "sequence": it.get("Sequence") or it.get("sequence"),
+                            "kd": it.get("Affinity (Kd)") or it.get("Kd") or it.get("affinity"),
+                            "year": it.get("Discovery Year") or it.get("year"),
+                            "ref": it.get("Article name") or it.get("reference")})
+        if out:
+            return Evidence(status="OK", source="Ribocentre Aptamer API", fetched_n=len(out),
+                            data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": out[:limit]},
+                            citations=citations, fetched_at=_now())
     except Exception:
-        from app.utils.validation import validate_symbol, resolve_gene  # type: ignore
-    q = validate_symbol(symbol or gene or ensembl, "gene")
-    http = get_http(request)
-    rg = await resolve_gene(q, http=http)
-    ensg = rg.ensembl_id
-    citations, data = [], {}
+        pass
 
-    if ensg:
-        tx_url = f"https://rest.ensembl.org/overlap/id/{ensg}?feature=transcript;content-type=application/json"
-        tx = await _get_json(http, tx_url, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-        citations.append(tx_url)
-        tx_count = len(tx or [])
-        data["transcripts"] = tx_count
+    # PubMed fallback: search for aptamer papers mentioning the symbol
+    q = f'("{sym_norm}"[Title/Abstract]) AND (aptamer[Title/Abstract])'
+    try:
+        base_ncbi = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+        url_esearch = f"{base_ncbi}/esearch.fcgi?db=pubmed&retmode=json&retmax={{limit}}&term={{urllib.parse.quote(q)}}"
+        url_esearch = url_esearch.format(limit=min(100, limit), urllib=urllib)
+        ej = await _get_json(url_esearch, tries=1); citations.append(url_esearch)
+        pmids = ((ej.get("esearchresult") or {}).get("idlist") or []) if isinstance(ej, dict) else []
+        # We don’t parse sequences from PubMed; provide references as evidence of oligo tractability
+        refs = [{"pmid": pmid} for pmid in pmids[:limit]]
+        return Evidence(status=("OK" if refs else "NO_DATA"), source="PubMed E-utilities (fallback)",
+                        fetched_n=len(refs),
+                        data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamer_refs": refs},
+                        citations=citations, fetched_at=_now())
+    except Exception:
+        return Evidence(status="NO_DATA", source="Aptamer API empty/unavailable; PubMed fallback failed", fetched_n=0,
+                        data={"symbol": symbol, "normalized_symbol": sym_norm, "aptamers": []}, citations=citations, fetched_at=_now())
 
-        gtex_url = f"https://gtexportal.org/api/v2/gene/expression?gencodeId={ensg}"
-        gx = await _get_json(http, gtex_url, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-        citations.append(gtex_url)
-        breadth = 0
-        try:
-            vals = (gx or {}).get("data", [])
-            breadth = sum(1 for r in vals if float(r.get("median", 0)) > 1.0)
-        except Exception:
-            pass
-        data["expression_breadth_tissues_gt1tpm"] = breadth
 
-        expr_score = 0.6 if breadth <= 10 else 0.3 if breadth <= 20 else 0.1
-        score = min(1.0, (0.2 if tx_count > 0 else 0.0) + expr_score)
-        return {"status": "OK", "fetched_n": tx_count, "data": {"ensembl": ensg, "score": score, **data}, "citations": citations, "source": "Ensembl/GTEx"}
-
-    return {"status": "OK", "fetched_n": 0, "data": {}, "citations": citations, "source": "Ensembl/GTEx"}
 @router.get("/tract/modality", response_model=Evidence)
 async def tract_modality(symbol: str,
                          prior_sm: float = Query(0.55, ge=0.0, le=1.0),
@@ -3051,41 +3016,3 @@ async def lit_meta(symbol: str, condition: Optional[str] = None, limit: int = Qu
     out = await _lit_meta_angles(symbol=symbol, condition=condition, limit=limit)
     return Evidence(status="OK", source="Europe PMC (meta)", fetched_n=(out.get("scores") or {}).get("angles_n", 0),
                     data=out, citations=out.get("citations") or [], fetched_at=_now())
-
-@router.get("/assoc/cptac")
-async def assoc_cptac(
-    request: Request,
-    gene: Optional[str] = Query(None),
-    symbol: Optional[str] = Query(None),
-    ensembl: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=1000),
-):
-    try:
-        from validation import validate_symbol, normalize_gene_symbol
-    except Exception:
-        from app.utils.validation import validate_symbol, normalize_gene_symbol  # type: ignore
-    sym = normalize_gene_symbol(validate_symbol(symbol or gene or ensembl, "gene"))
-    http = get_http(request)
-    citations = []
-
-    gql = """
-    query ProteinsByGene($gene: String!, $size: Int!) {
-      searchProteins(gene: $gene, size: $size) {
-        proteinAccession
-        gene
-        datasetCount
-        cancerTypes
-      }
-    }"""
-    endpoint = "https://pdc.cancer.gov/graphql"
-    try:
-        res = await http.post(endpoint, json={"query": gql, "variables": {"gene": sym, "size": max(25, limit)}}, timeout=OUTBOUND_TIMEOUT_S if 'OUTBOUND_TIMEOUT_S' in globals() else 12.0)
-        citations.append(endpoint)
-        if res.status_code == 200:
-            data = res.json().get("data", {}).get("searchProteins", []) or []
-            return {"status": "OK", "fetched_n": len(data), "data": {"cptac": data[:limit], "meta": {"query_gene": sym}}, "citations": citations, "source": "PDC GraphQL"}
-        if res.status_code == 400:
-            return {"status": "OK", "fetched_n": 0, "data": {"meta": {"query_gene": sym}}, "citations": citations, "source": "PDC GraphQL"}
-    except Exception:
-        pass
-    return {"status": "OK", "fetched_n": 0, "data": {"meta": {"query_gene": sym}}, "citations": citations, "source": "PDC GraphQL"}
