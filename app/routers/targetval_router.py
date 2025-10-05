@@ -29,7 +29,11 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.utils.validation import validate_symbol, validate_condition
+try:
+    from app.utils.validation import validate_symbol, validate_condition  # preferred package path
+except Exception:
+    # Fallback for deployments where validation.py sits at repo root
+    from validation import validate_symbol, validate_condition
 
 router = APIRouter()
 
@@ -2407,41 +2411,7 @@ async def synth_bucket(
         return await _synth_biology(gene=gene, tissue=tissue)
     if name == "tractability":
         return await _synth_tractability(gene=gene, tissue=tissue)
-    if name in ("clinical", "clinical_landscape",
-    mode: str = Query('kg', description='kg|math|hybrid')):
-    name = name.lower().strip()
-    if name in ("clinical_landscape",): name = "clinical"
-
-    # Compute KG path (existing behavior) and optionally math
-    if name == "genetics":
-        kg = await _synth_genetics(gene=gene, condition=condition, tissue=tissue)
-        math_scores = await _math_genetics(gene=gene, condition=condition, tissue=tissue) if mode in ("math","hybrid") else None
-    elif name == "association":
-        kg = await _synth_association(gene=gene, condition=condition)
-        math_scores = await _math_association(gene=gene, condition=condition) if mode in ("math","hybrid") else None
-    elif name == "biology":
-        kg = await _synth_biology(gene=gene, tissue=tissue)
-        math_scores = await _math_biology(gene=gene, tissue=tissue) if mode in ("math","hybrid") else None
-    elif name == "tractability":
-        kg = await _synth_tractability(gene=gene, tissue=tissue)
-        math_scores = await _math_tractability(symbol=gene) if mode in ("math","hybrid") else None
-    elif name == "clinical":
-        kg = await _synth_clinical(gene=gene, condition=condition)
-        math_scores = await _math_clinical(symbol=gene, condition=condition) if mode in ("math","hybrid") else None
-    elif name == "readiness":
-        kg = await _synth_readiness(gene=gene, condition=condition)
-        math_scores = await _math_readiness(symbol=gene, condition=condition) if mode in ("math","hybrid") else None
-    else:
-        raise HTTPException(status_code=400, detail=f"Unknown bucket: {name}")
-
-    if mode == "kg" or not math_scores:
-        return kg
-
-    merged = kg.copy(update={
-        "scores": math_scores.get("scores"),
-        "components": math_scores.get("components")
-    })
-    return merged
+    if name in ("clinical", "clinical_landscape"):
         return await _synth_clinical(gene=gene, condition=condition)
     if name in ("readiness", "development_readiness"):
         return await _synth_readiness(gene=gene)
