@@ -1153,136 +1153,173 @@ async def mech_ppi(symbol: str, species: int = Query(9606, ge=1), cutoff: float 
 
 @router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
-    validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
-    url = "https://omnipathdb.org/interactions?format=json&genes={gene}&organisms=9606&fields=sources,dorothea_level&substrate_only=false"
+    """Ligand–receptor interactions from OmniPath.
+    We query the curated `omnipath` dataset and the non-curated `ligrecextra` dataset.
+    Filter to records where the symbol appears as source or target (genesymbols=1, human only).
+    """
+    from urllib.parse import urlencode, quote
+    validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
+    base = "https://omnipathdb.org/interactions"
+    params = dict(genesymbols=1, organisms=9606, fields="sources,references")
+    # Query curated set first
+    curated_url = f"{base}?{urlencode({**params, 'datasets': 'omnipath', 'partners': sym_norm})}"
+    extra_url = f"{base}?{urlencode({**params, 'datasets': 'ligrecextra', 'partners': sym_norm})}"
+    citations: List[str] = []
+    records: List[Any] = []
     try:
-        js = await _get_json(url.format(gene=urllib.parse.quote(sym_norm)), tries=1)
-        interactions = js if isinstance(js, list) else []
-        filtered = [i for i in interactions if sym_norm in (i.get("source", ""), i.get("target", ""))]
-        return Evidence(status=("OK" if filtered else "NO_DATA"), source="OmniPath interactions", fetched_n=len(filtered),
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": filtered[:limit]},
-                        citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now())
+        js = await _get_json(curated_url, tries=1); citations.append(curated_url)
+        if isinstance(js, list):
+            records.extend(js)
     except Exception:
-        return Evidence(status="NO_DATA", source="OmniPath empty/unavailable", fetched_n=0,
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": []},
-                        citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now())
-
-# ---------------------- B5: Tractability & Modality --------------------------
-
-
-
+        pass
+    try:
+        js2 = await _get_json(extra_url, tries=1); citations.append(extra_url)
+        if isinstance(js2, list):
+            records.extend(js2)
+    except Exception:
+        pass
+    # De-duplicate conservatively by (source,target,direction) if present
+    seen = set(); uniq: List[Any] = []
+    for rec in records:
+        key = (str(rec.get("source")), str(rec.get("target")), str(rec.get("is_directed")))
+        if key not in seen:
+            seen.add(key); uniq.append(rec)
+    status = "OK" if uniq else "NO_DATA"
+    return Evidence(
+        status=status,
+        source="OmniPath curated + ligrecextra",
+        fetched_n=len(uniq),
+        data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": uniq[:limit]},
+        citations=citations,
+        fetched_at=_now(),
+    )
 @router.get("/mech/structure", response_model=Evidence)
 async def mech_structure(symbol: str, limit: int = Query(100, ge=1, le=1000)) -> Evidence:
-    """Structural motifs/domains: UniProt features (TM helices, topo domains, binding), PDBe structures, AlphaFold prediction.
-    If target appears to be a GPCR, tries to enrich with loop/topology heuristics.
+    """Structural motifs/domains + structures.
+    Sources: UniProt features (TM helices, domains, binding), PDBe structures, AlphaFold prediction.
+    NEW: adds pocket predictions (PrankWeb/P2Rank) and AlphaFill ligand context.
     """
-    validate_symbol(symbol, field_name="symbol"); sym = await _normalize_symbol(symbol)
+    from urllib.parse import quote
+    validate_symbol(symbol, field_name="symbol")
+    sym = await _normalize_symbol(symbol)
     cites: List[str] = []
 
     async def _uniprot_accession() -> str:
         url = ("https://rest.uniprot.org/uniprotkb/search"
-               f"?query=gene_exact:{urllib.parse.quote(sym)}+AND+organism_id:9606&size=1&format=json&fields=accession")
+               f"?query=gene_exact:{quote(sym)}+AND+organism_id:9606&size=1&format=json&fields=accession")
         try:
             js = await _get_json(url, tries=1); cites.append(url)
             if isinstance(js, dict) and js.get("results"):
                 r = js["results"][0]
                 return r.get("primaryAccession") or r.get("accession") or ""
         except Exception:
-            return ""
+            pass
         return ""
 
-    async def _uniprot_features(acc: str) -> Dict[str, Any]:
+    async def _uniprot_features(acc: str) -> Dict[str, List[Dict[str, Any]]]:
+        if not acc: return {"tm_helices": [], "domains": [], "binding_sites": []}
+        url = f"https://rest.uniprot.org/uniprotkb/{quote(acc)}.json"
+        tm, dom, bind = [], [], []
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            feats = js.get("features", []) if isinstance(js, dict) else []
+            for f in feats:
+                ftype = (f.get("type") or "").upper()
+                loc = f.get("location") or {}
+                pos = {"start": (loc.get("start") or {}).get("value"), "end": (loc.get("end") or {}).get("value")}
+                if ftype == "TRANSMEM":
+                    tm.append({"type": f.get("type"), "description": f.get("description"), "location": pos})
+                elif ftype in ("DOMAIN","TOPO_DOM"):
+                    dom.append({"type": f.get("type"), "description": f.get("description"), "location": pos})
+                elif ftype in ("BINDING","METAL","SITE"):
+                    bind.append({"type": f.get("type"), "description": f.get("description"), "location": pos})
+        except Exception:
+            pass
+        return {"tm_helices": tm, "domains": dom, "binding_sites": bind}
+
+    async def _pdbe_entries(acc: str) -> List[Dict[str, Any]]:
+        if not acc: return []
+        url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{quote(acc)}"
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            if isinstance(js, dict):
+                return js.get(acc.lower(), []) or js.get(acc.upper(), []) or []
+        except Exception:
+            pass
+        return []
+
+    async def _alphafold(acc: str) -> Any:
+        if not acc: return None
+        url = f"https://alphafold.ebi.ac.uk/api/prediction/{quote(acc)}"
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            return js if isinstance(js, list) else None
+        except Exception:
+            return None
+
+    async def _alphafill_json(acc: str) -> Dict[str, Any]:
         if not acc: return {}
-        url = ("https://rest.uniprot.org/uniprotkb/stream?compressed=false&format=json&"
-               f"query=accession:{urllib.parse.quote(acc)}&fields=ft_transmem,ft_topo_dom,ft_domain,ft_binding,cc_subcellular_location,protein_name")
+        url = f"https://alphafill.eu/v1/aff/{quote(acc)}/json"
         try:
             js = await _get_json(url, tries=1); cites.append(url)
             return js if isinstance(js, dict) else {}
         except Exception:
             return {}
 
-    async def _pdbe_entries(acc: str) -> List[Dict[str, Any]]:
+    async def _prankweb_pockets(acc: str) -> List[Dict[str, Any]]:
+        """Try public PrankWeb REST. If unavailable, return []."""
         if not acc: return []
-        url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(acc)}"
         try:
-            js = await _get_json(url, tries=1); cites.append(url)
-            if isinstance(js, dict):
-                return js.get(acc.lower(), []) or js.get(acc.upper(), []) or []
+            # create analysis job for AlphaFold model by UniProt id
+            job = await _post_json("https://prankweb.cz/api/predictions", {"uniprot": acc, "database": "alphafold"}, tries=1)
+            pid = (job.get("id") if isinstance(job, dict) else None)
+            if not pid: return []
+            res = await _get_json(f"https://prankweb.cz/api/predictions/{pid}", tries=2)
+            pockets = (res.get("pockets") or []) if isinstance(res, dict) else []
+            # strip heavy fields
+            out = []
+            for p in pockets:
+                out.append({
+                    "rank": p.get("rank") or p.get("order"),
+                    "score": p.get("score") or p.get("probability"),
+                    "center": p.get("center") or p.get("centerOfMass"),
+                    "volume": p.get("volume"),
+                    "residue_ids": p.get("residueIds") or [],
+                    "method": "PrankWeb/P2Rank",
+                })
+            return out
         except Exception:
             return []
-        return []
-
-    async def _alphafold(acc: str) -> Any:
-        if not acc: return None
-        url = f"https://alphafold.ebi.ac.uk/api/prediction/{urllib.parse.quote(acc)}"
-        try:
-            js = await _get_json(url, tries=1); cites.append(url)
-            return js
-        except Exception:
-            return None
 
     acc = await _uniprot_accession()
-    up = await _uniprot_features(acc)
+    feats = await _uniprot_features(acc)
     pdbe = await _pdbe_entries(acc)
     af = await _alphafold(acc)
-    is_gpcr = await _is_gpcr(sym)
+    pockets = await _prankweb_pockets(acc)
+    affill = await _alphafill_json(acc)
 
-    def _extract_features(up_json: Dict[str, Any]) -> Dict[str, Any]:
-        out = {"tm_helices": [], "topological_domains": [], "domains": [], "binding_sites": []}
-        try:
-            # UniProt stream returns {"results":[{...}]}
-            recs = up_json.get("results") or []
-            if recs:
-                r = recs[0]
-                features = r.get("features") or []
-                for f in features:
-                    ftype = (f.get("type") or "").upper()
-                    loc = f.get("location") or {}
-                    start = ((loc.get("start") or {}).get("value")) if isinstance(loc.get("start"), dict) else loc.get("start")
-                    end = ((loc.get("end") or {}).get("value")) if isinstance(loc.get("end"), dict) else loc.get("end")
-                    desc = f.get("description") or f.get("ftId") or f.get("evidences") or ""
-                    row = {"start": start, "end": end, "description": desc}
-                    if ftype == "TRANSMEM":
-                        out["tm_helices"].append(row)
-                    elif ftype == "TOPO_DOM":
-                        out["topological_domains"].append({"region": desc or "", **row})
-                    elif ftype == "DOMAIN":
-                        out["domains"].append(row)
-                    elif ftype == "BINDING":
-                        out["binding_sites"].append(row)
-        except Exception:
-            pass
-        return out
+    is_gpcr = any("TRANSMEM" in (d.get("type") or "").upper() for d in feats.get("tm_helices", [])) and symbol.upper().startswith("GPR")
 
-    feats = _extract_features(up)
-
-    # Heuristic annotations for GPCRs (loop labels)
-    ecl_icls = {}
-    if is_gpcr and feats["topological_domains"]:
-        try:
-            for td in feats["topological_domains"]:
-                desc = (td.get("region") or td.get("description") or "").lower()
-                if "extracellular" in desc:
-                    # label as ECL (no exact numbering in UniProt; keep raw)
-                    td["loop_class"] = "ECL"
-                elif "cytoplasmic" in desc or "cytosolic" in desc:
-                    td["loop_class"] = "ICL"
-        except Exception:
-            pass
-
-    return Evidence(status=("OK" if (feats["tm_helices"] or feats["topological_domains"] or feats["domains"] or feats["binding_sites"] or pdbe or af) else "NO_DATA"),
-                    source="UniProt features + PDBe + AlphaFold",
-                    fetched_n=sum(len(v) for v in [feats["tm_helices"], feats["topological_domains"], feats["domains"], feats["binding_sites"]]) + len(pdbe or []),
-                    data={"symbol": symbol, "normalized_symbol": sym,
-                          "uniprot_accession": acc,
-                          "features": feats,
-                          "pdbe_entries": (pdbe or [])[:limit],
-                          "alphafold": af,
-                          "gpcr": is_gpcr},
-                    citations=cites, fetched_at=_now())
-
-
-
+    status = "OK" if (feats["tm_helices"] or feats["domains"] or feats["binding_sites"] or pdbe or af or pockets or affill) else "NO_DATA"
+    return Evidence(
+        status=status,
+        source="UniProt features + PDBe + AlphaFold + PrankWeb pockets + AlphaFill",
+        fetched_n=sum(len(v) for v in [feats["tm_helices"], feats["domains"], feats["binding_sites"]]) + len(pdbe or []) + len(pockets or []),
+        data={
+            "symbol": symbol,
+            "normalized_symbol": sym,
+            "uniprot_accession": acc,
+            "features": feats,
+            "pdbe_entries": (pdbe or [])[:limit],
+            "alphafold": af,
+            "pockets": pockets[:limit],
+            "alphafill": affill,
+            "gpcr": is_gpcr,
+        },
+        citations=cites,
+        fetched_at=_now(),
+    )
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
@@ -1328,19 +1365,63 @@ async def tract_drugs(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evi
 
 @router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
-    validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
-    url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(sym_norm)}&format=json"
-    try:
-        js = await _get_json(url, tries=1)
-        targets = js.get("targets", []) if isinstance(js, dict) else []
-        return Evidence(status=("OK" if targets else "NO_DATA"), source="ChEMBL target search", fetched_n=len(targets),
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": targets[:limit]},
-                        citations=[url], fetched_at=_now())
-    except Exception:
-        return Evidence(status="NO_DATA", source="ChEMBL empty/unavailable", fetched_n=0,
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": []},
-                        citations=[url], fetched_at=_now())
+    """Small-molecule ligandability.
+    Primary: OpenTargets Platform GraphQL (target.tractability).
+    Complement: ChEMBL target search (by symbol) for quick sanity check.
+    Returns NO_DATA (not ERROR) if neither source has records.
+    """
+    from urllib.parse import quote
+    validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
+    ensg, _sym, ensg_cites = await _ensembl_from_symbol_or_id(sym_norm)
+    citations: List[str] = list(ensg_cites)
+    tract: List[Any] = []
 
+    # OpenTargets GraphQL tractability
+    if ensg:
+        gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
+        query = {
+            "query": """
+                query ($id: String!) {
+                  target(ensemblId: $id) {
+                    tractability { modality label value }
+                  }
+                }""",
+            "variables": {"id": ensg},
+        }
+        try:
+            res = await _post_json(gql_url, query, tries=1)
+            citations.append(gql_url)
+            tract = (res.get("data", {}).get("target", {}).get("tractability") or []) if isinstance(res, dict) else []
+        except Exception:
+            # GraphQL down → non-fatal
+            pass
+
+    # ChEMBL complement
+    chembl_targets: List[Any] = []
+    chembl_url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={quote(sym_norm)}&format=json"
+    try:
+        js = await _get_json(chembl_url, tries=1); citations.append(chembl_url)
+        if isinstance(js, dict):
+            chembl_targets = js.get("targets", []) or js.get("items", []) or []
+    except Exception:
+        pass
+
+    status = "OK" if (tract or chembl_targets) else "NO_DATA"
+    return Evidence(
+        status=status,
+        source="OpenTargets GraphQL tractability + ChEMBL complement",
+        fetched_n=(len(tract) + len(chembl_targets)),
+        data={
+            "symbol": symbol,
+            "normalized_symbol": sym_norm,
+            "ensembl_id": ensg,
+            "tractability": tract[:limit],
+            "chembl_targets": chembl_targets[:limit],
+        },
+        citations=citations,
+        fetched_at=_now(),
+    )
 @router.get("/tract/ligandability-ab", response_model=Evidence)
 async def tract_ligandability_ab(symbol: str, limit: int = Query(50, ge=1, le=200)) -> Evidence:
     """SAbDab/Thera-SAbDab primary; PDBe supplemental."""
