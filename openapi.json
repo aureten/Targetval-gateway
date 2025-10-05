@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "TargetVal Gateway API",
-    "version": "2.1.1",
+    "version": "2.1.0",
     "description": "Public OpenAPI aligned to the v2.1 router/main refresh with math synthesis (kg|math|hybrid) and cross-bucket integration."
   },
   "tags": [
@@ -80,6 +80,98 @@
         },
         "required": [
           "status"
+        ]
+      },
+      "AggregateEnvelope": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "object",
+            "properties": {
+              "gene": {
+                "type": "string"
+              },
+              "symbol": {
+                "type": "string"
+              },
+              "ensembl_id": {
+                "type": "string"
+              },
+              "efo": {
+                "type": "string"
+              },
+              "condition": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "integer"
+              },
+              "modules": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "species": {
+                "type": "integer"
+              },
+              "cutoff": {
+                "type": "number"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "live",
+                  "snapshot"
+                ]
+              }
+            }
+          },
+          "results": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "OK",
+                    "ERROR",
+                    "NO_DATA"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                },
+                "fetched_n": {
+                  "type": "integer"
+                },
+                "data": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "citations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fetched_at": {
+                  "type": "number"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            }
+          }
+        },
+        "required": [
+          "results"
         ]
       },
       "BucketSynthesis": {
@@ -222,63 +314,6 @@
           "pieces",
           "fetched_at"
         ]
-      },
-      "AggregateEnvelope": {
-        "type": "object",
-        "properties": {
-          "request": {
-            "type": "object",
-            "properties": {
-              "gene": {
-                "type": "string"
-              },
-              "symbol": {
-                "type": "string"
-              },
-              "ensembl_id": {
-                "type": "string"
-              },
-              "efo": {
-                "type": "string"
-              },
-              "condition": {
-                "type": "string"
-              },
-              "limit": {
-                "type": "integer"
-              },
-              "modules": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "species": {
-                "type": "integer"
-              },
-              "cutoff": {
-                "type": "number"
-              },
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "auto",
-                  "live",
-                  "snapshot"
-                ]
-              }
-            }
-          },
-          "results": {
-            "type": "object",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/Evidence"
-            }
-          }
-        },
-        "required": [
-          "results"
-        ]
       }
     },
     "securitySchemes": {
@@ -312,19 +347,7 @@
         "parameters": [],
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
+            "description": "OK"
           }
         }
       }
@@ -338,19 +361,7 @@
         "parameters": [],
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
+            "description": "OK"
           }
         }
       }
@@ -361,19 +372,25 @@
         "tags": [
           "Utility"
         ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Hybrid source mode."
+          }
+        ],
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
+            "description": "OK"
           }
         }
       }
@@ -396,6 +413,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -403,6 +421,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -410,6 +429,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -417,6 +437,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -424,6 +445,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -431,6 +453,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -441,6 +464,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -458,7 +482,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -528,7 +587,96 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AggregateEnvelope"
+                  "type": "object",
+                  "properties": {
+                    "query": {
+                      "type": "object",
+                      "properties": {
+                        "gene": {
+                          "type": "string"
+                        },
+                        "symbol": {
+                          "type": "string"
+                        },
+                        "ensembl_id": {
+                          "type": "string"
+                        },
+                        "efo": {
+                          "type": "string"
+                        },
+                        "condition": {
+                          "type": "string"
+                        },
+                        "limit": {
+                          "type": "integer"
+                        },
+                        "modules": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "species": {
+                          "type": "integer"
+                        },
+                        "cutoff": {
+                          "type": "number"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "auto",
+                            "live",
+                            "snapshot"
+                          ]
+                        }
+                      }
+                    },
+                    "results": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "OK",
+                              "ERROR",
+                              "NO_DATA"
+                            ]
+                          },
+                          "source": {
+                            "type": "string"
+                          },
+                          "fetched_n": {
+                            "type": "integer"
+                          },
+                          "data": {
+                            "type": "object",
+                            "additionalProperties": true
+                          },
+                          "citations": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "fetched_at": {
+                            "type": "number"
+                          },
+                          "error": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "results"
+                  ]
                 }
               }
             }
@@ -546,6 +694,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -553,6 +702,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -560,6 +710,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -567,6 +718,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -574,6 +726,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -581,6 +734,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -591,6 +745,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -608,7 +763,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -626,6 +816,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -633,6 +824,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -640,6 +832,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -647,6 +840,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -654,6 +848,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -661,6 +856,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -671,6 +867,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -688,7 +885,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -714,6 +946,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -721,6 +954,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -728,6 +962,7 @@
           {
             "in": "query",
             "name": "tissue",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -735,6 +970,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -778,6 +1014,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -815,6 +1052,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -829,7 +1067,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -855,6 +1128,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -862,6 +1136,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -876,7 +1151,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -902,6 +1212,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -909,6 +1220,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 10,
@@ -923,7 +1235,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -941,6 +1288,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -948,6 +1296,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -955,6 +1304,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -962,6 +1312,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -969,6 +1320,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -976,6 +1328,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -986,6 +1339,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1003,7 +1357,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1021,6 +1410,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1028,6 +1418,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1035,6 +1426,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1042,6 +1434,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1049,6 +1442,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1056,6 +1450,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1066,6 +1461,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1083,7 +1479,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1101,6 +1532,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1108,6 +1540,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1115,6 +1548,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1122,6 +1556,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1129,6 +1564,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1136,6 +1572,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1146,6 +1583,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1163,7 +1601,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1181,6 +1654,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1188,6 +1662,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1195,6 +1670,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1202,6 +1678,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1209,6 +1686,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1216,6 +1694,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1226,6 +1705,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1243,7 +1723,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1261,6 +1776,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1268,6 +1784,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1275,6 +1792,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1282,6 +1800,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1289,6 +1808,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1296,6 +1816,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1306,6 +1827,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1323,7 +1845,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1341,6 +1898,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1348,6 +1906,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1355,6 +1914,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1362,6 +1922,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1369,6 +1930,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1376,6 +1938,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1386,6 +1949,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1403,7 +1967,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1421,6 +2020,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1428,6 +2028,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1435,6 +2036,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1442,6 +2044,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1449,6 +2052,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1456,6 +2060,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1466,6 +2071,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1483,7 +2089,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1501,6 +2142,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1508,6 +2150,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1515,6 +2158,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1522,6 +2166,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1529,6 +2174,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1536,6 +2182,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1546,6 +2193,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1563,7 +2211,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1581,6 +2264,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1588,6 +2272,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1595,6 +2280,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1602,6 +2288,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1609,6 +2296,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1616,6 +2304,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1626,6 +2315,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1643,7 +2333,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1661,6 +2386,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1668,6 +2394,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1675,6 +2402,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1682,6 +2410,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1689,6 +2418,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1696,6 +2426,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1706,6 +2437,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1723,7 +2455,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1741,6 +2508,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1748,6 +2516,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1755,6 +2524,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1762,6 +2532,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1769,6 +2540,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1776,6 +2548,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1786,6 +2559,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1803,7 +2577,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1821,6 +2630,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1828,6 +2638,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1835,6 +2646,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1842,6 +2654,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1849,6 +2662,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1856,6 +2670,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1866,6 +2681,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1883,7 +2699,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1901,6 +2752,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1908,6 +2760,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1915,6 +2768,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1922,6 +2776,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1929,6 +2784,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1936,6 +2792,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1946,6 +2803,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -1963,7 +2821,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -1981,6 +2874,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1988,6 +2882,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1995,6 +2890,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2002,6 +2898,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2009,6 +2906,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2016,6 +2914,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2026,6 +2925,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2043,7 +2943,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2061,6 +2996,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2068,6 +3004,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2075,6 +3012,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2082,6 +3020,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2089,6 +3028,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2096,6 +3036,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2106,6 +3047,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2123,7 +3065,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2141,6 +3118,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2148,6 +3126,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2155,6 +3134,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2162,6 +3142,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2169,6 +3150,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2176,6 +3158,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2186,6 +3169,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2203,7 +3187,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2221,6 +3240,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2228,6 +3248,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2235,6 +3256,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2242,6 +3264,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2249,6 +3272,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2256,6 +3280,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2266,6 +3291,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2283,7 +3309,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2301,6 +3362,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2308,6 +3370,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2315,6 +3378,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2322,6 +3386,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2329,6 +3394,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2336,6 +3402,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2346,6 +3413,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2363,7 +3431,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2381,6 +3484,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2388,6 +3492,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2395,6 +3500,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2402,6 +3508,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2409,6 +3516,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2416,6 +3524,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2426,6 +3535,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2443,7 +3553,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2461,6 +3606,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2468,6 +3614,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2475,6 +3622,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2482,6 +3630,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2489,6 +3638,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2496,6 +3646,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2506,6 +3657,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2523,7 +3675,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2541,6 +3728,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2548,6 +3736,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2555,6 +3744,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2562,6 +3752,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2569,6 +3760,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2576,6 +3768,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2586,6 +3779,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2603,7 +3797,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2621,6 +3850,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2628,6 +3858,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2635,6 +3866,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2642,6 +3874,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2649,6 +3882,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2656,6 +3890,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2666,6 +3901,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2683,7 +3919,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2701,6 +3972,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2708,6 +3980,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2715,6 +3988,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2722,6 +3996,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2729,6 +4004,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2736,6 +4012,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2746,6 +4023,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2763,7 +4041,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2781,6 +4094,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2788,6 +4102,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2795,6 +4110,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2802,6 +4118,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2809,6 +4126,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2816,6 +4134,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2826,6 +4145,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2843,7 +4163,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2861,6 +4216,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2868,6 +4224,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2875,6 +4232,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2882,6 +4240,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2889,6 +4248,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2896,6 +4256,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2906,6 +4267,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -2923,7 +4285,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -2941,6 +4338,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2948,6 +4346,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2955,6 +4354,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2962,6 +4362,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2969,6 +4370,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2976,6 +4378,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2986,6 +4389,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3003,7 +4407,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3021,6 +4460,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3028,6 +4468,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3035,6 +4476,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3042,6 +4484,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3049,6 +4492,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3056,6 +4500,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3066,6 +4511,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3083,7 +4529,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3101,6 +4582,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3108,6 +4590,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3115,6 +4598,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3122,6 +4606,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3129,6 +4614,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3136,6 +4622,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3146,6 +4633,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3163,7 +4651,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3181,6 +4704,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3188,6 +4712,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3195,6 +4720,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3202,6 +4728,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3209,6 +4736,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3216,6 +4744,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3226,6 +4755,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3243,7 +4773,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3261,6 +4826,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3268,6 +4834,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3275,6 +4842,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3282,6 +4850,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3289,6 +4858,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3296,6 +4866,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3306,6 +4877,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3323,7 +4895,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3341,6 +4948,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3348,6 +4956,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3355,6 +4964,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3362,6 +4972,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3369,6 +4980,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3376,6 +4988,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3386,6 +4999,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3403,7 +5017,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3421,6 +5070,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3428,6 +5078,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3435,6 +5086,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3442,6 +5094,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3449,6 +5102,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3456,6 +5110,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3466,6 +5121,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3483,7 +5139,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3501,6 +5192,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3508,6 +5200,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3515,6 +5208,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3522,6 +5216,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3529,6 +5224,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3536,6 +5232,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3546,6 +5243,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3563,7 +5261,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3581,6 +5314,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3588,6 +5322,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3595,6 +5330,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3602,6 +5338,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3609,6 +5346,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3616,6 +5354,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3626,6 +5365,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3643,7 +5383,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3661,6 +5436,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3668,6 +5444,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3675,6 +5452,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3682,6 +5460,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3689,6 +5468,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3696,6 +5476,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3706,6 +5487,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3723,7 +5505,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3741,6 +5558,7 @@
           {
             "in": "query",
             "name": "gene",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3748,6 +5566,7 @@
           {
             "in": "query",
             "name": "symbol",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3755,6 +5574,7 @@
           {
             "in": "query",
             "name": "ensembl",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3762,6 +5582,7 @@
           {
             "in": "query",
             "name": "efo",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3769,6 +5590,7 @@
           {
             "in": "query",
             "name": "condition",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3776,6 +5598,7 @@
           {
             "in": "query",
             "name": "limit",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -3786,6 +5609,7 @@
           {
             "in": "query",
             "name": "mode",
+            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -3803,7 +5627,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -3817,4 +5676,3 @@
       "ApiKeyAuth": []
     }
   ]
-}
