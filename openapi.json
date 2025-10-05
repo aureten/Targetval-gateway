@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "TargetVal Gateway API",
-    "version": "2.1.0",
+    "version": "2.1.2",
     "description": "Public OpenAPI aligned to the v2.1 router/main refresh with math synthesis (kg|math|hybrid) and cross-bucket integration."
   },
   "tags": [
@@ -4206,7 +4206,7 @@
         }
       }
     },
-    "/tract/ligandability_sm": {
+    "/tract/ligandability-sm": {
       "get": {
         "summary": "Small-molecule ligandability",
         "tags": [
@@ -4328,7 +4328,7 @@
         }
       }
     },
-    "/tract/ligandability_ab": {
+    "/tract/ligandability-ab": {
       "get": {
         "summary": "Antibody ligandability",
         "tags": [
@@ -4450,7 +4450,7 @@
         }
       }
     },
-    "/tract/ligandability_oligo": {
+    "/tract/ligandability-oligo": {
       "get": {
         "summary": "Oligonucleotide ligandability",
         "tags": [
@@ -5304,7 +5304,7 @@
         }
       }
     },
-    "/clin/biomarker_fit": {
+    "/clin/biomarker-fit": {
       "get": {
         "summary": "Biomarker fitness",
         "tags": [
@@ -5676,3 +5676,4 @@
       "ApiKeyAuth": []
     }
   ]
+}
