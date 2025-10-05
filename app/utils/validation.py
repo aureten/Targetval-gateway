@@ -1,35 +1,49 @@
 
 """
 TargetVal validation & resolution utilities
-------------------------------------------
+==========================================
 
-Safe to import in Render (no network at import time). Includes:
+Design goals
+------------
+- Safe to import in Render or any ASGI context (NO network at import time).
+- Tiny, dependency-light, and testable.
+- Public API kept stable: validate_symbol, validate_condition, resolve_gene,
+  resolve_condition, normalize_* helpers, validate_limit, http_error, get_http,
+  ResolvedGene, ResolvedCondition.
 
-- Lightweight *validators* used by the router:
+What this module does
+---------------------
+- *Validators* (no network):
     validate_symbol(value, field_name="gene")
     validate_condition(value, field_name="efo")
 
-  These perform syntax/presence checks only (no network). They should be
-  called early in request handling to fail fast on obviously bad inputs.
-
-- Async *resolvers* that can be used by endpoints which need canonical IDs:
+- *Resolvers* (optional network, when called):
     resolve_gene(value, http=None, timeout=15.0) -> ResolvedGene
     resolve_condition(value, http=None, timeout=15.0) -> ResolvedCondition
 
-  Resolvers optionally take an httpx.AsyncClient. If None, they create a
-  short-lived client for that call. They are robust against upstream hiccups
-  and return best-effort mappings (symbol/EFO labels are preserved even if
-  ID lookups fail).
+  Resolvers accept an optional httpx.AsyncClient and create/close their own
+  short-lived client when not provided. They tolerate upstream hiccups and
+  return best-effort results with warnings rather than raising.
 
-- Utilities:
-    get_http(request)                 -> return shared httpx client from app.state.http
+- *Utilities*:
+    get_http(request)                 -> shared httpx.AsyncClient from app.state.http (if any)
     normalize_gene_symbol(value)      -> uppercase & strip
     is_ensembl_gene_id(value)         -> bool
-    normalize_efo_id(value)           -> 'EFO_000XXXX' (HP_/MONDO_ supported, padded)
-    validate_limit(limit, lo, hi)     -> clamps/raises
+    normalize_efo_id(value)           -> 'EFO_000XXXX' (HP_/MONDO_ also padded)
+    validate_limit(limit, lo, hi)     -> raises on out-of-bounds
     http_error(status, msg, rid=None) -> FastAPI HTTPException factory
 
-No heavy work at import time. Tiny in-memory TTL caches avoid thundering herd.
+Environment toggles
+-------------------
+HTTP_TIMEOUT      (default: 15.0 seconds)
+HTTP_RETRIES      (default: 3)
+HTTP_BACKOFF      (default: 0.25 seconds base)
+GENE_CACHE_TTL_S  (default: 43200 = 12h)
+EFO_CACHE_TTL_S   (default: 43200 = 12h)
+CACHE_MAXSIZE     (default: 8192)
+HTTP_USER_AGENT   (default: "targetval-validation")
+
+No secrets/keys are referenced here.
 """
 
 from __future__ import annotations
@@ -43,18 +57,35 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import HTTPException
 
-try:
-    import httpx  # optional; resolvers work without if you don't call them
-except Exception:  # pragma: no cover - optional dep
+try:  # optional dependency; only needed if you call the resolvers
+    import httpx  # type: ignore
+except Exception:  # pragma: no cover
     httpx = None  # type: ignore
 
 # ----------------------------------------------------------------------------
 # Tunables
 # ----------------------------------------------------------------------------
 
-DEFAULT_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15.0"))
-DEFAULT_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
-DEFAULT_BACKOFF = float(os.getenv("HTTP_BACKOFF", "0.25"))  # seconds base
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+DEFAULT_TIMEOUT = _float_env("HTTP_TIMEOUT", 15.0)
+DEFAULT_RETRIES = _int_env("HTTP_RETRIES", 3)
+DEFAULT_BACKOFF = _float_env("HTTP_BACKOFF", 0.25)
+HTTP_UA = os.getenv("HTTP_USER_AGENT", "targetval-validation")
+
+GENE_CACHE_TTL_S = _int_env("GENE_CACHE_TTL_S", 12 * 3600)
+EFO_CACHE_TTL_S  = _int_env("EFO_CACHE_TTL_S",  12 * 3600)
+CACHE_MAXSIZE    = _int_env("CACHE_MAXSIZE",    8192)
 
 # ----------------------------------------------------------------------------
 # Basic validators (no network)
@@ -76,23 +107,20 @@ def _ensure_nonempty(value: Optional[str], field: str) -> str:
 
 def validate_symbol(value: Optional[str], field_name: str = "gene") -> str:
     """Permissive gene validator.
-    Accepts symbols (GPR75), Ensembl (ENSG...), or UniProt accessions.
+    Accepts symbols (e.g., GPR75), Ensembl (ENSG...), or UniProt accessions.
     Does *not* hit the network.
     """
     v = _ensure_nonempty(value, field_name)
-    # Be permissive: allow most simple tokens; stricter checks if prefixed IDs
     if _ENSEMBL_GENE_RE.match(v) or _UNIPROT_RE.match(v) or _GENE_RE.match(v):
         return v
     raise HTTPException(status_code=422, detail=f"Invalid {field_name} '{v}'")
-
 
 def validate_condition(value: Optional[str], field_name: str = "efo") -> str:
     """Accepts EFO/HP/MONDO IDs (EFO_0001073 / EFO:0001073) or free text labels.
     Does *not* hit the network. Resolution to IDs is handled by `resolve_condition`.
     """
     v = _ensure_nonempty(value, field_name)
-    # Always allow free text; ID-like strings are normalized later
-    return v
+    return v  # free text allowed; normalization handled later
 
 # ----------------------------------------------------------------------------
 # Normalization helpers
@@ -105,19 +133,20 @@ def is_ensembl_gene_id(value: str) -> bool:
     return bool(_ENSEMBL_GENE_RE.match(str(value).strip()))
 
 def normalize_efo_id(value: str) -> str:
+    """Normalize EFO/HP/MONDO IDs into PREFIX_000XXXX (7+ digits padded)."""
     v = str(value).strip().upper().replace(":", "_")
     if _EFO_RE.match(v):
-        # Zero-pad if needed (keep existing zeros if present)
         if "_" in v:
             prefix, num = v.split("_", 1)
         else:
-            # e.g., EFO0001073 -> split prefix and digits
-            prefix = v[:3]
-            num = v[3:]
-        num = re.sub(r"^0*", "", num)  # remove leading zeros to compute width
-        # Pad to at least 7 digits (common across EFO/HP/MONDO IDs)
-        padded = f"{int(num):07d}"
-        return f"{prefix}_{padded}"
+            prefix, num = v[:3], v[3:]
+        # strip leading zeros just to re-pad deterministically
+        num = re.sub(r"^0+", "", num)
+        try:
+            padded = f"{int(num):07d}"
+            return f"{prefix}_{padded}"
+        except Exception:
+            return f"{prefix}_{num}"
     return v
 
 # ----------------------------------------------------------------------------
@@ -130,7 +159,7 @@ class ResolvedGene:
     symbol: Optional[str] = None
     ensembl_id: Optional[str] = None
     uniprot_id: Optional[str] = None
-    species: Optional[str] = "Homo sapiens"
+    species: str = "Homo sapiens"
     warning: Optional[str] = None
 
 @dataclass
@@ -164,16 +193,17 @@ class _TTLCache:
 
     def set(self, key: str, value: Any) -> None:
         if len(self._data) >= self.maxsize:
-            # cheap eviction: drop 1/16 oldest-ish by timestamp
+            # cheap eviction: drop ~1/16 oldest by timestamp
             try:
-                for k, _ in list(sorted(self._data.items(), key=lambda x: x[1][0]))[: max(1, self.maxsize // 16)]:
+                oldest = sorted(self._data.items(), key=lambda kv: kv[1][0])[: max(1, self.maxsize // 16)]
+                for k, _ in oldest:
                     self._data.pop(k, None)
             except Exception:
                 self._data.clear()
         self._data[key] = (time.time() + self.ttl, value)
 
-_gene_cache = _TTLCache(ttl_seconds=12 * 3600, maxsize=8192)
-_efo_cache = _TTLCache(ttl_seconds=12 * 3600, maxsize=8192)
+_gene_cache = _TTLCache(ttl_seconds=GENE_CACHE_TTL_S, maxsize=CACHE_MAXSIZE)
+_efo_cache = _TTLCache(ttl_seconds=EFO_CACHE_TTL_S,  maxsize=CACHE_MAXSIZE)
 
 # ----------------------------------------------------------------------------
 # HTTP helpers
@@ -192,25 +222,29 @@ async def _ensure_http(http: Optional["httpx.AsyncClient"], timeout: float) -> "
         raise HTTPException(status_code=500, detail="httpx is not installed on the server")
     return httpx.AsyncClient(
         timeout=timeout,
-        headers={"User-Agent": "targetval-validation", "Accept": "application/json"},
+        headers={"User-Agent": HTTP_UA, "Accept": "application/json"},
         http2=True,
     )
 
 async def _sleep_backoff(attempt: int, base: float) -> None:
     await asyncio.sleep(base * (attempt + 1))
 
-async def _get_json(http: "httpx.AsyncClient", url: str, timeout: float, retries: int = DEFAULT_RETRIES, backoff: float = DEFAULT_BACKOFF) -> Optional[Any]:
-    last_exc: Optional[Exception] = None
+async def _get_json(
+    http: "httpx.AsyncClient",
+    url: str,
+    timeout: float,
+    retries: int = DEFAULT_RETRIES,
+    backoff: float = DEFAULT_BACKOFF,
+) -> Optional[Any]:
+    """GET a URL with tolerant JSON parsing, throttling/backoff, and limited retries."""
     for attempt in range(max(1, retries)):
         try:
             r = await http.get(url, timeout=timeout)
             if r.status_code == 200:
-                # be tolerant of wrong content-types
                 try:
                     return r.json()
                 except Exception:
                     return None
-            # 429 handling
             if r.status_code == 429:
                 ra = r.headers.get("Retry-After")
                 try:
@@ -219,16 +253,12 @@ async def _get_json(http: "httpx.AsyncClient", url: str, timeout: float, retries
                     delay = backoff * (attempt + 1)
                 await asyncio.sleep(delay)
                 continue
-            # brief backoff for 5xx
             if 500 <= r.status_code < 600:
                 await _sleep_backoff(attempt, backoff)
                 continue
-            # non-retryable
             return None
-        except Exception as e:
-            last_exc = e
+        except Exception:
             await _sleep_backoff(attempt, backoff)
-    # give up
     return None
 
 # ----------------------------------------------------------------------------
@@ -236,45 +266,50 @@ async def _get_json(http: "httpx.AsyncClient", url: str, timeout: float, retries
 # ----------------------------------------------------------------------------
 
 async def _resolve_gene_via_ensembl(symbol: str, http: "httpx.AsyncClient", timeout: float) -> Optional[ResolvedGene]:
-    # Try Ensembl xrefs/symbol
+    # Try Ensembl xrefs/symbol (list)
     url = f"https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{symbol}?content-type=application/json"
     js = await _get_json(http, url, timeout=timeout)
     if not js:
-        # Newer Ensembl endpoints (lookup/symbol)
+        # Newer lookup endpoint (single object)
         url2 = f"https://rest.ensembl.org/lookup/symbol/homo_sapiens/{symbol}?content-type=application/json"
         js2 = await _get_json(http, url2, timeout=timeout)
         if not js2:
             return None
-        # Single object
         ensg = js2.get("id")
         if ensg:
-            return ResolvedGene(query=symbol, symbol=symbol, ensembl_id=ensg)
+            return ResolvedGene(query=symbol, symbol=symbol, ensembl_id=str(ensg))
         return None
 
-    # xrefs returns a list of records; pick the first gene
-    for rec in js:
-        if str(rec.get("type", "")).lower() == "gene":
-            ensg = rec.get("id") or rec.get("primary_id")
+    # xrefs returns a list; take first gene
+    try:
+        for rec in js:
+            if str(rec.get("type", "")).lower() == "gene":
+                ensg = rec.get("id") or rec.get("primary_id")
+                if ensg:
+                    return ResolvedGene(query=symbol, symbol=symbol, ensembl_id=str(ensg))
+        # fallback: take first record's id
+        if isinstance(js, list) and js:
+            ensg = js[0].get("id") or js[0].get("primary_id")
             if ensg:
-                return ResolvedGene(query=symbol, symbol=symbol, ensembl_id=ensg)
-    # fallback: pick any id
-    if isinstance(js, list) and js:
-        ensg = js[0].get("id") or js[0].get("primary_id")
-        if ensg:
-            return ResolvedGene(query=symbol, symbol=symbol, ensembl_id=ensg)
+                return ResolvedGene(query=symbol, symbol=symbol, ensembl_id=str(ensg))
+    except Exception:
+        pass
     return None
 
 async def _resolve_gene_via_uniprot(symbol: str, http: "httpx.AsyncClient", timeout: float) -> Optional[ResolvedGene]:
-    # Search UniProt for primary gene
+    # Search UniProt for primary gene in human (9606)
+    if httpx is None:  # pragma: no cover
+        return None
     query = f"gene_exact:{symbol} AND organism_id:9606"
-    url = f"https://rest.uniprot.org/uniprotkb/search?query={httpx.QueryParams({'query': query, 'fields': 'accession,gene_primary', 'size': 1}) if httpx else 'query=' + query}&fields=accession,gene_primary&size=1"
+    params = httpx.QueryParams({"query": query, "fields": "accession,gene_primary", "size": 1})
+    url = f"https://rest.uniprot.org/uniprotkb/search?{params}"
     js = await _get_json(http, url, timeout=timeout)
-    # UniProt REST returns {'results': [...]}
     try:
         results = (js or {}).get("results") or []
         if results:
             acc = results[0].get("primaryAccession") or results[0].get("uniProtkbId")
-            return ResolvedGene(query=symbol, symbol=symbol, uniprot_id=acc)
+            if acc:
+                return ResolvedGene(query=symbol, symbol=symbol, uniprot_id=str(acc))
     except Exception:
         pass
     return None
@@ -282,22 +317,21 @@ async def _resolve_gene_via_uniprot(symbol: str, http: "httpx.AsyncClient", time
 async def resolve_gene(value: str, http: Optional["httpx.AsyncClient"] = None, timeout: float = DEFAULT_TIMEOUT) -> ResolvedGene:
     """Resolve a gene symbol/ID to best-known identifiers.
 
-    - If input is already an Ensembl ID: return it normalized.
+    - If input is already an Ensembl ID: return it normalized immediately.
     - Otherwise attempt Ensembl, then UniProt.
-    - On failure, return a minimal object with the input symbol preserved.
+    - On failure, return a minimal object with the input symbol preserved and a warning.
     """
     v = _ensure_nonempty(value, "gene")
     v_norm = normalize_gene_symbol(v)
 
     # Ensembl ID passthrough
     if is_ensembl_gene_id(v_norm):
-        ensg = v_norm.upper().split(".")[0]
+        ensg = v_norm.split(".")[0].upper()
         return ResolvedGene(query=v, symbol=None, ensembl_id=ensg)
 
-    # Cache
     cached = _gene_cache.get(v_norm)
     if cached is not None:
-        return cached
+        return cached  # type: ignore
 
     owns_client = False
     client: Optional["httpx.AsyncClient"] = http
@@ -330,18 +364,19 @@ def _extract_obo_id(doc: Dict[str, Any]) -> Optional[str]:
     if oid:
         return normalize_efo_id(oid)
     iri = doc.get("iri") or doc.get("iri_lowercase") or ""
-    if iri and "/EFO_" in iri:
+    if iri and "/EFO_" in iri.upper():
         frag = iri.rsplit("/", 1)[-1]
         return normalize_efo_id(frag)
     return None
 
 async def _resolve_efo_via_ols4(label: str, http: "httpx.AsyncClient", timeout: float) -> Optional[ResolvedCondition]:
-    params = httpx.QueryParams({"q": label, "ontology": "efo", "rows": 1}) if httpx else f"q={label}&ontology=efo&rows=1"
+    if httpx is None:  # pragma: no cover
+        return None
+    params = httpx.QueryParams({"q": label, "ontology": "efo", "rows": 1})
     url = f"https://www.ebi.ac.uk/ols4/api/search?{params}"
     js = await _get_json(http, url, timeout=timeout)
     if not js:
         return None
-    # OLS4 returns { "response": {"numFound":..., "docs":[...] } }
     try:
         docs = (js.get("response") or {}).get("docs") or []
         if not docs:
@@ -357,7 +392,9 @@ async def _resolve_efo_via_ols4(label: str, http: "httpx.AsyncClient", timeout: 
     return None
 
 async def _resolve_efo_via_ols3(label: str, http: "httpx.AsyncClient", timeout: float) -> Optional[ResolvedCondition]:
-    params = httpx.QueryParams({"q": label, "ontology": "efo", "rows": 1}) if httpx else f"q={label}&ontology=efo&rows=1"
+    if httpx is None:  # pragma: no cover
+        return None
+    params = httpx.QueryParams({"q": label, "ontology": "efo", "rows": 1})
     url = f"https://www.ebi.ac.uk/ols/api/search?{params}"
     js = await _get_json(http, url, timeout=timeout)
     if not js:
@@ -392,7 +429,7 @@ async def resolve_condition(value: str, http: Optional["httpx.AsyncClient"] = No
 
     cached = _efo_cache.get(v_norm.lower())
     if cached is not None:
-        return cached
+        return cached  # type: ignore
 
     owns_client = False
     client: Optional["httpx.AsyncClient"] = http
