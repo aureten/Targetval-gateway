@@ -62,6 +62,106 @@ BACKOFF_BASE_S: float = float(os.getenv("BACKOFF_BASE_S", "0.6"))
 MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "8"))
 _semaphore: asyncio.Semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
+
+# ====== TargetVal reliability helpers (canonical IDs, HTTP semantics, summaries) ======
+
+# Canonical overrides for Swiss-Prot accession where Ensembl cross-ref drifts to TrEMBL
+_CANONICAL_UNIPROT_OVERRIDES = {
+    "IRAK4": "Q9NWZ3",
+    # extend here as needed, e.g. "NLRP3": "Q96P20", "TYK2": "Q9Y463"
+}
+
+def norm_ensembl(gid: Optional[str]) -> Optional[str]:
+    """Strip Ensembl version suffix (e.g., ENSG000001234.15 -> ENSG000001234)."""
+    if not gid: 
+        return gid
+    try:
+        return gid.split('.')[0]
+    except Exception:
+        return gid
+
+async def resolve_uniprot_accession(symbol: str) -> Optional[str]:
+    """Prefer the human Swiss-Prot canonical accession for a gene symbol; fallback to any entry.
+    Uses UniProt REST search with reviewed:true and organism filter.
+    """
+    if not symbol:
+        return None
+    sym = symbol.strip().upper()
+    if sym in _CANONICAL_UNIPROT_OVERRIDES:
+        return _CANONICAL_UNIPROT_OVERRIDES[sym]
+    try:
+        from urllib.parse import quote
+        base = "https://rest.uniprot.org/uniprotkb/search"
+        q1 = f"gene_exact:{quote(sym)} AND organism_id:9606 AND reviewed:true"
+        url1 = f"{base}?query={q1}&fields=primaryAccession,reviewed,entryType&format=json&size=5"
+        js1 = await _get_json(url1, tries=1)
+        results = (js1 or {}).get("results", []) if isinstance(js1, dict) else []
+        if not results:
+            q2 = f"gene_exact:{quote(sym)} AND organism_id:9606"
+            url2 = f"{base}?query={q2}&fields=primaryAccession,reviewed,entryType&format=json&size=5"
+            js2 = await _get_json(url2, tries=1)
+            results = (js2 or {}).get("results", []) if isinstance(js2, dict) else []
+        for r in results or []:
+            if (r.get("reviewed") is True) or (r.get("entryType") == "SWISSPROT"):
+                return r.get("primaryAccession") or r.get("uniProtkbId")
+        if results:
+            return results[0].get("primaryAccession") or results[0].get("uniProtkbId")
+    except Exception:
+        pass
+    return None
+
+class EvidenceStatus:
+    OK = "OK"
+    NO_DATA = "NO_DATA"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    UPSTREAM_ERROR = "UPSTREAM_ERROR"
+    ERROR = "ERROR"
+
+async def http_get_json(url: str, params: Optional[dict]=None, tries: int=2, timeout: int=25):
+    """Resilient GET with simple retries; map 404 to NO_DATA payload marker."""
+    import asyncio
+    backoff = 0.6
+    last_exc = None
+    for _ in range(max(1, tries)):
+        try:
+            r = await client.get(url, params=params, timeout=timeout)
+            if r.status_code == 404:
+                return {"__EV_STATUS__": EvidenceStatus.NO_DATA, "__EV_URL__": str(getattr(r, "url", url))}
+            if r.status_code in (413, 429) or 500 <= r.status_code < 600:
+                await asyncio.sleep(backoff); backoff *= 2
+                continue
+            r.raise_for_status()
+            js = r.json()
+            if isinstance(js, dict):
+                js.setdefault("__EV_STATUS__", EvidenceStatus.OK)
+                js.setdefault("__EV_URL__", str(getattr(r, "url", url)))
+            return js
+        except Exception as e:
+            last_exc = e
+            await asyncio.sleep(backoff); backoff *= 2
+    return {"__EV_STATUS__": EvidenceStatus.UPSTREAM_ERROR, "__EV_ERROR__": str(last_exc or "unknown"), "__EV_URL__": url}
+
+def summarize_records(rows: List[Dict[str, Any]], key_fields: List[str], num_fields: List[str]) -> List[Dict[str, Any]]:
+    """Compact summary by key with counts and simple quantiles for numeric fields."""
+    from collections import defaultdict
+    agg = defaultdict(list)
+    for r in rows or []:
+        key = tuple(r.get(k) for k in key_fields)
+        agg[key].append(r)
+    out = []
+    for key, items in agg.items():
+        rec = {k: v for k, v in zip(key_fields, key)}
+        rec["n"] = len(items)
+        for f in num_fields:
+            vals = [x.get(f) for x in items if isinstance(x.get(f), (int, float))]
+            if vals:
+                vals_sorted = sorted(vals)
+                rec[f+"_min"] = vals_sorted[0]
+                rec[f+"_p50"] = vals_sorted[len(vals_sorted)//2]
+                rec[f+"_max"] = vals_sorted[-1]
+        out.append(rec)
+    return out
+# ====== /helpers ======
 def _now() -> float: return time.time()
 
 async def _get_json(url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None) -> Any:
@@ -661,9 +761,10 @@ async def genetics_sqtl(gene: str, limit: int = Query(50, ge=1, le=200), ensembl
     """s/eQTL evidence. Primary: eQTL Catalogue sQTL API; Fallback: GTEx v2 independent sQTL → eQTL."""
     from urllib.parse import urlencode, quote
     validate_symbol(gene, field_name="gene")
-    ensg = ensembl; sym_cites: List[str] = []
+    ensg = ensembl
     if not ensg:
         ensg, _sym, sym_cites = await _ensembl_from_symbol_or_id(gene)
+    ensg = norm_ensembl(ensg)
     if not ensg:
         return Evidence(status="ERROR", source="EQTLCatalogue/GTEx", fetched_n=0,
                         data={"message": "Could not resolve Ensembl gene id", "input": gene},
@@ -851,7 +952,9 @@ async def assoc_cptac(condition: str, limit: int = Query(50, ge=1, le=200)) -> E
 
 @router.get("/assoc/tabula-hca", response_model=Evidence)
 async def assoc_tabula_hca(condition: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
-    """Tabula Sapiens + Human Cell Atlas quick lookups."""
+    """Tabula Sapiens + Human Cell Atlas quick lookups.
+    summary=True returns compact per-celltype/tissue quantiles; set summary=false for raw with paging.
+    """
     validate_condition(condition, field_name="condition")
     cites: List[str] = []
     tabula_url = "https://tabula-sapiens-portal.ds.czbiohub.org/api/genes?search=" + urllib.parse.quote(condition)
@@ -1153,136 +1256,165 @@ async def mech_ppi(symbol: str, species: int = Query(9606, ge=1), cutoff: float 
 
 @router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
-    validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
-    url = "https://omnipathdb.org/interactions?format=json&genes={gene}&organisms=9606&fields=sources,dorothea_level&substrate_only=false"
+    """Ligand–receptor interactions from OmniPath.
+    We query the curated `omnipath` dataset and the non-curated `ligrecextra` dataset.
+    Filter to records where the symbol appears as source or target (genesymbols=1, human only).
+    """
+    from urllib.parse import urlencode, quote
+    validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
+    base = "https://omnipathdb.org/interactions"
+    params = dict(genesymbols=1, organisms=9606, fields="sources,references")
+    # Query curated set first
+    curated_url = f"{base}?{urlencode({**params, 'datasets': 'omnipath', 'partners': sym_norm})}"
+    extra_url = f"{base}?{urlencode({**params, 'datasets': 'ligrecextra', 'partners': sym_norm})}"
+    citations: List[str] = []
+    records: List[Any] = []
     try:
-        js = await _get_json(url.format(gene=urllib.parse.quote(sym_norm)), tries=1)
-        interactions = js if isinstance(js, list) else []
-        filtered = [i for i in interactions if sym_norm in (i.get("source", ""), i.get("target", ""))]
-        return Evidence(status=("OK" if filtered else "NO_DATA"), source="OmniPath interactions", fetched_n=len(filtered),
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": filtered[:limit]},
-                        citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now())
+        js = await _get_json(curated_url, tries=1); citations.append(curated_url)
+        if isinstance(js, list):
+            records.extend(js)
     except Exception:
-        return Evidence(status="NO_DATA", source="OmniPath empty/unavailable", fetched_n=0,
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": []},
-                        citations=[url.format(gene=urllib.parse.quote(sym_norm))], fetched_at=_now())
-
-# ---------------------- B5: Tractability & Modality --------------------------
-
-
-
+        pass
+    try:
+        js2 = await _get_json(extra_url, tries=1); citations.append(extra_url)
+        if isinstance(js2, list):
+            records.extend(js2)
+    except Exception:
+        pass
+    # De-duplicate conservatively by (source,target,direction) if present
+    seen = set(); uniq: List[Any] = []
+    for rec in records:
+        key = (str(rec.get("source")), str(rec.get("target")), str(rec.get("is_directed")))
+        if key not in seen:
+            seen.add(key); uniq.append(rec)
+    status = "OK" if uniq else "NO_DATA"
+    return Evidence(
+        status=status,
+        source="OmniPath curated + ligrecextra",
+        fetched_n=len(uniq),
+        data={"symbol": symbol, "normalized_symbol": sym_norm, "interactions": uniq[:limit]},
+        citations=citations,
+        fetched_at=_now(),
+    )
 @router.get("/mech/structure", response_model=Evidence)
 async def mech_structure(symbol: str, limit: int = Query(100, ge=1, le=1000)) -> Evidence:
-    """Structural motifs/domains: UniProt features (TM helices, topo domains, binding), PDBe structures, AlphaFold prediction.
-    If target appears to be a GPCR, tries to enrich with loop/topology heuristics.
+    """Structural motifs/domains + structures.
+    Sources: UniProt features (TM helices, domains, binding), PDBe structures, AlphaFold prediction.
+    NEW: adds pocket predictions (PrankWeb/P2Rank) and AlphaFill ligand context.
     """
-    validate_symbol(symbol, field_name="symbol"); sym = await _normalize_symbol(symbol)
+    from urllib.parse import quote
+    validate_symbol(symbol, field_name="symbol")
+    sym = await _normalize_symbol(symbol)
     cites: List[str] = []
 
     async def _uniprot_accession() -> str:
-        url = ("https://rest.uniprot.org/uniprotkb/search"
-               f"?query=gene_exact:{urllib.parse.quote(sym)}+AND+organism_id:9606&size=1&format=json&fields=accession")
+        acc = await resolve_uniprot_accession(sym)
+        return acc or ""
+
+    async def _uniprot_features(acc: str) -> Dict[str, List[Dict[str, Any]]]:
+        if not acc: return {"tm_helices": [], "domains": [], "binding_sites": []}
+        url = f"https://rest.uniprot.org/uniprotkb/{quote(acc)}.json"
+        tm, dom, bind = [], [], []
         try:
             js = await _get_json(url, tries=1); cites.append(url)
-            if isinstance(js, dict) and js.get("results"):
-                r = js["results"][0]
-                return r.get("primaryAccession") or r.get("accession") or ""
+            feats = js.get("features", []) if isinstance(js, dict) else []
+            for f in feats:
+                ftype = (f.get("type") or "").upper()
+                loc = f.get("location") or {}
+                pos = {"start": (loc.get("start") or {}).get("value"), "end": (loc.get("end") or {}).get("value")}
+                if ftype == "TRANSMEM":
+                    tm.append({"type": f.get("type"), "description": f.get("description"), "location": pos})
+                elif ftype in ("DOMAIN","TOPO_DOM"):
+                    dom.append({"type": f.get("type"), "description": f.get("description"), "location": pos})
+                elif ftype in ("BINDING","METAL","SITE"):
+                    bind.append({"type": f.get("type"), "description": f.get("description"), "location": pos})
         except Exception:
-            return ""
-        return ""
+            pass
+        return {"tm_helices": tm, "domains": dom, "binding_sites": bind}
 
-    async def _uniprot_features(acc: str) -> Dict[str, Any]:
+    async def _pdbe_entries(acc: str) -> List[Dict[str, Any]]:
+        if not acc: return []
+        url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{quote(acc)}"
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            if isinstance(js, dict):
+                return js.get(acc.lower(), []) or js.get(acc.upper(), []) or []
+        except Exception:
+            pass
+        return []
+
+    async def _alphafold(acc: str) -> Any:
+        if not acc: return None
+        url = f"https://alphafold.ebi.ac.uk/api/prediction/{quote(acc)}"
+        try:
+            js = await _get_json(url, tries=1); cites.append(url)
+            return js if isinstance(js, list) else None
+        except Exception:
+            return None
+
+    async def _alphafill_json(acc: str) -> Dict[str, Any]:
         if not acc: return {}
-        url = ("https://rest.uniprot.org/uniprotkb/stream?compressed=false&format=json&"
-               f"query=accession:{urllib.parse.quote(acc)}&fields=ft_transmem,ft_topo_dom,ft_domain,ft_binding,cc_subcellular_location,protein_name")
+        url = f"https://alphafill.eu/v1/aff/{quote(acc)}/json"
         try:
             js = await _get_json(url, tries=1); cites.append(url)
             return js if isinstance(js, dict) else {}
         except Exception:
             return {}
 
-    async def _pdbe_entries(acc: str) -> List[Dict[str, Any]]:
+    async def _prankweb_pockets(acc: str) -> List[Dict[str, Any]]:
+        """Try public PrankWeb REST. If unavailable, return []."""
         if not acc: return []
-        url = f"https://www.ebi.ac.uk/pdbe/api/proteins/{urllib.parse.quote(acc)}"
         try:
-            js = await _get_json(url, tries=1); cites.append(url)
-            if isinstance(js, dict):
-                return js.get(acc.lower(), []) or js.get(acc.upper(), []) or []
+            # create analysis job for AlphaFold model by UniProt id
+            job = await _post_json("https://prankweb.cz/api/predictions", {"uniprot": acc, "database": "alphafold"}, tries=1)
+            pid = (job.get("id") if isinstance(job, dict) else None)
+            if not pid: return []
+            res = await _get_json(f"https://prankweb.cz/api/predictions/{pid}", tries=2)
+            pockets = (res.get("pockets") or []) if isinstance(res, dict) else []
+            # strip heavy fields
+            out = []
+            for p in pockets:
+                out.append({
+                    "rank": p.get("rank") or p.get("order"),
+                    "score": p.get("score") or p.get("probability"),
+                    "center": p.get("center") or p.get("centerOfMass"),
+                    "volume": p.get("volume"),
+                    "residue_ids": p.get("residueIds") or [],
+                    "method": "PrankWeb/P2Rank",
+                })
+            return out
         except Exception:
             return []
-        return []
-
-    async def _alphafold(acc: str) -> Any:
-        if not acc: return None
-        url = f"https://alphafold.ebi.ac.uk/api/prediction/{urllib.parse.quote(acc)}"
-        try:
-            js = await _get_json(url, tries=1); cites.append(url)
-            return js
-        except Exception:
-            return None
 
     acc = await _uniprot_accession()
-    up = await _uniprot_features(acc)
+    feats = await _uniprot_features(acc)
     pdbe = await _pdbe_entries(acc)
     af = await _alphafold(acc)
-    is_gpcr = await _is_gpcr(sym)
+    pockets = await _prankweb_pockets(acc)
+    affill = await _alphafill_json(acc)
 
-    def _extract_features(up_json: Dict[str, Any]) -> Dict[str, Any]:
-        out = {"tm_helices": [], "topological_domains": [], "domains": [], "binding_sites": []}
-        try:
-            # UniProt stream returns {"results":[{...}]}
-            recs = up_json.get("results") or []
-            if recs:
-                r = recs[0]
-                features = r.get("features") or []
-                for f in features:
-                    ftype = (f.get("type") or "").upper()
-                    loc = f.get("location") or {}
-                    start = ((loc.get("start") or {}).get("value")) if isinstance(loc.get("start"), dict) else loc.get("start")
-                    end = ((loc.get("end") or {}).get("value")) if isinstance(loc.get("end"), dict) else loc.get("end")
-                    desc = f.get("description") or f.get("ftId") or f.get("evidences") or ""
-                    row = {"start": start, "end": end, "description": desc}
-                    if ftype == "TRANSMEM":
-                        out["tm_helices"].append(row)
-                    elif ftype == "TOPO_DOM":
-                        out["topological_domains"].append({"region": desc or "", **row})
-                    elif ftype == "DOMAIN":
-                        out["domains"].append(row)
-                    elif ftype == "BINDING":
-                        out["binding_sites"].append(row)
-        except Exception:
-            pass
-        return out
+    is_gpcr = any("TRANSMEM" in (d.get("type") or "").upper() for d in feats.get("tm_helices", [])) and symbol.upper().startswith("GPR")
 
-    feats = _extract_features(up)
-
-    # Heuristic annotations for GPCRs (loop labels)
-    ecl_icls = {}
-    if is_gpcr and feats["topological_domains"]:
-        try:
-            for td in feats["topological_domains"]:
-                desc = (td.get("region") or td.get("description") or "").lower()
-                if "extracellular" in desc:
-                    # label as ECL (no exact numbering in UniProt; keep raw)
-                    td["loop_class"] = "ECL"
-                elif "cytoplasmic" in desc or "cytosolic" in desc:
-                    td["loop_class"] = "ICL"
-        except Exception:
-            pass
-
-    return Evidence(status=("OK" if (feats["tm_helices"] or feats["topological_domains"] or feats["domains"] or feats["binding_sites"] or pdbe or af) else "NO_DATA"),
-                    source="UniProt features + PDBe + AlphaFold",
-                    fetched_n=sum(len(v) for v in [feats["tm_helices"], feats["topological_domains"], feats["domains"], feats["binding_sites"]]) + len(pdbe or []),
-                    data={"symbol": symbol, "normalized_symbol": sym,
-                          "uniprot_accession": acc,
-                          "features": feats,
-                          "pdbe_entries": (pdbe or [])[:limit],
-                          "alphafold": af,
-                          "gpcr": is_gpcr},
-                    citations=cites, fetched_at=_now())
-
-
-
+    status = "OK" if (feats["tm_helices"] or feats["domains"] or feats["binding_sites"] or pdbe or af or pockets or affill) else "NO_DATA"
+    return Evidence(
+        status=status,
+        source="UniProt features + PDBe + AlphaFold + PrankWeb pockets + AlphaFill",
+        fetched_n=sum(len(v) for v in [feats["tm_helices"], feats["domains"], feats["binding_sites"]]) + len(pdbe or []) + len(pockets or []),
+        data={
+            "symbol": symbol,
+            "normalized_symbol": sym,
+            "uniprot_accession": acc,
+            "features": feats,
+            "pdbe_entries": (pdbe or [])[:limit],
+            "alphafold": af,
+            "pockets": pockets[:limit],
+            "alphafill": affill,
+            "gpcr": is_gpcr,
+        },
+        citations=cites,
+        fetched_at=_now(),
+    )
 @router.get("/tract/drugs", response_model=Evidence)
 async def tract_drugs(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
     validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
@@ -1328,19 +1460,79 @@ async def tract_drugs(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evi
 
 @router.get("/tract/ligandability-sm", response_model=Evidence)
 async def tract_ligandability_sm(symbol: str, limit: int = Query(100, ge=1, le=500)) -> Evidence:
-    validate_symbol(symbol, field_name="symbol"); sym_norm = await _normalize_symbol(symbol)
-    url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={urllib.parse.quote(sym_norm)}&format=json"
-    try:
-        js = await _get_json(url, tries=1)
-        targets = js.get("targets", []) if isinstance(js, dict) else []
-        return Evidence(status=("OK" if targets else "NO_DATA"), source="ChEMBL target search", fetched_n=len(targets),
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": targets[:limit]},
-                        citations=[url], fetched_at=_now())
-    except Exception:
-        return Evidence(status="NO_DATA", source="ChEMBL empty/unavailable", fetched_n=0,
-                        data={"symbol": symbol, "normalized_symbol": sym_norm, "targets": []},
-                        citations=[url], fetched_at=_now())
+    """Small-molecule ligandability.
+    Primary: OpenTargets Platform GraphQL (target.tractability).
+    Complement: ChEMBL target search (by symbol) for quick sanity check.
+    Returns NO_DATA (not ERROR) if neither source has records.
+    """
+    from urllib.parse import quote
+    validate_symbol(symbol, field_name="symbol")
+    sym_norm = await _normalize_symbol(symbol)
+    ensg, _sym, ensg_cites = await _ensembl_from_symbol_or_id(sym_norm)
+    citations: List[str] = list(ensg_cites)
+    tract: List[Any] = []
 
+    # OpenTargets GraphQL tractability
+
+    # ChEMBL accession-anchored complement
+    try:
+        acc = await resolve_uniprot_accession(sym_norm)
+    except Exception:
+        acc = None
+    chembl_by_acc = []
+    if acc:
+        url_acc = f\"https://www.ebi.ac.uk/chembl/api/data/target.json?target_components__accession={acc}\"
+        try:
+            js_acc = await _get_json(url_acc, tries=1); citations.append(url_acc)
+            if isinstance(js_acc, dict):
+                chembl_by_acc = js_acc.get(\"targets\") or js_acc.get(\"items\") or []
+        except Exception:
+            pass
+
+    if ensg:
+        gql_url = "https://api.platform.opentargets.org/api/v4/graphql"
+        query = {
+            "query": """
+                query ($id: String!) {
+                  target(ensemblId: $id) {
+                    tractability { modality label value }
+                  }
+                }""",
+            "variables": {"id": ensg},
+        }
+        try:
+            res = await _post_json(gql_url, query, tries=1)
+            citations.append(gql_url)
+            tract = (res.get("data", {}).get("target", {}).get("tractability") or []) if isinstance(res, dict) else []
+        except Exception:
+            # GraphQL down → non-fatal
+            pass
+
+    # ChEMBL complement
+    chembl_targets: List[Any] = []
+    chembl_url = f"https://www.ebi.ac.uk/chembl/api/data/target/search.json?q={quote(sym_norm)}&format=json"
+    try:
+        js = await _get_json(chembl_url, tries=1); citations.append(chembl_url)
+        if isinstance(js, dict):
+            chembl_targets = js.get("targets", []) or js.get("items", []) or []
+    except Exception:
+        pass
+
+    status = "OK" if (tract or chembl_targets) else "NO_DATA"
+    return Evidence(
+        status=status,
+        source="OpenTargets GraphQL tractability + ChEMBL complement",
+        fetched_n=(len(tract) + len(chembl_targets)),
+        data={
+            "symbol": symbol,
+            "normalized_symbol": sym_norm,
+            "ensembl_id": ensg,
+            "tractability": tract[:limit],
+            "chembl_targets": chembl_targets[:limit],
+        },
+        citations=citations,
+        fetched_at=_now(),
+    )
 @router.get("/tract/ligandability-ab", response_model=Evidence)
 async def tract_ligandability_ab(symbol: str, limit: int = Query(50, ge=1, le=200)) -> Evidence:
     """SAbDab/Thera-SAbDab primary; PDBe supplemental."""
@@ -3016,3 +3208,562 @@ async def lit_meta(symbol: str, condition: Optional[str] = None, limit: int = Qu
     out = await _lit_meta_angles(symbol=symbol, condition=condition, limit=limit)
     return Evidence(status="OK", source="Europe PMC (meta)", fetched_n=(out.get("scores") or {}).get("angles_n", 0),
                     data=out, citations=out.get("citations") or [], fetched_at=_now())
+
+# ====== Optional Sheaf utility (lean) + endpoints ======
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+class _KnowledgeSheaf:
+    def __init__(self):
+        self.nodes = {}    # id -> dim
+        self.edges = []    # (u,v, dim, R_u, R_v, w)
+
+    def add_node(self, nid: str, dim: int):
+        self.nodes[nid] = dim
+
+    def add_edge(self, u: str, v: str, dim: int, R_u, R_v, w: float = 1.0):
+        self.edges.append((u, v, dim, np.array(R_u), np.array(R_v), float(w)))
+
+    def fit(self, y_node: Dict[str, Any], y_edge: Dict[Tuple[str,str], Any]):
+        if np is None or not self.edges:
+            return {"x_star": {}, "edge_residuals": [], "coherence": 1.0}
+        res = []
+        for (u,v,dim,Ru,Rv,w) in self.edges:
+            yu = np.array(y_node.get(u, np.zeros((dim,))), dtype=float).reshape(-1)
+            yv = np.array(y_node.get(v, np.zeros((dim,))), dtype=float).reshape(-1)
+            ye = np.array(y_edge.get((u,v), np.zeros((dim,))), dtype=float).reshape(-1)
+            r = float(w) * float(np.linalg.norm(Ru @ ye - yu) + np.linalg.norm(Rv @ ye - yv))
+            res.append({"u":u,"v":v,"residual":r})
+        E = float(np.mean([x["residual"] for x in res])) if res else 0.0
+        kappa = float(np.exp(-E/0.7))
+        return {"x_star": y_node, "edge_residuals": res, "coherence": kappa}
+
+@router.post("/synth/sheaf", response_model=Evidence)
+async def synth_sheaf(symbol: str, bucket: str = Query(..., regex="^(genetics|omics|mechanism|modality|clinical|ti)$")) -> Evidence:
+    """Minimal sheaf coherence demo; returns a coherence scalar and residual hotspots.
+    Real implementation should assemble bucket-specific nodes/edges from live calls.
+    """
+    try:
+        sheaf = _KnowledgeSheaf()
+        # Toy scaffold: two contexts must agree (identity restrictions); use fake measurements=0
+        sheaf.add_node("nodeA", 1); sheaf.add_node("nodeB", 1)
+        sheaf.add_edge("nodeA","nodeB",1, [[1.0]], [[1.0]], 1.0)
+        fit = sheaf.fit({"nodeA": [0.0], "nodeB": [0.0]}, {("nodeA","nodeB"): [0.0]})
+        return Evidence(status="OK", source="KnowledgeSheaf", fetched_n=len(fit.get("edge_residuals", [])),
+                        data={"symbol": symbol, "bucket": bucket, **fit}, citations=[], fetched_at=_now())
+    except Exception as e:
+        return Evidence(status="ERROR", source="KnowledgeSheaf", fetched_n=0,
+                        data={"message": str(e)}, citations=[], fetched_at=_now())
+
+# ====== TI endpoints (skeletons that aggregate when sources are present) ======
+@router.get("/synth/ti", response_model=Evidence)
+async def synth_ti(symbol: str, modality: str = Query(..., regex="^(SM|Ab|Oligo)$"), site: Optional[str] = None) -> Evidence:
+    """Therapeutic Index roll-up (skeleton). Computes a placeholder ledger until TI submodules are wired."""
+    try:
+        ledger = {
+            "EfficacyMargin": None,
+            "OnTargetSafety": None,
+            "HazardOffTarget": None,
+            "ImmuneGate": None,
+            "TI": None,
+        }
+        return Evidence(status="NO_DATA", source="TI", fetched_n=0,
+                        data={"symbol": symbol, "modality": modality, "site": site, "ledger": ledger},
+                        citations=[], fetched_at=_now())
+    except Exception as e:
+        return Evidence(status="ERROR", source="TI", fetched_n=0, data={"message": str(e)}, citations=[], fetched_at=_now())
+
+
+def _lit_stance(title: str, abstract: str) -> str:
+    t = (title or "").lower() + " " + (abstract or "").lower()
+    if any(neg in t for neg in ["no association", "did not replicate", "null association", "not significant", "failed replication", "no effect"]):
+        return "disconfirm"
+    if any(pos in t for pos in ["mendelian randomization", "colocalization", "colocalisation", "replication", "significant association", "crispra", "crispri", "perturb-seq", "functional validation", "mpra", "starr"]):
+        return "confirm"
+    return "neutral"
+
+async def _lit_search_guarded(query_confirm: str, query_disconfirm: str = None, limit: int = 25):
+    EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    def _q(url): return url + f"&format=json&pageSize={min(1000, limit)}"
+    conf = await _get_json(_q(f"{EPMC}?query={urllib.parse.quote(query_confirm)}"), tries=2, ttl=3600) or {}
+    dis = await _get_json(_q(f"{EPMC}?query={urllib.parse.quote(query_disconfirm)}"), tries=2, ttl=3600) or {} if query_disconfirm else {}
+    def norm(js):
+        res = ((js.get("resultList") or {}).get("result") or []) if isinstance(js, dict) else []
+        out = []
+        for r in res:
+            stance = _lit_stance(r.get("title",""), r.get("abstractText",""))
+            out.append({
+                "pmid": r.get("pmid") or r.get("id"),
+                "title": r.get("title"), "journal": r.get("journalTitle"), "year": r.get("pubYear"),
+                "stance": stance, "doi": r.get("doi"),
+                "link": f"https://europepmc.org/abstract/MED/{r.get('pmid')}" if r.get("pmid") else None
+            })
+        return out
+    alln = norm(conf) + norm(dis)
+    groups = {"confirming": [], "disconfirming": [], "neutral/context": []}
+    for n in alln:
+        groups["confirming" if n["stance"]=="confirm" else "disconfirming" if n["stance"]=="disconfirm" else "neutral/context"].append(n)
+    return groups
+
+
+# ------------------------------
+# Registry v4 (multi-bucket, 58 modules)
+# ------------------------------
+REGISTRY_V4 = {
+    "identity": ["/expr/baseline", "/expr/localization", "/mech/structure", "/expr/inducibility"],
+    "association": [
+        "/assoc/bulk-rna","/assoc/sc","/assoc/spatial-expression","/assoc/spatial-neighborhoods",
+        "/assoc/bulk-prot","/assoc/omics-phosphoproteomics","/assoc/omics-metabolites","/assoc/hpa-pathology",
+        "/assoc/bulk-prot-pdc","/assoc/metabolomics-ukb-nightingale","/sc/bican","/sc/hubmap"
+    ],
+    "genetic_causality": [
+        "/genetics/l2g","/genetics/coloc","/genetics/mr","/genetics/rare","/genetics/mendelian",
+        "/genetics/phewas-human-knockout","/genetics/sqtl","/genetics/pqtl","/genetics/chromatin-contacts",
+        "/genetics/functional","/genetics/lncrna","/genetics/mirna","/genetics/pathogenicity-priors",
+        "/genetics/finngen-summary","/genetics/gbmi-summary","/genetics/mavedb"
+    ],
+    "mechanism": ["/mech/ppi","/mech/pathways","/mech/ligrec","/assoc/perturb","/assoc/perturbatlas","/assoc/omics-phosphoproteomics"],
+    "tractability": [
+        "/tract/drugs","/tract/ligandability-sm","/tract/ligandability-ab","/tract/ligandability-oligo",
+        "/tract/modality","/tract/immunogenicity","/tract/mhc-binding","/tract/iedb-epitopes","/tract/surfaceome-hpa","/tract/tsca"
+    ],
+    "clinical_fit": [
+        "/clin/endpoints","/clin/biomarker-fit","/clin/pipeline","/clin/safety","/clin/safety-pgx","/clin/rwe",
+        "/clin/on-target-ae-prior","/comp/intensity","/comp/freedom","/clin/eu-ctr-linkouts","/assoc/hpa-pathology","/genetics/intolerance"
+    ],
+    "therapeutic_index": ["/synth/therapeutic-index"]
+}
+
+@router.get("/registry/buckets-v4")
+def registry_buckets_v4() -> dict:
+    mods = []
+    for k,v in REGISTRY_V4.items():
+        if k != "therapeutic_index": mods.extend(v)
+    umods = sorted(set(mods))
+    return {"buckets": {k: v for k, v in REGISTRY_V4.items() if k != "therapeutic_index"},
+            "synthesis_bucket": "therapeutic_index",
+            "counts": {k: len(v) for k, v in REGISTRY_V4.items()},
+            "total_modules": len(umods)}
+
+@router.get("/registry/modules-v4")
+def registry_modules_v4() -> dict:
+    mods = []
+    for k, v in REGISTRY_V4.items():
+        if k != "therapeutic_index": mods.extend(v)
+    return {"n_modules": len(sorted(set(mods))), "modules": sorted(set(mods))}
+
+
+@router.get("/genetics/pqtl", response_model=Evidence)
+async def genetics_pqtl(gene: str):
+    endpoint = "https://api.platform.opentargets.org/api/v4/graphql"
+    query = """
+    query Coloc($gene:String!){
+      geneInfo(geneId:$gene){
+        colocalisations(studyTypes:["pqtl"], page:{index:0,size:200}){
+          rows{ leftVariant{ id } rightVariant{ id } tissue studyType source
+                locus1Genes{ gene{ id symbol } h4 posteriorProbability }
+                locus2Genes{ gene{ id symbol } } }
+          total
+        }
+      }
+    }"""
+    js = await _post_json(endpoint, {"query": query, "variables": {"gene": gene}}, tries=2, ttl=43200)
+    rows = (((js or {}).get("data") or {}).get("geneInfo") or {}).get("colocalisations", {}).get("rows", []) if isinstance(js, dict) else []
+    return Evidence(status="OK" if rows else "NO_DATA", source="OpenTargets (pQTL colocs)",
+                    fetched_n=len(rows), data={"gene": gene, "pqtl_coloc": rows}, citations=[endpoint], fetched_at=_now())
+
+
+@router.get("/genetics/chromatin-contacts", response_model=Evidence)
+async def genetics_chromatin_contacts(gene: str):
+    groups = await _lit_search_guarded(f'{gene} AND (promoter capture Hi-C OR PCHi-C OR HiC)', None, limit=50)
+    return Evidence(status="OK", source="EuropePMC", fetched_n=sum(len(v) for v in groups.values()),
+                    data=groups, citations=["https://www.ebi.ac.uk/europepmc/"], fetched_at=_now())
+
+
+@router.get("/genetics/pathogenicity-priors", response_model=Evidence)
+async def genetics_pathogenicity_priors(gene: str):
+    groups = await _lit_search_guarded(f'{gene} AND (AlphaMissense OR PrimateAI)', None, limit=50)
+    return Evidence(status="OK", source="EuropePMC", fetched_n=sum(len(v) for v in groups.values()),
+                    data=groups, citations=["https://www.ebi.ac.uk/europepmc/"], fetched_at=_now())
+
+
+@router.get("/genetics/finngen-summary", response_model=Evidence)
+async def genetics_finngen_summary(gene: str):
+    links = ["https://www.finngen.fi/en/access_results","https://risteys.finngen.fi/"]
+    return Evidence(status="OK", source="FinnGen (links)", fetched_n=len(links),
+                    data={"gene": gene, "links": links}, citations=links, fetched_at=_now())
+
+
+@router.get("/genetics/gbmi-summary", response_model=Evidence)
+async def genetics_gbmi_summary(gene: str):
+    links = ["https://globalbiobankmeta.org"]
+    return Evidence(status="OK", source="GBMI (links)", fetched_n=len(links),
+                    data={"gene": gene, "links": links}, citations=links, fetched_at=_now())
+
+
+@router.get("/genetics/mavedb", response_model=Evidence)
+async def genetics_mavedb(gene: str, limit: int = Query(50, ge=1, le=200)):
+    api_try = f"https://www.mavedb.org/api/v1/search?q={urllib.parse.quote(gene)}"
+    js = await _get_json(api_try, tries=1, ttl=43200)
+    items = []
+    if isinstance(js, dict):
+        items = (js.get("results") or js.get("items") or [])[:limit]
+    epmc_url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={urllib.parse.quote(gene + ' AND (MAVE OR deep mutational scanning OR saturation mutagenesis)')}&format=json&pageSize={min(50, limit)}"
+    lit = await _get_json(epmc_url, tries=1, ttl=43200)
+    lit_items = (lit or {}).get("resultList", {}).get("result", []) if isinstance(lit, dict) else []
+    portal = f"https://www.mavedb.org/browse?query={urllib.parse.quote(gene)}"
+    return Evidence(status="OK" if items or lit_items else "NO_DATA", source="MaveDB API + EuropePMC",
+                    fetched_n=len(items)+len(lit_items), data={"gene": gene, "mavedb_search": items, "literature": lit_items, "portal": portal},
+                    citations=[api_try, epmc_url, portal], fetched_at=_now())
+
+
+@router.get("/assoc/perturbatlas", response_model=Evidence)
+async def assoc_perturbatlas(gene: str):
+    portal = "https://academic.oup.com/nar/article/52/D1/D1222/7518472"
+    return Evidence(status="OK", source="PerturbAtlas (link-out)", fetched_n=0, data={"gene": gene, "portal": portal},
+                    citations=[portal], fetched_at=_now())
+
+
+@router.get("/tract/mhc-binding", response_model=Evidence)
+async def tract_mhc_binding(gene: str):
+    groups = await _lit_search_guarded(f'{gene} AND (netMHCpan OR HLA binding prediction)', None, limit=50)
+    return Evidence(status="OK", source="EuropePMC", fetched_n=sum(len(v) for v in groups.values()),
+                    data=groups, citations=["https://www.ebi.ac.uk/europepmc/"], fetched_at=_now())
+
+
+@router.get("/tract/iedb-epitopes", response_model=Evidence)
+async def tract_iedb_epitopes(gene: str, limit: int = Query(50, ge=1, le=200)):
+    api_try = f"https://api.iedb.org/epitope/search?antigen_gene={urllib.parse.quote(gene)}&page_size={min(100, limit)}"
+    js = await _get_json(api_try, tries=1, ttl=43200)
+    recs = []
+    if isinstance(js, dict):
+        recs = (js.get("results") or js.get("data") or [])[:limit]
+    if not recs:
+        groups = await _lit_search_guarded(f'{gene} AND (IEDB OR epitope) AND HLA', None, limit=50)
+        return Evidence(status="OK" if sum(len(v) for v in groups.values()) else "NO_DATA", source="EuropePMC (IEDB lit)",
+                        fetched_n=sum(len(v) for v in groups.values()), data=groups,
+                        citations=["https://www.iedb.org/advancedQuery","https://www.ebi.ac.uk/europepmc/"], fetched_at=_now())
+    return Evidence(status="OK", source="IEDB IQ-API", fetched_n=len(recs),
+                    data={"epitopes": recs, "portal": "https://www.iedb.org/advancedQuery"},
+                    citations=[api_try, "https://www.iedb.org/advancedQuery"], fetched_at=_now())
+
+
+@router.get("/tract/surfaceome-hpa", response_model=Evidence)
+async def tract_surfaceome_hpa(gene: str):
+    link = "https://www.proteinatlas.org/about/download"
+    search = f"https://www.proteinatlas.org/search/{urllib.parse.quote(gene)}"
+    return Evidence(status="OK", source="HPA v24 (membrane/secretome)", fetched_n=0,
+                    data={"download": link, "search": search}, citations=[link, search], fetched_at=_now())
+
+
+@router.get("/tract/tsca", response_model=Evidence)
+async def tract_tsca():
+    portal = "https://www.cancersurfaceome.org/"
+    return Evidence(status="OK", source="Cancer Surfaceome Atlas (link)", fetched_n=0, data={"portal": portal},
+                    citations=[portal], fetched_at=_now())
+
+
+@router.get("/clin/safety-pgx", response_model=Evidence)
+async def clin_safety_pgx(gene: str):
+    url = f"https://api.pharmgkb.org/v1/data/gene?symbol={urllib.parse.quote(gene)}"
+    js = await _get_json(url, tries=2, ttl=43200)
+    rows = (js or {}).get("data", []) if isinstance(js, dict) else []
+    return Evidence(status="OK" if rows else "NO_DATA", source="PharmGKB", fetched_n=len(rows),
+                    data={"pgx": rows}, citations=[url], fetched_at=_now())
+
+
+@router.get("/clin/on-target-ae-prior", response_model=Evidence)
+async def clin_on_target_ae_prior(gene: str):
+    dgidb_url = f"https://dgidb.org/api/v2/interactions.json?genes={urllib.parse.quote(gene)}"
+    dj = await _get_json(dgidb_url, tries=2, ttl=43200)
+    drugs = []
+    for term in (dj or {}).get("matchedTerms", []):
+        for it in term.get("interactions", []):
+            if it.get("drugName"): drugs.append(it["drugName"])
+    drugs = list(dict.fromkeys(drugs))[:10]
+    rows_all, cites = [], [dgidb_url]
+    for d in drugs:
+        s_url = f"http://sideeffects.embl.de/api/meddra/allSides?drug={urllib.parse.quote(d)}"
+        sj = await _get_json(s_url, tries=2, ttl=43200)
+        if isinstance(sj, list): rows_all.extend(sj[:200])
+        cites.append(s_url)
+    return Evidence(status="OK" if rows_all else "NO_DATA", source="DGIdb + SIDER", fetched_n=len(rows_all),
+                    data={"drugs": drugs, "ae_priors": rows_all}, citations=cites, fetched_at=_now())
+
+
+@router.get("/clin/eu-ctr-linkouts", response_model=Evidence)
+async def clin_eu_ctr_linkouts(condition: str):
+    portal = "https://euclinicaltrials.eu/"
+    return Evidence(status="OK", source="EU CTR/CTIS (link)", fetched_n=0, data={"condition": condition, "portal": portal},
+                    citations=[portal], fetched_at=_now())
+
+
+@router.get("/assoc/spatial-expression", response_model=Evidence)
+async def assoc_spatial_expression(gene: str, condition: str = None):
+    q1 = f'{gene} AND ("spatial transcriptomics" OR Visium OR MERFISH OR GeoMx)'
+    if condition: q1 += f" AND {condition}"
+    groups = await _lit_search_guarded(q1, f"{gene} AND (spatial) AND (no change OR null)", limit=50)
+    return Evidence(status="OK", source="EuropePMC", fetched_n=sum(len(v) for v in groups.values()), data=groups,
+                    citations=["https://www.ebi.ac.uk/europepmc/"], fetched_at=_now())
+
+
+@router.get("/assoc/spatial-neighborhoods", response_model=Evidence)
+async def assoc_spatial_neighborhoods(condition: str):
+    q1 = f'{condition} AND ("cell neighborhood" OR "cell-cell interaction" OR "ligand-receptor" OR niche) AND (spatial)'
+    groups = await _lit_search_guarded(q1, None, limit=50)
+    return Evidence(status="OK", source="EuropePMC", fetched_n=sum(len(v) for v in groups.values()), data=groups,
+                    citations=["https://www.ebi.ac.uk/europepmc/"], fetched_at=_now())
+
+
+@router.get("/assoc/bulk-prot-pdc", response_model=Evidence)
+async def assoc_bulk_prot_pdc(gene: str, limit: int = Query(50, ge=1, le=200)):
+    endpoint = "https://pdc.cancer.gov/graphql"
+    query = """
+    query Search($gene:String!, $size:Int!){
+      searchProteins(gene_name:$gene, first:$size){
+        edges{ node{ gene_name protein_name uniprot_id cases_count study_submitter_id program_name } }
+      }
+    }"""
+    payload = {"query": query, "variables": {"gene": gene, "size": min(100, limit)}}
+    js = await _post_json(endpoint, payload, tries=2, ttl=43200)
+    edges = (((js or {}).get("data") or {}).get("searchProteins") or {}).get("edges") or []
+    nodes = [e.get("node") for e in edges if isinstance(e, dict)]
+    return Evidence(status="OK" if nodes else "NO_DATA", source="PDC GraphQL", fetched_n=len(nodes),
+                    data={"gene": gene, "records": nodes[:limit], "portal": "https://pdc.cancer.gov"},
+                    citations=[endpoint, "https://pdc.cancer.gov"], fetched_at=_now())
+
+
+@router.get("/assoc/metabolomics-ukb-nightingale", response_model=Evidence)
+async def assoc_metabolomics_ukb_nightingale():
+    url = "https://biomarker-atlas.nightingale.cloud"
+    return Evidence(status="OK", source="Nightingale Biomarker Atlas", fetched_n=0,
+                    data={"portal": url, "note": "Use indication filters; CSVs are large."},
+                    citations=[url], fetched_at=_now())
+
+
+@router.get("/sc/bican", response_model=Evidence)
+async def sc_bican():
+    portal = "https://portal.brain-bican.org"
+    return Evidence(status="OK", source="BICAN portal (link)", fetched_n=0, data={"portal": portal},
+                    citations=[portal], fetched_at=_now())
+
+
+@router.get("/sc/hubmap", response_model=Evidence)
+async def sc_hubmap():
+    portal = "https://portal.hubmapconsortium.org"
+    return Evidence(status="OK", source="HuBMAP portal (link)", fetched_n=0, data={"portal": portal},
+                    citations=[portal], fetched_at=_now())
+
+
+@router.get("/genetics/intolerance", response_model=Evidence)
+async def genetics_intolerance(gene: str):
+    endpoint = "https://gnomad.broadinstitute.org/api"
+    query = """
+    query Constraint($sym:String!){
+      gene(gene_symbol:$sym, reference_genome: GRCh38){
+        symbol constraint{ pLI oe_lof lof_z mis_z lof_upper oe_lof_lower oe_mis }
+      }
+    }"""
+    js = await _post_json(endpoint, {"query": query, "variables": {"sym": gene}}, tries=2, ttl=43200)
+    data = (((js or {}).get("data") or {}).get("gene") or {}).get("constraint") or {}
+    return Evidence(status="OK" if data else "NO_DATA", source="gnomAD GraphQL", fetched_n=1 if data else 0,
+                    data={"gene": gene, "constraint": data}, citations=[endpoint], fetched_at=_now())
+
+
+@router.get("/genetics/phewas-human-knockout", response_model=Evidence)
+async def genetics_phewas_human_knockout(gene: str):
+    groups = await _lit_search_guarded(f'{gene} AND (loss-of-function OR human knockout) AND (PheWAS OR UK Biobank OR GeneBass)',
+                                       f'{gene} AND (loss-of-function) AND (no association OR null)', limit=50)
+    return Evidence(status="OK", source="EuropePMC", fetched_n=sum(len(v) for v in groups.values()),
+                    data=groups, citations=["https://www.ebi.ac.uk/europepmc/"], fetched_at=_now())
+
+
+@router.get("/assoc/omics-phosphoproteomics", response_model=Evidence)
+async def assoc_omics_phosphoproteomics(gene: str, condition: str = None):
+    q = (gene + " " + condition) if condition else gene
+    pr = f"https://www.ebi.ac.uk/pride/ws/archive/project/list?keyword={urllib.parse.quote(q + ' phospho')}"
+    prj = await _get_json(pr, tries=2, ttl=43200)
+    return Evidence(status="OK" if prj else "NO_DATA", source="PRIDE", fetched_n=len((prj or [])),
+                    data={"query": q, "pride": prj}, citations=[pr], fetched_at=_now())
+
+
+@router.get("/assoc/omics-metabolites", response_model=Evidence)
+async def assoc_omics_metabolites(condition: str):
+    mbl = f"https://www.ebi.ac.uk/metabolights/ws/studies/search?query={urllib.parse.quote(condition)}"
+    js = await _get_json(mbl, tries=2, ttl=43200)
+    rows = (js or {}).get("content") or []
+    hmdb = f"https://hmdb.ca/unearth/q?query={urllib.parse.quote(condition)}&searcher=metabolites"
+    return Evidence(status="OK" if rows else "NO_DATA", source="MetaboLights/HMDB", fetched_n=len(rows),
+                    data={"metabolights": rows, "hmdb_link": hmdb}, citations=[mbl, hmdb], fetched_at=_now())
+
+
+@router.get("/assoc/hpa-pathology", response_model=Evidence)
+async def assoc_hpa_pathology(gene: str):
+    hpa_link = f"https://www.proteinatlas.org/search/{urllib.parse.quote(gene)}"
+    uq = f"https://rest.uniprot.org/uniprotkb/search?query=gene_exact:{urllib.parse.quote(gene)}+AND+organism_id:9606&fields=accession,comments"
+    js = await _get_json(uq, tries=2, ttl=43200)
+    return Evidence(status="OK", source="HPA (link)/UniProt", fetched_n=1,
+                    data={"gene": gene, "hpa_link": hpa_link, "uniprot": js},
+                    citations=[hpa_link, uq], fetched_at=_now())
+
+
+# ------------------------------
+# Synthesis (Therapeutic Index) — qualitative bands + drivers/flip-ifs
+# ------------------------------
+class BucketFeature(BaseModel):
+    bucket: str
+    band: str
+    drivers: List[str] = []
+    tensions: List[str] = []
+    citations: List[str] = []
+    details: Dict[str, Any] = {}
+
+class SynthesisTI(BaseModel):
+    gene: str
+    condition: Optional[str] = None
+    bucket_features: Dict[str, BucketFeature]
+    verdict: str
+    bands: Dict[str, str]
+    drivers: List[str]
+    flip_if: List[str]
+    p_favorable: float
+    citations: List[str]
+
+def _band_from_votes(v: float) -> str:
+    if v >= 1.1: return "High"
+    if v >= 0.6: return "Moderate"
+    return "Low"
+
+def _logit(p: float) -> float:
+    p = min(max(p, 1e-6), 1-1e-6); 
+    return math.log(p/(1-p))
+
+def _inv_logit(x: float) -> float:
+    return 1/(1+math.exp(-x))
+
+def _ok(ev: Evidence) -> bool:
+    try:
+        return ev and ev.status == "OK" and (ev.fetched_n or len(ev.data or {})>0)
+    except Exception:
+        return False
+
+@router.get("/synth/therapeutic-index", response_model=SynthesisTI)
+async def synth_therapeutic_index(gene: str, condition: Optional[str] = None, therapy_area: Optional[str] = None) -> SynthesisTI:
+    # Build genetic causality features
+    ev_coloc = await genetics_coloc(gene)
+    ev_mr = await genetics_mr(gene, condition or "")
+    ev_rare = await genetics_rare(gene)
+    ev_mendel = await genetics_mendelian(gene)
+    ev_sqtl = await genetics_sqtl(gene)
+    ev_pqtl = await genetics_pqtl(gene)
+    ev_chrom = await genetics_chromatin_contacts(gene)
+    ev_func = await genetics_functional(gene)
+    ev_mave = await genetics_mavedb(gene)
+    votes = 0.0; drivers=[]; tensions=[]; cites=[]
+    if _ok(ev_coloc): votes += 0.35; drivers.append("Colocalization support."); cites += ev_coloc.citations
+    if _ok(ev_mr): votes += 0.45; drivers.append("MR discovery pairing."); cites += ev_mr.citations
+    if _ok(ev_rare): votes += 0.30; drivers.append("ClinVar rare variants."); cites += ev_rare.citations
+    if _ok(ev_mendel): votes += 0.20; drivers.append("ClinGen gene validity."); cites += ev_mendel.citations
+    if _ok(ev_sqtl): votes += 0.15; drivers.append("sQTL/eQTL regulatory support."); cites += ev_sqtl.citations
+    if _ok(ev_pqtl): votes += 0.25; drivers.append("pQTL support."); cites += ev_pqtl.citations
+    if _ok(ev_chrom): votes += 0.15; drivers.append("Chromatin contacts."); cites += ev_chrom.citations
+    if _ok(ev_func): votes += 0.20; drivers.append("Functional regulatory assays."); cites += ev_func.citations
+    if _ok(ev_mave): votes += 0.20; drivers.append("Variant effect maps."); cites += ev_mave.citations
+    f_gen = BucketFeature(bucket="genetic_causality", band=_band_from_votes(votes), drivers=drivers[:6], tensions=tensions, citations=list(dict.fromkeys(cites))[:20], details={"votes": round(votes,2)})
+
+    # Association
+    ev_rna = await assoc_bulk_rna(gene, condition or "")
+    ev_sc = await assoc_sc(gene, condition or "")
+    ev_sp = await assoc_spatial_expression(gene, condition or "")
+    ev_prot = await assoc_bulk_prot(condition or "")
+    ev_pdc = await assoc_bulk_prot_pdc(gene)
+    votes_a = 0; d_a=[]; c_a=[]
+    if _ok(ev_rna): votes_a += 1; d_a.append("Bulk RNA disease association."); c_a += ev_rna.citations
+    if _ok(ev_prot) or _ok(ev_pdc): votes_a += 1; d_a.append("Proteomics presence."); c_a += ev_prot.citations + ev_pdc.citations
+    if _ok(ev_sc) or _ok(ev_sp): votes_a += 1; d_a.append("Single-cell/spatial context."); c_a += ev_sc.citations + ev_sp.citations
+    f_assoc = BucketFeature(bucket="association", band="High" if votes_a>=2 else "Moderate" if votes_a==1 else "Low", drivers=d_a[:6], tensions=[], citations=list(dict.fromkeys(c_a))[:20], details={"votes": votes_a})
+
+    # Mechanism
+    ev_ppi = await mech_ppi(gene)
+    ev_path = await mech_pathways(gene)
+    ev_lr = await mech_ligrec(gene)
+    ev_pert = await assoc_perturb(gene, condition or "")
+    votes_m = 0; d_m=[]; c_m=[]
+    if _ok(ev_ppi): votes_m+=1; d_m.append("PPI network context."); c_m+=ev_ppi.citations
+    if _ok(ev_path): votes_m+=1; d_m.append("Pathway membership."); c_m+=ev_path.citations
+    if _ok(ev_lr): votes_m+=1; d_m.append("Ligand–receptor edges."); c_m+=ev_lr.citations
+    if _ok(ev_pert): votes_m+=1; d_m.append("Perturbation evidence."); c_m+=ev_pert.citations
+    f_mech = BucketFeature(bucket="mechanism", band="High" if votes_m>=3 else "Moderate" if votes_m==2 else "Low", drivers=d_m[:6], tensions=[], citations=list(dict.fromkeys(c_m))[:20], details={"votes": votes_m})
+
+    # Tractability
+    ev_sm = await tract_ligandability_sm(gene)
+    ev_ab = await tract_ligandability_ab(gene)
+    ev_mod = await tract_modality(gene)
+    ev_iedb = await tract_iedb_epitopes(gene)
+    ev_mhc = await tract_mhc_binding(gene)
+    votes_t = 0; d_t=[]; t_t=[]; c_t=[]
+    if _ok(ev_sm): votes_t+=1; d_t.append("Structure/pocket presence."); c_t+=ev_sm.citations
+    if _ok(ev_ab): votes_t+=1; d_t.append("Surface accessibility."); c_t+=ev_ab.citations
+    if _ok(ev_mod) and ev_mod.data.get("recommendations"): votes_t+=1; d_t.append("Modality recommendation."); c_t+=ev_mod.citations
+    penalty = 0
+    if _ok(ev_iedb): penalty += 1; t_t.append("Curated epitopes suggest immunogenicity risk."); c_t += ev_iedb.citations
+    if _ok(ev_mhc): penalty += 0.5; t_t.append("MHC binding predictions reported."); c_t += ev_mhc.citations
+    raw = votes_t - 0.5*penalty
+    f_trac = BucketFeature(bucket="tractability", band="High" if raw>=2 else "Moderate" if raw>=1 else "Low", drivers=d_t[:6], tensions=t_t[:4], citations=list(dict.fromkeys(c_t))[:20], details={"votes": votes_t, "penalty": penalty})
+
+    # Clinical fit
+    ev_endp = await clin_endpoints(condition or "")
+    ev_pipe = await clin_pipeline(gene)
+    ev_saf = await clin_safety(gene)
+    ev_pgx = await clin_safety_pgx(gene)
+    ev_rwe = await clin_rwe(gene)
+    ev_ae = await clin_on_target_ae_prior(gene)
+    ev_pat = await comp_intensity(condition or gene)
+    ev_fto = await comp_freedom(condition or gene)
+    ev_eu = await clin_eu_ctr_linkouts(condition or "")
+    ev_hpa = await assoc_hpa_pathology(gene)
+    d_c=[]; t_c=[]; c_c=[]; safety=False
+    if _ok(ev_endp): d_c.append("Trials landscape available."); c_c+=ev_endp.citations
+    if _ok(ev_pipe): d_c.append("Pipeline/programs context."); c_c+=ev_pipe.citations
+    if _ok(ev_saf): safety=True; t_c.append("FAERS signals present."); c_c+=ev_saf.citations
+    if _ok(ev_pgx): safety=True; t_c.append("PharmGKB PGx risks."); c_c+=ev_pgx.citations
+    if _ok(ev_rwe): safety=True; t_c.append("RWE AE patterns."); c_c+=ev_rwe.citations
+    if _ok(ev_ae): safety=True; t_c.append("On-target AE priors (DGIdb→SIDER)."); c_c+=ev_ae.citations
+    if _ok(ev_pat) and _ok(ev_fto): d_c.append("Patent intensity and FTO proxy characterized."); c_c+=ev_pat.citations+ev_fto.citations
+    if _ok(ev_eu): d_c.append("EU CTR link-outs added."); c_c+=ev_eu.citations
+    if _ok(ev_hpa): d_c.append("Pathology expression context."); c_c+=ev_hpa.citations
+    band_c = "Low" if safety else "High" if _ok(ev_endp) and _ok(ev_pipe) else "Moderate"
+    f_clin = BucketFeature(bucket="clinical_fit", band=band_c, drivers=d_c[:6], tensions=t_c[:5], citations=list(dict.fromkeys(c_c))[:20], details={"safety_flag": safety})
+
+    # TI
+    priors = {"oncology": 0.25, "cns": 0.12, "cardio": 0.18}
+    p0 = priors.get((therapy_area or "").lower(), 0.2)
+    inc = {"High": 0.9, "Moderate": 0.4, "Low": 0.0}
+    dec = {"High": -1.0, "Moderate": -0.4, "Low": 0.0}
+    ll = _logit(p0)
+    ll += inc.get(f_gen.band, 0.0) + inc.get(f_assoc.band, 0.0) + inc.get(f_mech.band, 0.0) + inc.get(f_trac.band, 0.0)
+    ll += dec["High"] if f_clin.details.get("safety_flag") else inc.get(f_clin.band, 0.0)
+    p = _inv_logit(ll)
+
+    drivers = (f_gen.drivers[:2] + f_assoc.drivers[:2] + f_trac.drivers[:1])
+    flip_if = []
+    if f_gen.band=="High" and f_assoc.band=="Low": flip_if.append("Obtain strong sc/spatial evidence in disease tissue.")
+    if f_clin.details.get("safety_flag"): flip_if.append("Mitigate on-target or PGx-driven AE risk; consider stratification (genotype/HLA).")
+
+    verdict = "Favorable"
+    if f_gen.band == "Low" or f_clin.details.get("safety_flag"): verdict = "Unfavorable"
+    elif any(b == "Low" for b in [f_assoc.band, f_trac.band, f_mech.band]): verdict = "Marginal"
+
+    citations = list(dict.fromkeys(f_gen.citations + f_assoc.citations + f_mech.citations + f_trac.citations + f_clin.citations))[:50]
+
+    return SynthesisTI(
+        gene=gene, condition=condition,
+        bucket_features={
+            "genetic_causality": f_gen, "association": f_assoc, "mechanism": f_mech, "tractability": f_trac, "clinical_fit": f_clin
+        },
+        verdict=verdict,
+        bands={"causality": f_gen.band, "association": f_assoc.band, "mechanism": f_mech.band, "tractability": f_trac.band, "clinical_fit": f_clin.band},
+        drivers=drivers, flip_if=flip_if, p_favorable=round(p,3), citations=citations
+    )
