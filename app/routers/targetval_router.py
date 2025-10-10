@@ -847,16 +847,20 @@ async def clin_on_target_ae_prior(symbol: Optional[str] = Query(None), gene: Opt
 @router.get("/comp/intensity", response_model=Evidence)
 async def comp_intensity(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = urllib.parse.quote(sym)
-    url = f"https://api.patentsview.org/patents/query?q={{\"_text_any\":{\"patent_title\":\"{q}\"}}}&f=[\"patent_number\",\"patent_title\",\"patent_date\"]"
+    # Build PatentsView URL safely (avoid f-strings with JSON)
+    query = {"_text_any": {"patent_title": sym}}
+    fields = ["patent_number", "patent_title", "patent_date"]
+    url = "https://api.patentsview.org/patents/query?" + urllib.parse.urlencode({"q": json.dumps(query), "f": json.dumps(fields)})
     data = await _get_json(url, tries=1)
     return Evidence(status="OK", source="PatentsView", fetched_n=len((data or {}).get('patents') or []), data=data, citations=[url], fetched_at=_now())
 
 @router.get("/comp/freedom", response_model=Evidence)
 async def comp_freedom(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = urllib.parse.quote(sym)
-    url = f"https://api.patentsview.org/patents/query?q={{\"_text_any\":{\"patent_abstract\":\"{q}\"}}}&f=[\"patent_number\",\"patent_title\",\"patent_date\"]"
+    # Build PatentsView URL safely (avoid f-strings with JSON)
+    query = {"_text_any": {"patent_title": sym}}
+    fields = ["patent_number", "patent_title", "patent_date"]
+    url = "https://api.patentsview.org/patents/query?" + urllib.parse.urlencode({"q": json.dumps(query), "f": json.dumps(fields)})
     data = await _get_json(url, tries=1)
     return Evidence(status="OK", source="PatentsView", fetched_n=len((data or {}).get('patents') or []), data=data, citations=[url], fetched_at=_now())
 
