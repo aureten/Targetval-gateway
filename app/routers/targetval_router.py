@@ -18092,3 +18092,246 @@ Edge Cases & Interop Notes:
   - Reproducibility: store query params and normalized environment (client version) with every response.
 
 DEVELOPER_REFERENCE_END'''
+
+
+
+# ============================================================================
+# Live fetch enablement (appended): minimal, source-specific client impls
+# NOTE: We purposely *do not* change existing specs, models, or routes.
+#       We only add a small HTTP layer and plug live client instances into
+#       SOURCE_CLIENTS so modules can actually talk to upstream APIs.
+# ============================================================================
+
+# ---- HTTP engine (async, retry, backoff, time budget) ----------------------
+import asyncio, os, random, time, urllib.parse
+try:
+    import httpx
+except Exception as _e:  # pragma: no cover
+    httpx = None  # we'll raise a clear error when trying to fetch
+
+def _now() -> float:
+    return time.time()
+
+OUTBOUND_TRIES: int = int(os.getenv("OUTBOUND_TRIES", "2"))
+BACKOFF_BASE_S: float = float(os.getenv("BACKOFF_BASE_S", "0.35"))
+OUTBOUND_MAX_CONCURRENCY: int = int(os.getenv("OUTBOUND_MAX_CONCURRENCY", "8"))
+REQUEST_BUDGET_S: float = float(os.getenv("REQUEST_BUDGET_S", "25.0"))
+OUTBOUND_TIMEOUT_S: float = float(os.getenv("OUTBOUND_TIMEOUT_S", "12.0"))
+OUTBOUND_CONNECT_TIMEOUT_S: float = float(os.getenv("OUTBOUND_CONNECT_TIMEOUT_S", "6.0"))
+
+_DEFAULT_HEADERS = {
+    "User-Agent": "router7-live/0.1 (+https://targetval.local)",
+    "Accept": "application/json,text/plain,*/*",
+}
+
+_sem = asyncio.Semaphore(OUTBOUND_MAX_CONCURRENCY)
+
+async def _get_json(url: str, tries: int = OUTBOUND_TRIES, headers: dict | None = None) -> dict:
+    if httpx is None:
+        raise RuntimeError("httpx is required for live fetching but is not installed")
+    last_err: Exception | None = None
+    t0 = _now()
+    async with _sem:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(OUTBOUND_TIMEOUT_S, connect=OUTBOUND_CONNECT_TIMEOUT_S)) as client:
+            for attempt in range(1, tries + 1):
+                remaining = REQUEST_BUDGET_S - (_now() - t0)
+                if remaining <= 0:
+                    break
+                try:
+                    merged = {**_DEFAULT_HEADERS, **(headers or {})}
+                    resp = await asyncio.wait_for(client.get(url, headers=merged), timeout=remaining)
+                    if resp.status_code in (429, 500, 502, 503, 504):
+                        last_err = Exception(f"retryable status {resp.status_code}")
+                        backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.25
+                        await asyncio.sleep(backoff)
+                        continue
+                    resp.raise_for_status()
+                    try:
+                        return resp.json()
+                    except Exception:
+                        return {"text": resp.text}
+                except Exception as e:
+                    last_err = e
+                    # jittered backoff
+                    backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.25
+                    await asyncio.sleep(backoff)
+    if last_err:
+        raise last_err
+    return {}
+
+async def _post_json(url: str, payload: dict, tries: int = OUTBOUND_TRIES, headers: dict | None = None) -> dict:
+    if httpx is None:
+        raise RuntimeError("httpx is required for live fetching but is not installed")
+    last_err: Exception | None = None
+    t0 = _now()
+    async with _sem:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(OUTBOUND_TIMEOUT_S, connect=OUTBOUND_CONNECT_TIMEOUT_S)) as client:
+            for attempt in range(1, tries + 1):
+                remaining = REQUEST_BUDGET_S - (_now() - t0)
+                if remaining <= 0:
+                    break
+                try:
+                    merged = {**_DEFAULT_HEADERS, "Content-Type": "application/json", **(headers or {})}
+                    resp = await asyncio.wait_for(client.post(url, headers=merged, json=payload), timeout=remaining)
+                    if resp.status_code in (429, 500, 502, 503, 504):
+                        last_err = Exception(f"retryable status {resp.status_code}")
+                        backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.25
+                        await asyncio.sleep(backoff)
+                        continue
+                    resp.raise_for_status()
+                    try:
+                        return resp.json()
+                    except Exception:
+                        return {"text": resp.text}
+                except Exception as e:
+                    last_err = e
+                    backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.0) + random.random() * 0.25
+                    await asyncio.sleep(backoff)
+    if last_err:
+        raise last_err
+    return {}
+
+def _anchor(params: QueryParams) -> Optional[str]:
+    return params.gene or params.target or params.disease or params.trait or params.drug or params.variant
+
+# ---- Live client adapters (subset; extend as you need) ---------------------
+
+class Europe_PMC_API_Live(Europe_PMC_API):  # type: ignore[name-defined]
+    """Minimal live search via Europe PMC REST API."""
+    name = "Europe PMC API"
+    async def fetch(self, module: ModuleSpec, params: QueryParams) -> Any:  # noqa: ANN401
+        q = _anchor(params)
+        if not q:
+            return {'normalized': [], 'raw': None, 'provenance': {'source': self.name, 'note': 'missing anchor'}}
+        term = urllib.parse.quote(str(q))
+        size = max(1, min(params.limit or 50, 200))
+        url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={term}&format=json&pageSize={size}"
+        js = await _get_json(url, tries=2)
+        return {
+            'normalized': [],
+            'raw': js,
+            'provenance': {'source': self.name, 'retrieved_at': datetime.utcnow().isoformat(), 'query': str(q), 'url': url},
+        }
+
+class UniProtKB_API_Live(UniProtKB_API):  # type: ignore[name-defined]
+    """Minimal UniProtKB search for human entries by gene symbol."""
+    name = "UniProtKB API"
+    async def fetch(self, module: ModuleSpec, params: QueryParams) -> Any:  # noqa: ANN401
+        sym = params.gene or params.target
+        if not sym:
+            return {'normalized': [], 'raw': None, 'provenance': {'source': self.name, 'note': 'requires gene/target'}}
+        size = max(1, min(params.limit or 20, 100))
+        q = urllib.parse.quote(f"(gene_exact:{sym}) AND (organism_id:9606)")
+        # return commonly useful fields (avoid huge payload)
+        fields = urllib.parse.quote("accession,id,protein_name,genes,organism_name,cc_subcellular_location")
+        url = f"https://rest.uniprot.org/uniprotkb/search?query={q}&fields={fields}&format=json&size={size}"
+        js = await _get_json(url, tries=2)
+        return {
+            'normalized': [],
+            'raw': js,
+            'provenance': {'source': self.name, 'retrieved_at': datetime.utcnow().isoformat(), 'query': f"gene:{sym}", 'url': url},
+        }
+
+class ClinicalTrials_gov_v2_API_Live(ClinicalTrials_gov_v2_API):  # type: ignore[name-defined]
+    """Minimal call to CT.gov v2; falls back to legacy v1 if needed."""
+    name = "ClinicalTrials.gov v2 API"
+    async def fetch(self, module: ModuleSpec, params: QueryParams) -> Any:  # noqa: ANN401
+        term = _anchor(params)
+        if not term:
+            return {'normalized': [], 'raw': None, 'provenance': {'source': self.name, 'note': 'requires condition/drug/term'}}
+        size = max(1, min(params.limit or 20, 100))
+        base = os.getenv("CTGOV_V2_BASE", "https://clinicaltrials.gov")
+        # v2 GET style
+        url_v2 = f"{base}/api/v2/studies?query.term={urllib.parse.quote(str(term))}&pageSize={size}&format=json&countTotal=true"
+        try:
+            js = await _get_json(url_v2, tries=2)
+            return {'normalized': [], 'raw': js, 'provenance': {'source': self.name, 'retrieved_at': datetime.utcnow().isoformat(), 'query': str(term), 'url': url_v2}}
+        except Exception as e:
+            # fallback to legacy v1
+            url_v1 = f"{base}/api/query/full_studies?expr={urllib.parse.quote(str(term))}&min_rnk=1&max_rnk={size}&fmt=json"
+            js = await _get_json(url_v1, tries=2)
+            return {'normalized': [], 'raw': js, 'provenance': {'source': 'ClinicalTrials.gov v1 API (fallback)', 'retrieved_at': datetime.utcnow().isoformat(), 'query': str(term), 'url': url_v1}}
+
+class openFDA_FAERS_API_Live(openFDA_FAERS_API):  # type: ignore[name-defined]
+    """Minimal FAERS search by medicinalproduct or drug name."""
+    name = "openFDA FAERS API"
+    async def fetch(self, module: ModuleSpec, params: QueryParams) -> Any:  # noqa: ANN401
+        drug = params.drug or params.target or params.gene
+        if not drug:
+            return {'normalized': [], 'raw': None, 'provenance': {'source': self.name, 'note': 'requires drug name'}}
+        size = max(1, min(params.limit or 50, 100))
+        base = os.getenv("OPENFDA_BASE", "https://api.fda.gov")
+        # Exact phrase for medicinalproduct to reduce noise
+        quoted = urllib.parse.quote(f'"{drug}"')
+        url = f"{base}/drug/event.json?search=patient.drug.medicinalproduct:{quoted}&limit={size}"
+        js = await _get_json(url, tries=2)
+        return {'normalized': [], 'raw': js, 'provenance': {'source': self.name, 'retrieved_at': datetime.utcnow().isoformat(), 'drug': str(drug), 'url': url}}
+
+class PatentsView_API_Live(PatentsView_API):  # type: ignore[name-defined]
+    """PatentsView 'patents' endpoint using text search on title/abstract/claims."""
+    name = "PatentsView API"
+    async def fetch(self, module: ModuleSpec, params: QueryParams) -> Any:  # noqa: ANN401
+        term = _anchor(params)
+        if not term:
+            return {'normalized': [], 'raw': None, 'provenance': {'source': self.name, 'note': 'requires search term'}}
+        size = max(1, min(params.limit or 25, 100))
+        base = os.getenv("PATENTSVIEW_BASE", "https://api.patentsview.org")
+        # Query language as JSON: _text_any across a few fields
+        q = {"_or": [
+            {"_text_any": {"patent_abstract": str(term)}},
+            {"_text_any": {"patent_title": str(term)}},
+            {"_text_any": {"patent_claims": str(term)}},
+        ]}
+        f = ["patent_number", "patent_title", "patent_date", "assignee_organization"]
+        o = {"per_page": size, "page": int(params.offset // max(size,1)) + 1}
+        import json as _json
+        q_s = urllib.parse.quote(_json.dumps(q, separators=(",",":")))
+        f_s = urllib.parse.quote(_json.dumps(f))
+        o_s = urllib.parse.quote(_json.dumps(o))
+        url = f"{base}/patents/query?q={q_s}&f={f_s}&o={o_s}"
+        js = await _get_json(url, tries=2)
+        return {'normalized': [], 'raw': js, 'provenance': {'source': self.name, 'retrieved_at': datetime.utcnow().isoformat(), 'query': str(term), 'url': url}}
+
+class PubChem_PUG_REST_Live(PubChem_PUG_REST):  # type: ignore[name-defined]
+    """Simple PUG REST lookup by compound name (drug)."""
+    name = "PubChem PUG-REST"
+    async def fetch(self, module: ModuleSpec, params: QueryParams) -> Any:  # noqa: ANN401
+        drug = params.drug or params.target or params.gene
+        if not drug:
+            return {'normalized': [], 'raw': None, 'provenance': {'source': self.name, 'note': 'requires compound name'}}
+        size = max(1, min(params.limit or 10, 50))  # name lookup returns a list; we won't page deeply
+        base = os.getenv("PUBCHEM_BASE", "https://pubchem.ncbi.nlm.nih.gov")
+        url = f"{base}/rest/pug/compound/name/{urllib.parse.quote(str(drug))}/JSON"
+        js = await _get_json(url, tries=2)
+        return {'normalized': [], 'raw': js, 'provenance': {'source': self.name, 'retrieved_at': datetime.utcnow().isoformat(), 'compound': str(drug), 'url': url}}
+
+class ChEMBL_API_Live(ChEMBL_API):  # type: ignore[name-defined]
+    """ChEMBL search for targets or molecules by name/symbol."""
+    name = "ChEMBL API"
+    async def fetch(self, module: ModuleSpec, params: QueryParams) -> Any:  # noqa: ANN401
+        term = _anchor(params)
+        if not term:
+            return {'normalized': [], 'raw': None, 'provenance': {'source': self.name, 'note': 'requires search term'}}
+        size = max(1, min(params.limit or 25, 200))
+        base = os.getenv("CHEMBL_BASE", "https://www.ebi.ac.uk/chembl/api/data")
+        # We'll search both target and molecule names; first target:
+        url_t = f"{base}/target?pref_name__icontains={urllib.parse.quote(str(term))}&limit={size}"
+        url_m = f"{base}/molecule?pref_name__icontains={urllib.parse.quote(str(term))}&limit={size}"
+        t_js = await _get_json(url_t, tries=2)
+        m_js = await _get_json(url_m, tries=2)
+        return {'normalized': [], 'raw': {'targets': t_js, 'molecules': m_js}, 'provenance': {'source': self.name, 'retrieved_at': datetime.utcnow().isoformat(), 'query': str(term), 'urls': [url_t, url_m]}}
+
+# ---- Register live clients with exact labels used in module.live_sources ----
+try:
+    SOURCE_CLIENTS.update({
+        "Europe PMC API": Europe_PMC_API_Live(),
+        "UniProtKB API": UniProtKB_API_Live(),
+        "ClinicalTrials.gov v2 API": ClinicalTrials_gov_v2_API_Live(),
+        "openFDA FAERS API": openFDA_FAERS_API_Live(),
+        "PatentsView API": PatentsView_API_Live(),
+        "PubChem PUG-REST": PubChem_PUG_REST_Live(),
+        "ChEMBL API": ChEMBL_API_Live(),
+    })
+except NameError:
+    # If SOURCE_CLIENTS is not defined yet for some reason, skip registration.
+    pass
