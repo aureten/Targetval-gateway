@@ -18094,327 +18094,919 @@ Edge Cases & Interop Notes:
 DEVELOPER_REFERENCE_END'''
 
 
-# ============================================================
-# LIVE FETCH ENABLEMENT (appended) — minimal, non-invasive
-# ============================================================
-# NOTE to maintainers:
-# - This block only APPENDS code. It does not alter or remove any
-#   existing classes, routes, or registries defined above.
-# - We implement concrete SourceClient subclasses and register them
-#   in SOURCE_CLIENTS using the exact strings present in ModuleSpec.live_sources.
-# - A light-weight async HTTP engine with retries/backoff/timeout is provided.
-# - If a given upstream is unreachable, we surface the error in the per-source
-#   entry within the aggregated response while leaving the rest intact.
 
-# Standard libs
-import os, asyncio, random, time, json, urllib.parse, hashlib
-from typing import Any, Dict, Optional, List
-
-# Third-party
+# === LIVE FETCH ENABLEMENT (appended) — minimal, non-invasive ===
+import asyncio, os, time, json, random, urllib.parse, base64
+from typing import Optional
 try:
     import httpx
 except Exception as _e:
-    httpx = None  # Will raise at fetch-time with a clear message
+    httpx = None
 
-# --------------- HTTP engine ---------------
+_OUTBOUND_TIMEOUT_S = float(os.getenv("OUTBOUND_TIMEOUT_S", "12.0"))
+_OUTBOUND_CONNECT_TIMEOUT_S = float(os.getenv("OUTBOUND_CONNECT_TIMEOUT_S", "6.0"))
+_DEFAULT_TIMEOUT = None
+if httpx:
+    _DEFAULT_TIMEOUT = httpx.Timeout(_OUTBOUND_TIMEOUT_S, connect=_OUTBOUND_CONNECT_TIMEOUT_S)
+_OUTBOUND_TRIES = int(os.getenv("OUTBOUND_TRIES", "2"))
+_BACKOFF_BASE_S = float(os.getenv("BACKOFF_BASE_S", "0.35"))
+_OUTBOUND_MAX_CONCURRENCY = int(os.getenv("OUTBOUND_MAX_CONCURRENCY", "8"))
+_REQUEST_BUDGET_S = float(os.getenv("REQUEST_BUDGET_S", "22.0"))
+_http_semaphore = asyncio.Semaphore(_OUTBOUND_MAX_CONCURRENCY)
 
-OUTBOUND_TIMEOUT_S = float(os.getenv("OUTBOUND_TIMEOUT_S", "12.0"))
-OUTBOUND_CONNECT_TIMEOUT_S = float(os.getenv("OUTBOUND_CONNECT_TIMEOUT_S", "6.0"))
-OUTBOUND_TRIES = int(os.getenv("OUTBOUND_TRIES", "2"))
-BACKOFF_BASE_S = float(os.getenv("BACKOFF_BASE_S", "0.35"))
-OUTBOUND_MAX_CONCURRENCY = int(os.getenv("OUTBOUND_MAX_CONCURRENCY", "8"))
-REQUEST_BUDGET_S = float(os.getenv("REQUEST_BUDGET_S", "25.0"))
+def _now_iso():
+    import datetime as _dt
+    return _dt.datetime.utcnow().isoformat() + "Z"
 
-DEFAULT_TIMEOUT = None
-try:
-    if httpx is not None:
-        DEFAULT_TIMEOUT = httpx.Timeout(OUTBOUND_TIMEOUT_S, connect=OUTBOUND_CONNECT_TIMEOUT_S)
-except Exception:
-    DEFAULT_TIMEOUT = None
-
-_semaphore = asyncio.Semaphore(OUTBOUND_MAX_CONCURRENCY)
-
-def _now_iso() -> str:
-    try:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
-    except Exception:
-        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-def _hash_params(params: "QueryParams") -> str:
-    try:
-        payload = params.dict()
-    except Exception:
-        payload = {}
-    try:
-        s = json.dumps(payload, sort_keys=True, default=str)
-    except Exception:
-        s = str(payload)
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()  # nosec B324
-
-async def _http_json_get(url: str, headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, Any]] = None,
-                         tries: int = OUTBOUND_TRIES, budget_s: float = REQUEST_BUDGET_S) -> Any:
-    if httpx is None:
-        raise RuntimeError("httpx not installed in runtime; cannot perform live HTTP calls.")
+async def _get_json(url: str, headers: dict | None = None, tries: int = _OUTBOUND_TRIES, timeout: Optional[float]=None):
+    if not httpx:
+        raise RuntimeError("httpx not installed in runtime")
+    last = None
     start = time.time()
-    last_err = None
-    async with _semaphore:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            for attempt in range(1, max(1, tries) + 1):
-                remaining = budget_s - (time.time() - start)
-                if remaining <= 0:
-                    raise TimeoutError(f"Request budget exceeded ({budget_s}s) for GET {url}")
+    async with _http_semaphore:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+            for attempt in range(1, tries+1):
+                remaining = None
+                if timeout is not None:
+                    remaining = max(0.1, timeout - (time.time() - start))
                 try:
-                    r = await asyncio.wait_for(client.get(url, headers=headers, params=params), timeout=remaining)
-                    # retryable status codes
+                    r = await client.get(url, headers=headers or {})
                     if r.status_code in (429, 500, 502, 503, 504):
-                        raise httpx.HTTPStatusError("retryable", request=r.request, response=r)
-                    r.raise_for_status()
+                        raise httpx.HTTPStatusError(f"retryable: {r.status_code}", request=r.request, response=r)
                     ct = r.headers.get("content-type","")
-                    if "json" in ct or r.text.strip().startswith("{") or r.text.strip().startswith("["):
+                    if "json" in ct:
                         return r.json()
-                    return {"text": r.text}
+                    return {"content_type": ct, "text": r.text}
                 except Exception as e:
-                    last_err = e
-                    if attempt >= max(1, tries):
+                    last = str(e)
+                    if attempt >= tries:
                         break
-                    # backoff with jitter
-                    backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.5) + random.random() * 0.20
-                    await asyncio.sleep(backoff)
-    if last_err:
-        raise last_err
-    return None
+                    await asyncio.sleep(min((2**(attempt-1))*_BACKOFF_BASE_S, 3.0) + random.random()*0.25)
+    raise RuntimeError(f"GET failed for {url}: {last}")
 
-async def _http_json_post(url: str, json_body: Any, headers: Optional[Dict[str, str]] = None,
-                          tries: int = OUTBOUND_TRIES, budget_s: float = REQUEST_BUDGET_S) -> Any:
-    if httpx is None:
-        raise RuntimeError("httpx not installed in runtime; cannot perform live HTTP calls.")
+async def _post_json(url: str, data: dict, headers: dict | None = None, tries: int = _OUTBOUND_TRIES):
+    if not httpx:
+        raise RuntimeError("httpx not installed in runtime")
+    last = None
     start = time.time()
-    last_err = None
-    hdrs = {"Content-Type":"application/json"}
-    if headers:
-        hdrs.update(headers)
-    async with _semaphore:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            for attempt in range(1, max(1, tries) + 1):
-                remaining = budget_s - (time.time() - start)
-                if remaining <= 0:
-                    raise TimeoutError(f"Request budget exceeded ({budget_s}s) for POST {url}")
+    async with _http_semaphore:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+            payload = json.dumps(data)
+            hdrs = {"content-type": "application/json"}
+            if headers:
+                hdrs.update(headers)
+            for attempt in range(1, tries+1):
                 try:
-                    r = await asyncio.wait_for(client.post(url, json=json_body, headers=hdrs), timeout=remaining)
+                    r = await client.post(url, headers=hdrs, content=payload)
                     if r.status_code in (429, 500, 502, 503, 504):
-                        raise httpx.HTTPStatusError("retryable", request=r.request, response=r)
-                    r.raise_for_status()
-                    return r.json()
+                        raise httpx.HTTPStatusError(f"retryable: {r.status_code}", request=r.request, response=r)
+                    ct = r.headers.get("content-type","")
+                    if "json" in ct:
+                        return r.json()
+                    return {"content_type": ct, "text": r.text}
                 except Exception as e:
-                    last_err = e
-                    if attempt >= max(1, tries):
+                    last = str(e)
+                    if attempt >= tries:
                         break
-                    backoff = min((2 ** (attempt - 1)) * BACKOFF_BASE_S, 3.5) + random.random() * 0.20
-                    await asyncio.sleep(backoff)
-    if last_err:
-        raise last_err
+                    await asyncio.sleep(min((2**(attempt-1))*_BACKOFF_BASE_S, 3.0) + random.random()*0.25)
+    raise RuntimeError(f"POST failed for {url}: {last}")
+
+def _anchor(params):
+    # prioritize symbol/target, otherwise disease/trait/drug, then variant
+    for x in (params.gene, params.target, params.disease, params.trait, params.drug, params.variant):
+        if x:
+            return str(x)
     return None
 
-# --------------- Helpers ---------------
-
-def _anchor(params: "QueryParams") -> Optional[str]:
-    # Order of preference; aligns with evidence-bearing families.
-    for key in ("gene", "target", "disease", "trait", "drug", "variant", "pathway"):
-        val = getattr(params, key, None)
-        if val:
-            if isinstance(val, str):
-                val = val.strip()
-            if val:
-                return str(val)
+async def _resolve_uniprot_id(symbol: str) -> Optional[str]:
+    try:
+        js = await _get_json(f"https://rest.uniprot.org/uniprotkb/search?query=gene_exact:{urllib.parse.quote(symbol)}+AND+organism_id:9606&fields=accession&size=1&format=json")
+        hits = js.get("results") or []
+        if hits:
+            return hits[0]["primaryAccession"]
+    except Exception:
+        return None
     return None
 
-def _prov(source: str, params: "QueryParams") -> Dict[str, Any]:
+async def _resolve_ensembl_gene(symbol: str) -> Optional[str]:
+    try:
+        js = await _get_json(f"https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{urllib.parse.quote(symbol)}?content-type=application/json")
+        if isinstance(js, list) and js:
+            # pick ENSG
+            for it in js:
+                if it.get("id","").startswith("ENSG"):
+                    return it["id"]
+            return js[0].get("id")
+    except Exception:
+        return None
+    return None
+
+class _BaseClient(SourceClient):
+    name: str
+    async def fetch(self, module: ModuleSpec, params: QueryParams) -> Any:
+        raise NotImplementedError
+
+def _pack(source: str, query: dict, raw: Any, note: Optional[str]=None):
     return {
-        "source": source,
-        "retrieved_at": _now_iso(),
-        "query_hash": _hash_params(params),
+        "normalized": [],
+        "raw": raw,
+        "provenance": {
+            "source": source,
+            "retrieved_at": _now_iso(),
+            "query_hash": base64.urlsafe_b64encode(json.dumps(query, sort_keys=True).encode()).decode()[:32]
+        },
+        **({"note": note} if note else {})
     }
-
-# --------------- Concrete live clients ---------------
-
-class EuropePMCClient(SourceClient):
-    name = "Europe PMC API"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        term = _anchor(params)
+\n\n
+class _EuropePMC(_BaseClient):
+    def __init__(self): self.name = "Europe PMC API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        q = urllib.parse.quote(term)
+        size = params.limit or 25
+        url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={q}&format=json&pageSize={size}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["Europe PMC API"] = _EuropePMC()
+\n\n
+class _UniProt(_BaseClient):
+    def __init__(self): self.name = "UniProtKB API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
         if not term:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        # Basic search; let EPMC expand synonyms; limit maps to pageSize
-        q = term
-        page_size = max(1, min(500, int(getattr(params, "limit", 50))))
-        url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-        js = await _http_json_get(url, params={"query": q, "format": "json", "pageSize": page_size})
-        return {"normalized": [], "raw": js, "provenance": _prov(self.name, params)}
-
-class UniProtKBClient(SourceClient):
-    name = "UniProtKB API"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        sym = params.gene or params.target or _anchor(params)
-        if not sym:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        size = max(1, min(500, int(getattr(params, "limit", 50))))
-        fields = ",".join([
-            "accession","id","gene_names","organism_name",
-            "protein_name","cc_subcellular_location","length"
-        ])
-        q = f"(gene_exact:{sym}) AND (organism_id:9606)"
-        url = "https://rest.uniprot.org/uniprotkb/search"
-        js = await _http_json_get(url, params={"query": q, "fields": fields, "format":"json", "size": size})
-        return {"normalized": [], "raw": js, "provenance": _prov(self.name, params)}
-
-class ClinicalTrialsV2Client(SourceClient):
-    name = "ClinicalTrials.gov v2 API"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        term = params.disease or params.trait or params.drug or _anchor(params)
-        if not term:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        size = max(1, min(100, int(getattr(params, "limit", 50))))
-        base_v2 = os.getenv("CTGOV_V2_BASE", "https://clinicaltrials.gov/api/v2")
+            return _pack(self.name, {"term": term}, {"note": "provide gene or target"})
+        q = urllib.parse.quote(f"gene_exact:{term} AND organism_id:9606")
+        fields = "accession,id,protein_name,genes,organism_name,cc_subcellular_location"
+        size = params.limit or 25
+        url = f"https://rest.uniprot.org/uniprotkb/search?query={q}&fields={fields}&format=json&size={size}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["UniProtKB API"] = _UniProt()
+\n\n
+class _CTGovV2(_BaseClient):
+    def __init__(self): self.name = "ClinicalTrials.gov v2 API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        size = params.limit or 25
+        url = f"https://clinicaltrials.gov/api/v2/studies?query.term={urllib.parse.quote(term)}&pageSize={size}"
         try:
-            js = await _http_json_get(f"{base_v2}/studies", params={"query.term": term, "pageSize": size, "format":"json"})
-            return {"normalized": [], "raw": js, "provenance": _prov(self.name, params)}
+            raw = await _get_json(url)
         except Exception as e:
-            # Fallback to v1 - full_studies
-            base_v1 = os.getenv("CTGOV_V1_BASE", "https://clinicaltrials.gov/api/query")
-            try:
-                js = await _http_json_get(f"{base_v1}/full_studies", params={"expr": term, "max_rnk": size, "fmt": "json"})
-                return {"normalized": [], "raw": js, "provenance": {**_prov(self.name, params), "fallback":"v1"}}
-            except Exception as e2:
-                raise e2
+            # fallback to v1
+            v1 = f"https://clinicaltrials.gov/api/query/full_studies?expr={urllib.parse.quote(term)}&min_rnk=1&max_rnk={size}&fmt=json"
+            raw = await _get_json(v1)
+            return _pack(self.name, {"term": term, "url": v1, "fallback": "v1"}, raw, note="v2 failed; used v1")
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["ClinicalTrials.gov v2 API"] = _CTGovV2()
+\n\n
+class _OpenFDA_FAERS(_BaseClient):
+    def __init__(self): self.name = "openFDA FAERS API"
+    async def fetch(self, module, params):
+        term = params.drug or _anchor(params) or ""
+        size = params.limit or 25
+        url = f"https://api.fda.gov/drug/event.json?search=patient.drug.medicinalproduct:%22{urllib.parse.quote(term)}%22&limit={size}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["openFDA FAERS API"] = _OpenFDA_FAERS()
+\n\n
+class _PatentsView(_BaseClient):
+    def __init__(self): self.name = "PatentsView API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        size = params.limit or 25
+        q = json.dumps({"_text_any":{"patent_title": term}})
+        f = json.dumps(["patent_number","patent_title","patent_date"])
+        o = json.dumps({"per_page": size})
+        url = f"https://api.patentsview.org/patents/query?q={urllib.parse.quote(q)}&f={urllib.parse.quote(f)}&o={urllib.parse.quote(o)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["PatentsView API"] = _PatentsView()
+\n\n
+class _PubChem(_BaseClient):
+    def __init__(self): self.name = "PubChem PUG-REST"
+    async def fetch(self, module, params):
+        term = params.drug or params.target or params.gene or _anchor(params) or ""
+        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{urllib.parse.quote(term)}/JSON"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["PubChem PUG-REST"] = _PubChem()
+\n\n
+class _ChEMBL(_BaseClient):
+    def __init__(self): self.name = "ChEMBL API"
+    async def fetch(self, module, params):
+        term = params.target or params.gene or params.drug or ""
+        # Try target search first, fallback to molecule
+        size = params.limit or 25
+        url1 = f"https://www.ebi.ac.uk/chembl/api/data/target?pref_name__icontains={urllib.parse.quote(term)}&limit={size}"
+        try:
+            raw = await _get_json(url1)
+            return _pack(self.name, {"term": term, "url": url1}, raw)
+        except Exception:
+            url2 = f"https://www.ebi.ac.uk/chembl/api/data/molecule?pref_name__icontains={urllib.parse.quote(term)}&limit={size}"
+            raw = await _get_json(url2)
+            return _pack(self.name, {"term": term, "url": url2}, raw, note="fallback molecule search")
+SOURCE_CLIENTS["ChEMBL API"] = _ChEMBL()
+\n\n
+class _EnsemblVEP(_BaseClient):
+    def __init__(self): self.name = "Ensembl VEP REST"
+    async def fetch(self, module, params):
+        if not params.variant:
+            return _pack(self.name, {"variant": None}, {"error": "variant (HGVS or rsID) required"})
+        v = urllib.parse.quote(params.variant)
+        url = f"https://rest.ensembl.org/vep/human/hgvs/{v}"
+        raw = await _get_json(url, headers={"content-type":"application/json"})
+        return _pack(self.name, {"variant": params.variant, "url": url}, raw)
+SOURCE_CLIENTS["Ensembl VEP REST"] = _EnsemblVEP()
+\n\n
+class _MyVariant(_BaseClient):
+    def __init__(self): self.name = "MyVariant.info"
+    async def fetch(self, module, params):
+        q = params.variant or _anchor(params) or ""
+        size = params.limit or 25
+        url = f"https://myvariant.info/v1/query?q={urllib.parse.quote(q)}&size={size}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": q, "url": url}, raw)
+SOURCE_CLIENTS["MyVariant.info"] = _MyVariant()
+\n\n
+class _DGIdb(_BaseClient):
+    def __init__(self): self.name = "DGIdb GraphQL"
+    async def fetch(self, module, params):
+        gene = params.gene or params.target or _anchor(params) or ""
+        query = {"query": "query($genes:[String!]){ interactions(genes:$genes){ geneName interactionTypes score drugName pmids } }", "variables": {"genes":[gene]}}
+        url = "https://dgidb.org/api/graphql"
+        raw = await _post_json(url, query)
+        return _pack(self.name, {"gene": gene, "url": url, "graphql": "interactions"}, raw)
+SOURCE_CLIENTS["DGIdb GraphQL"] = _DGIdb()
+\n\n
+class _OpenTargets_L2G(_BaseClient):
+    def __init__(self): self.name = "OpenTargets GraphQL (L2G)"
+    async def fetch(self, module, params):
+        gene = params.gene or params.target or _anchor(params) or ""
+        q = {"query": "query($q:String!,$size:Int){ search(query:$q){ hits{ id entity type } } }", "variables": {"q": gene, "size": params.limit or 25}}
+        url = "https://api.platform.opentargets.org/api/v4/graphql"
+        raw = await _post_json(url, q)
+        return _pack(self.name, {"q": gene, "url": url}, raw, note="generic search; tailor to L2G if needed")
 
-class OpenFDAFAERSClient(SourceClient):
-    name = "openFDA FAERS API"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        drug = params.drug or _anchor(params)
-        if not drug:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        base = os.getenv("OPENFDA_BASE", "https://api.fda.gov/drug/event.json")
-        limit = max(1, min(100, int(getattr(params, "limit", 50))))
-        # search by medicinal product name; openFDA uses case-insensitive matching
-        search = f'patient.drug.medicinalproduct:"{drug}"'
-        js = await _http_json_get(base, params={"search": search, "limit": limit})
-        return {"normalized": [], "raw": js, "provenance": _prov(self.name, params)}
+class _OpenTargets_Coloc(_BaseClient):
+    def __init__(self): self.name = "OpenTargets GraphQL (colocalisations)"
+    async def fetch(self, module, params):
+        gene = params.gene or params.target or ""
+        q = {"query": "query($symbol:String!){ target(ensemblIdOrSymbol:$symbol){ id approvedSymbol} }", "variables": {"symbol": gene}}
+        url = "https://api.platform.opentargets.org/api/v4/graphql"
+        raw = await _post_json(url, q)
+        return _pack(self.name, {"q": gene, "url": url}, raw, note="placeholder; add colocalisation query")
 
-class PatentsViewClient(SourceClient):
-    name = "PatentsView API"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        term = params.gene or params.target or params.drug or params.disease or _anchor(params)
-        if not term:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        base = os.getenv("PATENTSVIEW_BASE", "https://api.patentsview.org/patents/query")
-        per_page = max(1, min(100, int(getattr(params, "limit", 50))))
-        q = {"_text_any": {"patent_title": [term]}}
-        f = ["patent_number","patent_title","patent_date","assignees.assignee_organization"]
-        o = {"per_page": per_page}
-        # Pass as GET with encoded JSON params
-        params_q = {
-            "q": json.dumps(q),
-            "f": json.dumps(f),
-            "o": json.dumps(o),
-        }
-        js = await _http_json_get(base, params=params_q)
-        return {"normalized": [], "raw": js, "provenance": _prov(self.name, params)}
+class _OpenTargets_Evidence(_BaseClient):
+    def __init__(self): self.name = "OpenTargets GraphQL (evidence)"
+    async def fetch(self, module, params):
+        gene = params.gene or params.target or ""
+        disease = params.disease or ""
+        q = {"query": "query($gene:String!,$disease:String){ evidence(geneOrTarget:$gene,diseaseOrPhenotype:$disease){ count } }", "variables": {"gene": gene, "disease": disease}}
+        url = "https://api.platform.opentargets.org/api/v4/graphql"
+        raw = await _post_json(url, q)
+        return _pack(self.name, {"gene": gene, "disease": disease, "url": url}, raw, note="placeholder evidence query")
 
-class PubChemClient(SourceClient):
-    name = "PubChem PUG-REST"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        name = params.drug or _anchor(params)
-        if not name:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        base = os.getenv("PUBCHEM_BASE", "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name")
-        url = f"{base}/{urllib.parse.quote(name)}/JSON"
-        js = await _http_json_get(url)
-        return {"normalized": [], "raw": js, "provenance": _prov(self.name, params)}
+class _OpenTargets_pQTLColocs(_BaseClient):
+    def __init__(self): self.name = "OpenTargets GraphQL (pQTL colocs)"
+    async def fetch(self, module, params):
+        gene = params.gene or params.target or ""
+        q = {"query":"query($symbol:String!){ target(ensemblIdOrSymbol:$symbol){ id approvedSymbol } }","variables":{"symbol":gene}}
+        url="https://api.platform.opentargets.org/api/v4/graphql"
+        raw=await _post_json(url,q)
+        return _pack(self.name, {"gene":gene,"url":url}, raw, note="placeholder pQTL colocs")
+SOURCE_CLIENTS["OpenTargets GraphQL (L2G)"] = _OpenTargets_L2G()
+SOURCE_CLIENTS["OpenTargets GraphQL (colocalisations)"] = _OpenTargets_Coloc()
+SOURCE_CLIENTS["OpenTargets GraphQL (evidence)"] = _OpenTargets_Evidence()
+SOURCE_CLIENTS["OpenTargets GraphQL (pQTL colocs)"] = _OpenTargets_pQTLColocs()
+\n\n
+class _GWASCatalog(_BaseClient):
+    def __init__(self): self.name = "GWAS Catalog REST API"
+    async def fetch(self, module, params):
+        term = params.trait or params.disease or _anchor(params) or ""
+        size = params.limit or 25
+        url = f"https://www.ebi.ac.uk/gwas/rest/api/studies/search/findByEfoTrait?efoTrait={urllib.parse.quote(term)}&size={size}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["GWAS Catalog REST API"] = _GWASCatalog()
+\n\n
+class _OpenGWAS(_BaseClient):
+    def __init__(self): self.name = "OpenGWAS API"
+    async def fetch(self, module, params):
+        term = params.trait or params.disease or params.gene or ""
+        url = f"https://gwas.mrcieu.ac.uk/v1/traits?search={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
 
-class ChEMBLClient(SourceClient):
-    name = "ChEMBL API"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        term = params.target or params.gene or params.drug or _anchor(params)
-        if not term:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        base = "https://www.ebi.ac.uk/chembl/api/data"
-        size = max(1, min(200, int(getattr(params, "limit", 50))))
-        # Fetch candidate targets and molecules by name
-        targets = await _http_json_get(f"{base}/target.json", params={"pref_name__icontains": term, "limit": size})
-        molecules = await _http_json_get(f"{base}/molecule.json", params={"pref_name__icontains": term, "limit": size})
-        return {"normalized": [], "raw": {"targets": targets, "molecules": molecules}, "provenance": _prov(self.name, params)}
+class _IEU_OpenGWAS(_BaseClient):
+    def __init__(self): self.name = "IEU OpenGWAS API"
+    async def fetch(self, module, params):
+        term = params.trait or params.disease or params.gene or ""
+        url = f"https://gwas.mrcieu.ac.uk/v1/traits?search={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["OpenGWAS API"] = _OpenGWAS()
+SOURCE_CLIENTS["IEU OpenGWAS API"] = _IEU_OpenGWAS()
+\n\n
+class _PhenoScanner(_BaseClient):
+    def __init__(self): self.name = "PhenoScanner v2 API"
+    async def fetch(self, module, params):
+        term = params.variant or params.gene or ""
+        url = f"http://www.phenoscanner.medschl.cam.ac.uk/api?query={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["PhenoScanner v2 API"] = _PhenoScanner()
+\n\n
+class _GTEx_sQTL(_BaseClient):
+    def __init__(self): self.name = "GTEx sQTL API"
+    async def fetch(self, module, params):
+        sym = params.gene or params.target
+        if not sym:
+            return _pack(self.name, {}, {"error": "gene symbol required"})
+        ens = await _resolve_ensembl_gene(sym) or ""
+        size = params.limit or 25
+        url = f"https://gtexportal.org/api/v2/association/singleTissueEqtl?gencodeId={urllib.parse.quote(ens)}&pageSize={size}" if ens else f"https://gtexportal.org/api/v2/association/singleTissueEqtl?geneSymbol={urllib.parse.quote(sym)}&pageSize={size}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": sym, "ensembl": ens, "url": url}, raw)
+SOURCE_CLIENTS["GTEx sQTL API"] = _GTEx_sQTL()
+\n\n
+class _eQTL_Catalogue(_BaseClient):
+    def __init__(self): self.name = "eQTL Catalogue API"
+    async def fetch(self, module, params):
+        sym = params.gene or params.target
+        if not sym:
+            return _pack(self.name, {}, {"error": "gene symbol required"})
+        ens = await _resolve_ensembl_gene(sym)
+        if not ens:
+            return _pack(self.name, {"gene": sym}, {"error": "could not resolve Ensembl gene id"})
+        size = params.limit or 25
+        url = f"https://www.ebi.ac.uk/eqtl/api/associations?gene_id={urllib.parse.quote(ens)}&size={size}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": sym, "ensembl": ens, "url": url}, raw)
+SOURCE_CLIENTS["eQTL Catalogue API"] = _eQTL_Catalogue()
+\n\n
+class _NCBI_GEO(_BaseClient):
+    def __init__(self): self.name = "NCBI GEO E-utilities"
+    async def fetch(self, module, params):
+        term = params.gene or params.disease or _anchor(params) or ""
+        size = params.limit or 25
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=gds&term={urllib.parse.quote(term)}&retmode=json&retmax={size}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["NCBI GEO E-utilities"] = _NCBI_GEO()
+\n\n
+class _EBI_Expression_Atlas(_BaseClient):
+    def __init__(self): self.name = "EBI Expression Atlas API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or _anchor(params) or ""
+        url = f"https://www.ebi.ac.uk/gxa/genes/{urllib.parse.quote(term)}.json"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": term, "url": url}, raw)
+SOURCE_CLIENTS["EBI Expression Atlas API"] = _EBI_Expression_Atlas()
+\n\n
+class _GTEx_Baseline(_BaseClient):
+    def __init__(self): self.name = "GTEx API"
+    async def fetch(self, module, params):
+        sym = params.gene or params.target
+        if not sym:
+            return _pack(self.name, {}, {"error": "gene symbol required"})
+        url = f"https://gtexportal.org/api/v2/gene/medianExpression?geneSymbol={urllib.parse.quote(sym)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": sym, "url": url}, raw)
+SOURCE_CLIENTS["GTEx API"] = _GTEx_Baseline()
+\n\n
+class _ArrayExpress_BioStudies(_BaseClient):
+    def __init__(self): self.name = "ArrayExpress/BioStudies API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        size = params.limit or 25
+        url = f"https://www.ebi.ac.uk/biostudies/api/v1/search?query={urllib.parse.quote(term)}&pageSize={size}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["ArrayExpress/BioStudies API"] = _ArrayExpress_BioStudies()
+\n\n
+class _SC_ExpressionAtlas(_BaseClient):
+    def __init__(self): self.name = "Single-Cell Expression Atlas API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or _anchor(params) or ""
+        url = f"https://www.ebi.ac.uk/gxa/sc/search?geneQuery={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": term, "url": url}, raw)
+SOURCE_CLIENTS["Single-Cell Expression Atlas API"] = _SC_ExpressionAtlas()
+\n\n
+class _CellxGene(_BaseClient):
+    def __init__(self): self.name = "CELLxGENE Discover API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or _anchor(params) or ""
+        # limited public API; use collections search as a proxy
+        url = f"https://api.cellxgene.cziscience.com/dp/v1/collections?limit={params.limit or 25}&q={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw, note="proxy search by collection")
+SOURCE_CLIENTS["CELLxGENE Discover API"] = _CellxGene()
+\n\n
+class _HuBMAP(_BaseClient):
+    def __init__(self): self.name = "HuBMAP Search API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://search.api.hubmapconsortium.org/search?q={urllib.parse.quote(term)}&size={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["HuBMAP Search API"] = _HuBMAP()
+\n\n
+class _HCA_Azul(_BaseClient):
+    def __init__(self): self.name = "HCA Azul APIs"
+    async def fetch(self, module, params):
+        url = f"https://service.azul.data.humancellatlas.org/index/projects?size={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"url": url}, raw, note="project listing; refine with filters if needed")
+SOURCE_CLIENTS["HCA Azul APIs"] = _HCA_Azul()
+\n\n
+class _ProteomicsDB(_BaseClient):
+    def __init__(self): self.name = "ProteomicsDB API"
+    async def fetch(self, module, params):
+        sym = params.gene or params.target or ""
+        uni = await _resolve_uniprot_id(sym) if sym else None
+        if not uni:
+            return _pack(self.name, {"gene": sym}, {"error": "need UniProt ID (failed to resolve)"})
+        url = f"https://www.proteomicsdb.org/proteomicsdb/logic/api/proteinexpression?identifier={urllib.parse.quote(uni)}&format=json"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": sym, "uniprot": uni, "url": url}, raw)
+SOURCE_CLIENTS["ProteomicsDB API"] = _ProteomicsDB()
+\n\n
+class _PRIDE(_BaseClient):
+    def __init__(self): self.name = "PRIDE Archive API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://www.ebi.ac.uk/pride/ws/archive/v2/search/projects?query={urllib.parse.quote(term)}&pageSize={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["PRIDE Archive API"] = _PRIDE()
+\n\n
+class _PDC_GraphQL(_BaseClient):
+    def __init__(self): self.name = "PDC (CPTAC) GraphQL"
+    async def fetch(self, module, params):
+        gene = params.gene or params.target or ""
+        q = {"query":"query($g:String){ genes(gene_name:$g, first: 10){ nodes { gene_id gene_name } } }","variables":{"g":gene}}
+        url = "https://pdc.cancer.gov/graphql"
+        raw = await _post_json(url, q)
+        return _pack(self.name, {"gene": gene, "url": url}, raw)
+SOURCE_CLIENTS["PDC (CPTAC) GraphQL"] = _PDC_GraphQL()
+\n\n
+class _MetaboLights(_BaseClient):
+    def __init__(self): self.name = "MetaboLights API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://www.ebi.ac.uk/metabolights/ws/studies/search?searchQuery={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["MetaboLights API"] = _MetaboLights()
+\n\n
+class _MetabolomicsWorkbench(_BaseClient):
+    def __init__(self): self.name = "Metabolomics Workbench API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://www.metabolomicsworkbench.org/rest/study/search?text={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["Metabolomics Workbench API"] = _MetabolomicsWorkbench()
+\n\n
+class _LINCS(_BaseClient):
+    def __init__(self): self.name = "LINCS LDP APIs"
+    async def fetch(self, module, params):
+        term = params.gene or params.drug or _anchor(params) or ""
+        url = f"https://api.clue.io/api/pertinfo?q={urllib.parse.quote(term)}"
+        try:
+            raw = await _get_json(url, headers={"Accept":"application/json"})
+            return _pack(self.name, {"q": term, "url": url}, raw)
+        except Exception as e:
+            return _pack(self.name, {"q": term, "url": url}, {"error": str(e)}, note="CLUE/LINCS may require API key")
+SOURCE_CLIENTS["LINCS LDP APIs"] = _LINCS()
+\n\n
+class _CLUE(_BaseClient):
+    def __init__(self): self.name = "CLUE.io API"
+    async def fetch(self, module, params):
+        term = params.gene or params.drug or ""
+        url = f"https://api.clue.io/api/pertinfo?q={urllib.parse.quote(term)}"
+        try:
+            raw = await _get_json(url, headers={"Accept":"application/json"})
+        except Exception as e:
+            raw = {"error": str(e), "note": "CLUE.io API may require API key"}
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["CLUE.io API"] = _CLUE()
+\n\n
+class _OpenGWAS_PheWAS(_BaseClient):
+    def __init__(self): self.name = "OpenGWAS PheWAS"
+    async def fetch(self, module, params):
+        if not params.variant:
+            return _pack(self.name, {}, {"error":"variant (rsid) required"})
+        url = f"https://gwas.mrcieu.ac.uk/v1/phewas/{urllib.parse.quote(params.variant)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"variant": params.variant, "url": url}, raw)
+SOURCE_CLIENTS["OpenGWAS PheWAS"] = _OpenGWAS_PheWAS()
+\n\n
+class _UCSC_Tracks(_BaseClient):
+    def __init__(self): self.name = "UCSC Genome Browser track APIs"
+    async def fetch(self, module, params):
+        # Without coordinates, return track list for hg38 as live ping
+        url = "https://api.genome.ucsc.edu/list/tracks?genome=hg38"
+        raw = await _get_json(url)
+        return _pack(self.name, {"url": url}, raw, note="supply chrom/start/end to query a specific track")
+SOURCE_CLIENTS["UCSC Genome Browser track APIs"] = _UCSC_Tracks()
+\n\n
+class _4DN(_BaseClient):
+    def __init__(self): self.name = "4D Nucleome API"
+    async def fetch(self, module, params):
+        url = "https://data.4dnucleome.org/search/?type=ExperimentSetReplicate&limit={}".format(params.limit or 25)
+        raw = await _get_json(url)
+        return _pack(self.name, {"url": url}, raw)
+SOURCE_CLIENTS["4D Nucleome API"] = _4DN()
+\n\n
+class _ENCODE(_BaseClient):
+    def __init__(self): self.name = "ENCODE REST API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://www.encodeproject.org/search/?type=Experiment&searchTerm={urllib.parse.quote(term)}&limit={params.limit or 25}&format=json"
+        raw = await _get_json(url, headers={"Accept":"application/json"})
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["ENCODE REST API"] = _ENCODE()
+\n\n
+class _ClinGen_GraphQL(_BaseClient):
+    def __init__(self): self.name = "ClinGen GeneGraph/GraphQL"
+    async def fetch(self, module, params):
+        gene = params.gene or params.target or ""
+        q = {"query":"query($symbol:String!){ gene(symbol:$symbol){ symbol hgnc_id entrez_id } }","variables":{"symbol":gene}}
+        url = "https://genegra.ph/graphql"
+        raw = await _post_json(url, q)
+        return _pack(self.name, {"gene": gene, "url": url}, raw)
+SOURCE_CLIENTS["ClinGen GeneGraph/GraphQL"] = _ClinGen_GraphQL()
+\n\n
+class _ClinVar_Eutils(_BaseClient):
+    def __init__(self): self.name = "ClinVar via NCBI E-utilities"
+    async def fetch(self, module, params):
+        term = params.variant or params.gene or ""
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&term={urllib.parse.quote(term)}&retmode=json&retmax={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["ClinVar via NCBI E-utilities"] = _ClinVar_Eutils()
+\n\n
+class _STRING(_BaseClient):
+    def __init__(self): self.name = "STRING API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://string-db.org/api/json/network?identifiers={urllib.parse.quote(term)}&species=9606"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": term, "url": url}, raw)
+SOURCE_CLIENTS["STRING API"] = _STRING()
+\n\n
+class _STITCH(_BaseClient):
+    def __init__(self): self.name = "STITCH API"
+    async def fetch(self, module, params):
+        term = params.gene or params.drug or ""
+        url = f"http://stitch.embl.de/api/json/interaction?identifiers={urllib.parse.quote(term)}&species=9606"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["STITCH API"] = _STITCH()
+\n\n
+class _SIGNOR(_BaseClient):
+    def __init__(self): self.name = "SIGNOR API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://signor.uniroma2.it/api/search?query={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["SIGNOR API"] = _SIGNOR()
+\n\n
+class _PathwayCommons(_BaseClient):
+    def __init__(self): self.name = "Pathway Commons API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://www.pathwaycommons.org/pc2/search.json?q={urllib.parse.quote(term)}&type=Pathway"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["Pathway Commons API"] = _PathwayCommons()
+\n\n
+class _OmniPath(_BaseClient):
+    def __init__(self): self.name = "OmniPath API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://omnipathdb.org/interactions?genes={urllib.parse.quote(term)}&format=json"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": term, "url": url}, raw)
 
-class NCBIGEOClient(SourceClient):
-    name = "NCBI GEO E-utilities"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        term = params.gene or params.disease or params.trait or _anchor(params)
-        if not term:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        limit = max(1, min(500, int(getattr(params, "limit", 50))))
-        base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-        js = await _http_json_get(base, params={"db":"gds", "term": term, "retmode":"json", "retmax": limit})
-        return {"normalized": [], "raw": js, "provenance": _prov(self.name, params)}
+class _OmniPathLR(_BaseClient):
+    def __init__(self): self.name = "OmniPath (ligand–receptor)"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://omnipathdb.org/intercell?genes={urllib.parse.quote(term)}&format=json"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": term, "url": url}, raw)
+SOURCE_CLIENTS["OmniPath API"] = _OmniPath()
+SOURCE_CLIENTS["OmniPath (ligand–receptor)"] = _OmniPathLR()
+\n\n
+class _QuickGO(_BaseClient):
+    def __init__(self): self.name = "QuickGO API"
+    async def fetch(self, module, params):
+        sym = params.gene or params.target or ""
+        uni = await _resolve_uniprot_id(sym) if sym else None
+        if not uni:
+            return _pack(self.name, {"gene": sym}, {"error": "need UniProt ID"})
+        url = f"https://www.ebi.ac.uk/QuickGO/services/annotation/search?geneProductId=UniProtKB:{urllib.parse.quote(uni)}&limit={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": sym, "uniprot": uni, "url": url}, raw)
+SOURCE_CLIENTS["QuickGO API"] = _QuickGO()
+\n\n
+class _RNAcentral(_BaseClient):
+    def __init__(self): self.name = "RNAcentral API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://rnacentral.org/api/v1/rna/?description={urllib.parse.quote(term)}&size={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["RNAcentral API"] = _RNAcentral()
+\n\n
+class _ReactomeAnalysis(_BaseClient):
+    def __init__(self): self.name = "Reactome Analysis Service"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(term)}&species=Homo%20sapiens&rows={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
 
-class EnsemblVEPClient(SourceClient):
-    name = "Ensembl VEP REST"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        hgvs = params.variant or _anchor(params)
-        if not hgvs:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        base = "https://rest.ensembl.org/vep/human/hgvs"
-        url = f"{base}/{urllib.parse.quote(hgvs)}"
-        js = await _http_json_get(url, headers={"Accept":"application/json"})
-        return {"normalized": [], "raw": js, "provenance": _prov(self.name, params)}
+class _ReactomeContent(_BaseClient):
+    def __init__(self): self.name = "Reactome Content/Analysis APIs"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://reactome.org/ContentService/search/query?query={urllib.parse.quote(term)}&species=Homo%20sapiens&rows={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
 
-class EQTLCatalogueClient(SourceClient):
-    name = "eQTL Catalogue API"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        gene = (params.gene or params.target or "").strip()
-        limit = max(1, min(1000, int(getattr(params, "limit", 50))))
-        if not gene:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        # If already an Ensembl gene ID, query directly; otherwise try to map with HGNC REST.
-        gene_id = None
-        if gene.upper().startswith("ENSG"):
-            gene_id = gene
-        else:
-            try:
-                # HGNC REST search to resolve Ensembl ID
-                # e.g. https://rest.genenames.org/search/symbol/TP53
-                h = {"Accept":"application/json"}
-                hgnc = await _http_json_get(f"https://rest.genenames.org/search/symbol/{urllib.parse.quote(gene)}", headers=h, tries=1)
-                # walk result structure defensively
-                if isinstance(hgnc, dict):
-                    docs = hgnc.get("response", {}).get("docs", [])
-                    if docs:
-                        gene_id = docs[0].get("ensembl_gene_id") or docs[0].get("ensembl_gene_id_ncbi")
-            except Exception:
-                gene_id = None
-        if not gene_id:
-            # Best effort: return empty set with provenance indicating unresolved mapping
-            return {"normalized": [], "raw": {"note":"unresolved_symbol", "symbol":gene}, "provenance": _prov(self.name, params)}
-        # Associations by gene_id
-        base = "https://www.ebi.ac.uk/eqtl/api/associations"
-        js = await _http_json_get(base, params={"gene_id": gene_id, "size": limit})
-        return {"normalized": [], "raw": js, "provenance": _prov(self.name, params)}
+class _ReactomeInteractors(_BaseClient):
+    def __init__(self): self.name = "Reactome interactors"
+    async def fetch(self, module, params):
+        sym = params.gene or params.target or ""
+        uni = await _resolve_uniprot_id(sym) if sym else None
+        if not uni:
+            return _pack(self.name, {"gene": sym}, {"error":"need UniProt ID"})
+        url = f"https://reactome.org/ContentService/data/interactors/UniProt/{urllib.parse.quote(uni)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": sym, "uniprot": uni, "url": url}, raw)
+SOURCE_CLIENTS["Reactome Analysis Service"] = _ReactomeAnalysis()
+SOURCE_CLIENTS["Reactome Content/Analysis APIs"] = _ReactomeContent()
+SOURCE_CLIENTS["Reactome interactors"] = _ReactomeInteractors()
+\n\n
+class _PDBe(_BaseClient):
+    def __init__(self): self.name = "PDBe API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://www.ebi.ac.uk/pdbe/graph-api/pdbe_pages/search/pdb/{urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
 
-class DGIdbGraphQLClient(SourceClient):
-    name = "DGIdb GraphQL"
-    async def fetch(self, module: "ModuleSpec", params: "QueryParams") -> Any:
-        # Minimal query: genes by name (or interactions by geneName)
-        gene = params.gene or params.target or _anchor(params)
-        if not gene:
-            return {"normalized": [], "raw": {}, "provenance": _prov(self.name, params)}
-        endpoint = "https://dgidb.org/api/graphql"
-        # Simple genes query (compatible with DGIdb v5 schema)
-        gql = {
-            "query": """
-                query($name: String!, $limit: Int!) {
-                  genes(name: $name, limit: $limit) {
-                    name
-                    entrezId
-                    geneAliases { name }
-                    interactions { interactionTypes drugName }
-                  }
-                }
-            """
+class _PDBeKB(_BaseClient):
+    def __init__(self): self.name = "PDBe-KB API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://www.ebi.ac.uk/pdbe/pdbe-kb/api/knowledgebase/search/pdb/{urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["PDBe API"] = _PDBe()
+SOURCE_CLIENTS["PDBe-KB API"] = _PDBeKB()
+\n\n
+class _AlphaFold(_BaseClient):
+    def __init__(self): self.name = "AlphaFold DB API"
+    async def fetch(self, module, params):
+        sym = params.gene or params.target or ""
+        uni = await _resolve_uniprot_id(sym) if sym else None
+        if not uni:
+            return _pack(self.name, {"gene": sym}, {"error":"need UniProt ID"})
+        url = f"https://alphafold.ebi.ac.uk/api/prediction/{urllib.parse.quote(uni)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": sym, "uniprot": uni, "url": url}, raw)
+SOURCE_CLIENTS["AlphaFold DB API"] = _AlphaFold()
+\n\n
+class _BioGRID_ORCS(_BaseClient):
+    def __init__(self): self.name = "BioGRID ORCS REST"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://orcs.thebiogrid.org/ORCS/search?search={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["BioGRID ORCS REST"] = _BioGRID_ORCS()
+\n\n
+class _BindingDB(_BaseClient):
+    def __init__(self): self.name = "BindingDB API"
+    async def fetch(self, module, params):
+        term = params.drug or params.target or params.gene or ""
+        url = f"https://www.bindingdb.org/axis2/services/BindingDB?wsdl"  # WSDL ping
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw, note="BindingDB SOAP/WSDL; implement query as needed")
+SOURCE_CLIENTS["BindingDB API"] = _BindingDB()
+\n\n
+class _CTDbase(_BaseClient):
+    def __init__(self): self.name = "CTDbase API"
+    async def fetch(self, module, params):
+        term = params.gene or params.disease or ""
+        url = f"https://ctdbase.org/tools/batchQuery.go?inputType=genes&inputTerms={urllib.parse.quote(term)}&report=diseases_curated&format=json"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["CTDbase API"] = _CTDbase()
+\n\n
+class _DepMap(_BaseClient):
+    def __init__(self): self.name = "DepMap API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://api.depmap.org"  # placeholder ping; many endpoints require auth
+        try:
+            raw = await _get_json(url)
+        except Exception as e:
+            raw = {"error": str(e), "note": "DepMap public endpoints limited; add API key if available"}
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["DepMap API"] = _DepMap()
+\n\n
+class _DrugCentral(_BaseClient):
+    def __init__(self): self.name = "DrugCentral API"
+    async def fetch(self, module, params):
+        term = params.drug or ""
+        url = f"https://drugcentral.org/api/v1/drug?name={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"drug": term, "url": url}, raw)
+SOURCE_CLIENTS["DrugCentral API"] = _DrugCentral()
+\n\n
+class _IUPHAR(_BaseClient):
+    def __init__(self): self.name = "IUPHAR/Guide to Pharmacology API"
+    async def fetch(self, module, params):
+        term = params.target or params.gene or ""
+        url = f"https://www.guidetopharmacology.org/services/targets?search={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["IUPHAR/Guide to Pharmacology API"] = _IUPHAR()
+\n\n
+class _IntAct_PSICQUIC(_BaseClient):
+    def __init__(self): self.name = "IntAct via PSICQUIC"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://www.ebi.ac.uk/Tools/webservices/psicquic/intact/webservices/current/search/query/{urllib.parse.quote(term)}?format=tab25"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["IntAct via PSICQUIC"] = _IntAct_PSICQUIC()
+\n\n
+class _PharmGKB(_BaseClient):
+    def __init__(self): self.name = "PharmGKB API"
+    async def fetch(self, module, params):
+        term = params.gene or params.drug or ""
+        url = f"https://api.pharmgkb.org/v1/data/gene?symbol={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["PharmGKB API"] = _PharmGKB()
+\n\n
+class _Pharos(_BaseClient):
+    def __init__(self): self.name = "Pharos GraphQL"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        q = {"query": "query($q:String!){ targets(filter:{ q:$q }){ count } }", "variables": {"q": term}}
+        url = "https://pharos-api.ncats.io/graphql"
+        raw = await _post_json(url, q)
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["Pharos GraphQL"] = _Pharos()
+\n\n
+class _CADD(_BaseClient):
+    def __init__(self): self.name = "CADD API"
+    async def fetch(self, module, params):
+        var = params.variant or ""
+        url = "https://cadd.gs.washington.edu/api/v1.0/predictions"
+        raw = {"note": "POST VCF/variant to CADD REST; implement later", "variant": var, "endpoint": url}
+        return _pack(self.name, {"variant": var, "url": url}, raw, note="not fully implemented")
+
+SOURCE_CLIENTS["CADD API"] = _CADD()
+\n\n
+class _Inxight(_BaseClient):
+    def __init__(self): self.name = "Inxight Drugs API"
+    async def fetch(self, module, params):
+        term = params.drug or ""
+        url = f"https://drugs.ncats.io/api/drug?name={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"drug": term, "url": url}, raw)
+SOURCE_CLIENTS["Inxight Drugs API"] = _Inxight()
+\n\n
+class _gnomAD_GQL(_BaseClient):
+    def __init__(self): self.name = "gnomAD GraphQL API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        q = {"query":"query($symbol:String!){ gene(gene_symbol:$symbol){ gene_id gene_name } }","variables":{"symbol":term}}
+        url = "https://gnomad.broadinstitute.org/api"
+        raw = await _post_json(url, q)
+        return _pack(self.name, {"symbol": term, "url": url}, raw)
+SOURCE_CLIENTS["gnomAD GraphQL API"] = _gnomAD_GQL()
+\n\n
+class _WHO_ICTRP(_BaseClient):
+    def __init__(self): self.name = "WHO ICTRP web service"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = f"https://trialsearch.who.int/api/Trial?title={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"title": term, "url": url}, raw)
+SOURCE_CLIENTS["WHO ICTRP web service"] = _WHO_ICTRP()
+\n\n
+class _UCSC_Loops(_BaseClient):
+    def __init__(self): self.name = "UCSC loop/interaction tracks"
+    async def fetch(self, module, params):
+        url = "https://api.genome.ucsc.edu/list/publicHubs"
+        raw = await _get_json(url)
+        return _pack(self.name, {"url": url}, raw, note="provide coordinates to query specific interaction tracks")
+SOURCE_CLIENTS["UCSC loop/interaction tracks"] = _UCSC_Loops()
+
+class _Monarch_HPO(_BaseClient):
+    def __init__(self): self.name = "HPO/Monarch APIs"
+    async def fetch(self, module, params):
+        term = params.disease or params.trait or _anchor(params) or ""
+        url = f"https://api.monarchinitiative.org/api/search/entity/autocomplete/{urllib.parse.quote(term)}?size={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["HPO/Monarch APIs"] = _Monarch_HPO()
+\n\n
+class _GlyGen(_BaseClient):
+    def __init__(self): self.name = "GlyGen API"
+    async def fetch(self, module, params):
+        sym = params.gene or params.target or ""
+        uni = await _resolve_uniprot_id(sym) if sym else None
+        if not uni:
+            url = f"https://api.glygen.org/protein/list?gene={urllib.parse.quote(sym)}"
+            raw = await _get_json(url)
+            return _pack(self.name, {"gene": sym, "url": url}, raw)
+        url = f"https://api.glygen.org/protein/detail?uniprot_canonical_ac={urllib.parse.quote(uni)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": sym, "uniprot": uni, "url": url}, raw)
+SOURCE_CLIENTS["GlyGen API"] = _GlyGen()
+
+class _IEDB_IQ(_BaseClient):
+    def __init__(self): self.name = "IEDB IQ-API"
+    async def fetch(self, module, params):
+        term = _anchor(params) or ""
+        url = "https://api.iedb.org"
+        try:
+            raw = await _get_json(url)
+        except Exception as e:
+            raw = {"error": str(e), "note": "IEDB IQ-API endpoint availability changes; consider tools APIs for predictions"}
+        return _pack(self.name, {"q": term, "url": url}, raw)
+SOURCE_CLIENTS["IEDB IQ-API"] = _IEDB_IQ()
+
+class _IEDB_Tools(_BaseClient):
+    def __init__(self): self.name = "IEDB Tools API"
+    async def fetch(self, module, params):
+        url = "http://tools-cluster-interface.iedb.org/tools_api"
+        raw = await _get_json(url)
+        return _pack(self.name, {"url": url}, raw, note="IEDB tools require POST peptide sequences to sub-tools (mhci/mhcii/etc.)")
+SOURCE_CLIENTS["IEDB Tools API"] = _IEDB_Tools()
+
+class _IEDB_Tools_Pred(_BaseClient):
+    def __init__(self): self.name = "IEDB Tools API (prediction)"
+    async def fetch(self, module, params):
+        url = "http://tools-cluster-interface.iedb.org/tools_api/mhci/"
+        raw = await _get_json(url)
+        return _pack(self.name, {"url": url}, raw, note="POST peptide needed; wiring confirms reachability")
+SOURCE_CLIENTS["IEDB Tools API (prediction)"] = _IEDB_Tools_Pred()
+
+class _IEDB_PopCov(_BaseClient):
+    def __init__(self): self.name = "IEDB population coverage/Tools API"
+    async def fetch(self, module, params):
+        url = "http://tools.clsb.niaid.nih.gov/tools/population/iedb_input"
+        try:
+            raw = await _get_json(url)
+        except Exception as e:
+            raw = {"error": str(e), "note":"IEDB population coverage often requires POST form"}
+        return _pack(self.name, {"url": url}, raw)
+SOURCE_CLIENTS["IEDB population coverage/Tools API"] = _IEDB_PopCov()
+
+class _IMPC(_BaseClient):
+    def __init__(self): self.name = "IMPC API"
+    async def fetch(self, module, params):
+        sym = params.gene or params.target or ""
+        url = f"https://api.mousephenotype.org/genes/search?q={urllib.parse.quote(sym)}&limit={params.limit or 25}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"gene": sym, "url": url}, raw)
+SOURCE_CLIENTS["IMPC API"] = _IMPC()
+
+class _IPD_IMGT_HLA(_BaseClient):
+    def __init__(self): self.name = "IPD-IMGT/HLA API"
+    async def fetch(self, module, params):
+        url = "https://www.ebi.ac.uk/ipd/api/v1/alleles"
+        raw = await _get_json(url)
+        return _pack(self.name, {"url": url}, raw)
+SOURCE_CLIENTS["IPD-IMGT/HLA API"] = _IPD_IMGT_HLA()
+
+class _MaveDB(_BaseClient):
+    def __init__(self): self.name = "MaveDB API"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or ""
+        url = f"https://www.mavedb.org/api/v1/experiments?per_page={params.limit or 25}&search={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"term": term, "url": url}, raw)
+SOURCE_CLIENTS["MaveDB API"] = _MaveDB()
+
+class _OpenGWAS_protein(_BaseClient):
+    def __init__(self): self.name = "OpenGWAS (protein traits, when available)"
+    async def fetch(self, module, params):
+        term = params.gene or params.target or "protein"
+        url = f"https://gwas.mrcieu.ac.uk/v1/traits?search={urllib.parse.quote(term)}"
+        raw = await _get_json(url)
+        return _pack(self.name, {"q": term, "url": url}, raw, note="generic trait search")
+SOURCE_CLIENTS["OpenGWAS (protein traits, when available)"] = _OpenGWAS_protein()
