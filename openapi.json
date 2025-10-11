@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "TargetVal Gateway API",
-    "version": "2.2.0",
-    "description": "Public OpenAPI aligned to the 6-domain / 55-module router with literature triggers and domain synthesis."
+    "version": "2.3.0",
+    "description": "**Canonical 6\u2011domain / 55\u2011module** OpenAPI. Each module is a live endpoint returning an Evidence envelope. Literature and synthesis endpoints are additive and not counted as modules. Exactly 55 module paths are defined here."
   },
   "servers": [
     {
@@ -12,7 +12,22 @@
   ],
   "tags": [
     {
-      "name": "Utility"
+      "name": "D1 Human causality & validation"
+    },
+    {
+      "name": "D2 Target & disease biology"
+    },
+    {
+      "name": "D3 Selectivity & expression"
+    },
+    {
+      "name": "D4 Druggability"
+    },
+    {
+      "name": "D5 Therapeutic index & safety"
+    },
+    {
+      "name": "D6 Clinical translation"
     },
     {
       "name": "Literature"
@@ -21,22 +36,7 @@
       "name": "Synthesis"
     },
     {
-      "name": "D1 Human Causality & Validation"
-    },
-    {
-      "name": "D2 Target & Disease Biology"
-    },
-    {
-      "name": "D3 Selectivity & Expression"
-    },
-    {
-      "name": "D4 Druggability"
-    },
-    {
-      "name": "D5 Therapeutic Index & Safety"
-    },
-    {
-      "name": "D6 Clinical Translation"
+      "name": "Utility"
     }
   ],
   "components": {
@@ -79,96 +79,57 @@
           "status"
         ]
       },
-      "DomainSynthRequest": {
+      "AggregateEnvelope": {
         "type": "object",
         "properties": {
-          "gene": {
-            "type": "string"
-          },
-          "condition": {
-            "type": "string"
-          },
-          "domain_id": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 6
-          },
-          "module_outputs": {
+          "query": {
             "type": "object",
             "additionalProperties": true
           },
-          "lit_summary": {
+          "results": {
             "type": "object",
-            "additionalProperties": true
-          }
-        },
-        "required": [
-          "gene",
-          "domain_id"
-        ]
-      },
-      "DomainSynthResponse": {
-        "type": "object",
-        "properties": {
-          "domain_id": {
-            "type": "integer"
-          },
-          "domain_buckets": {
-            "type": "array",
-            "items": {
-              "type": "string"
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "OK",
+                    "ERROR",
+                    "NO_DATA"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                },
+                "fetched_n": {
+                  "type": "integer"
+                },
+                "data": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "citations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fetched_at": {
+                  "type": "number"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ]
             }
-          },
-          "narrative": {
-            "type": "object",
-            "additionalProperties": true
           }
         },
         "required": [
-          "domain_id",
-          "domain_buckets",
-          "narrative"
-        ]
-      },
-      "Claim": {
-        "type": "object",
-        "properties": {
-          "subject": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "predicate": {
-            "type": "string"
-          },
-          "object": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "context": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "evidence": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "provenance": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "scores": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "timestamps": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        },
-        "required": [
-          "subject",
-          "predicate",
-          "object"
+          "results"
         ]
       }
     },
@@ -181,29 +142,35 @@
     }
   },
   "paths": {
-    "/status": {
+    "/": {
       "get": {
-        "summary": "Gateway status",
+        "summary": "Gateway info",
         "tags": [
           "Utility"
         ],
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
+            "description": "OK"
           }
         }
       }
     },
-    "/modules": {
+    "/livez": {
       "get": {
-        "summary": "List active module definitions",
+        "summary": "Liveness check",
+        "tags": [
+          "Utility"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "summary": "Readiness check",
         "tags": [
           "Utility"
         ],
@@ -216,7 +183,7 @@
     },
     "/modules55": {
       "get": {
-        "summary": "Static 55-module plan (id/key/path/domains/live_sources)",
+        "summary": "List canonical 55 module keys",
         "tags": [
           "Utility"
         ],
@@ -229,7 +196,7 @@
     },
     "/registry/active55": {
       "get": {
-        "summary": "Introspect which of the 55 paths are bound at runtime",
+        "summary": "Return module registry (id/key/path/domain)",
         "tags": [
           "Utility"
         ],
@@ -242,60 +209,17 @@
     },
     "/lit/search": {
       "get": {
-        "summary": "Literature search (Europe PMC + OpenAlex + PubTator3)",
+        "summary": "Literature search (Europe PMC + PubMed/annotations)",
         "tags": [
           "Literature"
         ],
         "parameters": [
           {
             "in": "query",
-            "name": "gene",
-            "required": false,
+            "name": "query",
+            "required": true,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "disease",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "tissue",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "cell",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "terms",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "window_days",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 36500,
-              "default": 1825
             }
           },
           {
@@ -306,7 +230,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 200,
-              "default": 50
+              "default": 25
             }
           }
         ],
@@ -317,7 +241,41 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OK",
+                        "ERROR",
+                        "NO_DATA"
+                      ]
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "fetched_n": {
+                      "type": "integer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "citations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fetched_at": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
                 }
               }
             }
@@ -327,73 +285,35 @@
     },
     "/lit/triggers": {
       "post": {
-        "summary": "Map literature claims to module refresh triggers",
+        "summary": "Push literature-derived triggers (rerun rules)",
         "tags": [
           "Literature"
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/Claim"
-                }
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true
-                }
-              }
-            }
+            "description": "OK"
           }
         }
       }
     },
     "/synth/domain": {
       "post": {
-        "summary": "Domain-level synthesis (compose bucket narratives)",
+        "summary": "Domain-level synthesis (D1..D6)",
         "tags": [
           "Synthesis"
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DomainSynthRequest"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DomainSynthResponse"
-                }
-              }
-            }
+            "description": "OK"
           }
         }
       }
     },
     "/expr/baseline": {
       "get": {
-        "summary": "Baseline expression across tissues/cell types",
+        "summary": "Baseline expression (GTEx/Expression Atlas)",
         "tags": [
-          "D3 Selectivity & Expression"
+          "D3 Selectivity & expression"
         ],
         "parameters": [
           {
@@ -486,6 +406,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -539,9 +473,9 @@
     },
     "/expr/localization": {
       "get": {
-        "summary": "Subcellular localization (UniProtKB)",
+        "summary": "Subcellular / localization (UniProt)",
         "tags": [
-          "D3 Selectivity & Expression"
+          "D3 Selectivity & expression"
         ],
         "parameters": [
           {
@@ -634,6 +568,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -687,9 +635,9 @@
     },
     "/expr/inducibility": {
       "get": {
-        "summary": "Inducible/differential expression (Atlas/GEO)",
+        "summary": "Inducible expression (Atlas/GEO/ArrayExpress)",
         "tags": [
-          "D3 Selectivity & Expression"
+          "D3 Selectivity & expression"
         ],
         "parameters": [
           {
@@ -782,6 +730,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -835,9 +797,9 @@
     },
     "/assoc/bulk-rna": {
       "get": {
-        "summary": "Bulk RNA associations",
+        "summary": "Bulk RNA associations (GEO/ArrayExpress/Atlas)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -930,6 +892,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -983,9 +959,9 @@
     },
     "/assoc/sc": {
       "get": {
-        "summary": "Single-cell associations (HCA/SC Atlas)",
+        "summary": "Single-cell condition associations (HCA/SC Atlas/CellxGene)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D3 Selectivity & expression"
         ],
         "parameters": [
           {
@@ -1078,6 +1054,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1131,9 +1121,9 @@
     },
     "/assoc/spatial": {
       "get": {
-        "summary": "Spatial expression/associations",
+        "summary": "Spatial transcriptomics associations (Europe PMC scan layer)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D3 Selectivity & expression"
         ],
         "parameters": [
           {
@@ -1226,6 +1216,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1279,9 +1283,9 @@
     },
     "/sc/hubmap": {
       "get": {
-        "summary": "HuBMAP search for single-cell/tissue assets",
+        "summary": "HuBMAP single-cell/segmentation meta",
         "tags": [
-          "D3 Selectivity & Expression"
+          "D3 Selectivity & expression"
         ],
         "parameters": [
           {
@@ -1374,6 +1378,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1427,9 +1445,9 @@
     },
     "/assoc/proteomics": {
       "get": {
-        "summary": "Proteomics associations (PRIDE/PDC etc.)",
+        "summary": "Proteomics associations (ProteomicsDB/PRIDE/PDC)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -1522,6 +1540,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1575,9 +1607,9 @@
     },
     "/assoc/metabolomics": {
       "get": {
-        "summary": "Metabolomics associations",
+        "summary": "Metabolomics associations (MetaboLights/Workbench)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -1670,6 +1702,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1723,9 +1769,9 @@
     },
     "/assoc/hpa-pathology": {
       "get": {
-        "summary": "HPA pathology associations (literature-derived)",
+        "summary": "HPA pathology links (Europe PMC scan layer)",
         "tags": [
-          "D3 Selectivity & Expression"
+          "D3 Selectivity & expression"
         ],
         "parameters": [
           {
@@ -1818,6 +1864,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -1871,9 +1931,9 @@
     },
     "/assoc/perturb": {
       "get": {
-        "summary": "Perturbation signatures (LINCS/CLUE/OpenTargets)",
+        "summary": "Perturbation signatures (LINCS/CLUE/PubChem)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -1966,6 +2026,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -2019,9 +2093,9 @@
     },
     "/genetics/l2g": {
       "get": {
-        "summary": "GWAS locus-to-gene",
+        "summary": "GWAS locus-to-gene (OpenTargets Platform)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -2114,6 +2188,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -2167,9 +2255,9 @@
     },
     "/genetics/coloc": {
       "get": {
-        "summary": "Colocalisation (eQTL/pQTL vs GWAS)",
+        "summary": "Colocalisation (OT Platform/eQTL Catalogue/OpenGWAS)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -2262,6 +2350,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -2315,9 +2417,9 @@
     },
     "/genetics/mr": {
       "get": {
-        "summary": "Mendelian randomization",
+        "summary": "Mendelian randomisation (IEU MR-Base/OpenGWAS)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -2410,6 +2512,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -2463,9 +2579,9 @@
     },
     "/genetics/rare": {
       "get": {
-        "summary": "Rare variant evidence (ClinVar/gnomAD)",
+        "summary": "Rare variants / burden (gnomAD/ClinVar/OT)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -2558,6 +2674,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -2613,7 +2743,7 @@
       "get": {
         "summary": "Mendelian validity (ClinGen)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -2706,6 +2836,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -2759,9 +2903,9 @@
     },
     "/genetics/phewas-human-knockout": {
       "get": {
-        "summary": "Human knockout / PheWAS",
+        "summary": "Human knockout / PheWAS (PhenoScanner/OpenGWAS/Monarch)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -2854,6 +2998,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -2907,9 +3065,9 @@
     },
     "/genetics/sqtl": {
       "get": {
-        "summary": "Splicing QTLs",
+        "summary": "sQTLs (GTEx/eQTL Catalogue)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -3002,6 +3160,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -3055,9 +3227,9 @@
     },
     "/genetics/pqtl": {
       "get": {
-        "summary": "Protein QTLs",
+        "summary": "pQTL colocalisations (OT/OpenGWAS)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -3150,6 +3322,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -3203,9 +3389,9 @@
     },
     "/genetics/chromatin-contacts": {
       "get": {
-        "summary": "Chromatin contacts / loops (tracks)",
+        "summary": "Chromatin contacts/tracks (ENCODE/UCSC/4DN)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -3298,6 +3484,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -3351,9 +3551,9 @@
     },
     "/genetics/3d-maps": {
       "get": {
-        "summary": "3D genome maps (Hi-C/loops)",
+        "summary": "3D loop maps (4DN/UCSC loops)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -3446,6 +3646,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -3499,9 +3713,9 @@
     },
     "/genetics/regulatory": {
       "get": {
-        "summary": "Regulatory evidence (ENCODE/eQTL Catalogue)",
+        "summary": "Regulatory activity (ENCODE/eQTL Catalogue)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -3594,6 +3808,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -3647,9 +3875,9 @@
     },
     "/genetics/annotation": {
       "get": {
-        "summary": "Variant annotation (VEP/gnomAD/CADD)",
+        "summary": "Variant annotation (Ensembl VEP/MyVariant/CADD)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -3710,6 +3938,14 @@
           },
           {
             "in": "query",
+            "name": "variant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "drug",
             "required": false,
             "schema": {
@@ -3737,12 +3973,17 @@
           },
           {
             "in": "query",
-            "name": "variant",
-            "required": true,
+            "name": "mode",
+            "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
             },
-            "description": "Variant id (e.g., rsID or chr-pos-ref-alt)"
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -3796,9 +4037,9 @@
     },
     "/genetics/consortia-summary": {
       "get": {
-        "summary": "Consortia summary (GBMI/FinnGen/OpenGWAS)",
+        "summary": "GWAS/consortia summary (OpenGWAS)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -3891,6 +4132,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -3944,9 +4199,9 @@
     },
     "/genetics/functional": {
       "get": {
-        "summary": "Functional screens (CRISPR/RNAi)",
+        "summary": "Functional screens (DepMap/BioGRID ORCS/Europe PMC)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -4039,6 +4294,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -4094,7 +4363,7 @@
       "get": {
         "summary": "Multiplex assays of variant effect (MaveDB)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -4187,6 +4456,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -4240,9 +4523,9 @@
     },
     "/genetics/lncrna": {
       "get": {
-        "summary": "lncRNA evidence",
+        "summary": "lncRNA links (RNAcentral/Europe PMC)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -4335,6 +4618,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -4388,9 +4685,9 @@
     },
     "/genetics/mirna": {
       "get": {
-        "summary": "miRNA evidence",
+        "summary": "miRNA links (RNAcentral/Europe PMC)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -4483,6 +4780,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -4538,7 +4849,7 @@
       "get": {
         "summary": "Pathogenicity priors (gnomAD/CADD)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -4631,6 +4942,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -4684,9 +5009,9 @@
     },
     "/genetics/intolerance": {
       "get": {
-        "summary": "Constraint/intolerance",
+        "summary": "Constraint/intolerance (gnomAD)",
         "tags": [
-          "D1 Human Causality & Validation"
+          "D1 Human causality & validation"
         ],
         "parameters": [
           {
@@ -4779,6 +5104,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -4832,7 +5171,7 @@
     },
     "/mech/structure": {
       "get": {
-        "summary": "Structure (UniProt/AlphaFold/PDBe)",
+        "summary": "Structure & domains (UniProt/AlphaFold/PDBe/PDBe-KB)",
         "tags": [
           "D4 Druggability"
         ],
@@ -4927,6 +5266,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -4980,9 +5333,9 @@
     },
     "/mech/ppi": {
       "get": {
-        "summary": "Protein\u2013protein interactions (STRING/IntAct/OmniPath)",
+        "summary": "Protein interactions (STRING/IntAct/OmniPath)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -5075,6 +5428,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -5128,9 +5495,9 @@
     },
     "/mech/pathways": {
       "get": {
-        "summary": "Pathways (Reactome/PathwayCommons/SIGNOR/GO)",
+        "summary": "Pathway memberships (Reactome/Pathway Commons/SIGNOR/GO)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -5223,6 +5590,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -5276,9 +5657,9 @@
     },
     "/mech/ligrec": {
       "get": {
-        "summary": "Ligand\u2013receptor relationships",
+        "summary": "Ligand\u2013receptor pairs (OmniPath/IUPHAR/Reactome)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -5371,6 +5752,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -5424,9 +5819,9 @@
     },
     "/biology/causal-pathways": {
       "get": {
-        "summary": "Signed causal pathway evidence (SIGNOR/Reactome)",
+        "summary": "Signed causal pathways (SIGNOR/Reactome/Pathway Commons)",
         "tags": [
-          "D2 Target & Disease Biology"
+          "D2 Target & disease biology"
         ],
         "parameters": [
           {
@@ -5519,6 +5914,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -5572,7 +5981,7 @@
     },
     "/tract/drugs": {
       "get": {
-        "summary": "Known/experimental drugs (ChEMBL/DGIdb/DrugCentral etc.)",
+        "summary": "Known/experimental drugs (ChEMBL/DGIdb/DrugCentral/PubChem/Pharos)",
         "tags": [
           "D4 Druggability"
         ],
@@ -5667,6 +6076,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -5720,7 +6143,7 @@
     },
     "/tract/ligandability-sm": {
       "get": {
-        "summary": "Small-molecule ligandability",
+        "summary": "Small\u2011molecule ligandability (OT/BindingDB/structure)",
         "tags": [
           "D4 Druggability"
         ],
@@ -5815,6 +6238,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -5868,7 +6305,7 @@
     },
     "/tract/ligandability-ab": {
       "get": {
-        "summary": "Antibody ligandability",
+        "summary": "Antibody ligandability (UniProt topology/GlyGen)",
         "tags": [
           "D4 Druggability"
         ],
@@ -5963,6 +6400,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -6016,7 +6467,7 @@
     },
     "/tract/ligandability-oligo": {
       "get": {
-        "summary": "Oligonucleotide ligandability",
+        "summary": "Oligo ligandability (VEP/RNAcentral/lit)",
         "tags": [
           "D4 Druggability"
         ],
@@ -6111,6 +6562,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -6164,7 +6629,7 @@
     },
     "/tract/modality": {
       "get": {
-        "summary": "Suggested therapeutic modality",
+        "summary": "Best\u2011fit modality (UniProt/AlphaFold/Pharos/IUPHAR)",
         "tags": [
           "D4 Druggability"
         ],
@@ -6259,6 +6724,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -6312,9 +6791,9 @@
     },
     "/tract/immunogenicity": {
       "get": {
-        "summary": "Immunogenicity evidence",
+        "summary": "Immunogenicity (IEDB/IPD\u2011IMGT + lit)",
         "tags": [
-          "D5 Therapeutic Index & Safety"
+          "D5 Therapeutic index & safety"
         ],
         "parameters": [
           {
@@ -6407,6 +6886,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -6460,9 +6953,9 @@
     },
     "/tract/mhc-binding": {
       "get": {
-        "summary": "MHC binding predictions/evidence",
+        "summary": "MHC binding predictions (IEDB Tools/IPD\u2011IMGT)",
         "tags": [
-          "D5 Therapeutic Index & Safety"
+          "D5 Therapeutic index & safety"
         ],
         "parameters": [
           {
@@ -6555,6 +7048,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -6610,7 +7117,7 @@
       "get": {
         "summary": "IEDB curated epitopes",
         "tags": [
-          "D5 Therapeutic Index & Safety"
+          "D5 Therapeutic index & safety"
         ],
         "parameters": [
           {
@@ -6703,6 +7210,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -6756,7 +7277,7 @@
     },
     "/tract/surfaceome": {
       "get": {
-        "summary": "Surfaceome features (UniProt/GlyGen)",
+        "summary": "Surfaceome evidence (UniProt/GlyGen)",
         "tags": [
           "D4 Druggability"
         ],
@@ -6851,6 +7372,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -6904,9 +7439,9 @@
     },
     "/function/dependency": {
       "get": {
-        "summary": "Gene dependency/essentiality (DepMap/ORCS)",
+        "summary": "Dependency/essentiality (DepMap/ORCS)",
         "tags": [
-          "D5 Therapeutic Index & Safety"
+          "D5 Therapeutic index & safety"
         ],
         "parameters": [
           {
@@ -6999,6 +7534,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -7052,9 +7601,9 @@
     },
     "/immuno/hla-coverage": {
       "get": {
-        "summary": "HLA allele coverage",
+        "summary": "Population HLA coverage (IEDB/IPD\u2011IMGT)",
         "tags": [
-          "D5 Therapeutic Index & Safety"
+          "D5 Therapeutic index & safety"
         ],
         "parameters": [
           {
@@ -7147,6 +7696,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -7200,9 +7763,9 @@
     },
     "/clin/endpoints": {
       "get": {
-        "summary": "Clinical endpoints/trials",
+        "summary": "Clinical endpoints & trials (CT.gov/ICTRP)",
         "tags": [
-          "D6 Clinical Translation"
+          "D6 Clinical translation"
         ],
         "parameters": [
           {
@@ -7295,6 +7858,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -7348,9 +7925,9 @@
     },
     "/clin/biomarker-fit": {
       "get": {
-        "summary": "Biomarker fit/evidence",
+        "summary": "Biomarker\u2013endpoint fit (OT/PharmGKB/Monarch)",
         "tags": [
-          "D6 Clinical Translation"
+          "D6 Clinical translation"
         ],
         "parameters": [
           {
@@ -7443,6 +8020,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -7496,9 +8087,9 @@
     },
     "/clin/pipeline": {
       "get": {
-        "summary": "Pipeline programs",
+        "summary": "Pipeline programs (Inxight/ChEMBL/DrugCentral)",
         "tags": [
-          "D6 Clinical Translation"
+          "D6 Clinical translation"
         ],
         "parameters": [
           {
@@ -7591,6 +8182,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -7644,9 +8249,9 @@
     },
     "/clin/safety": {
       "get": {
-        "summary": "Safety / AE signals",
+        "summary": "Safety/prior AE signals (openFDA/DrugCentral/CTD/DGIdb/IMPC)",
         "tags": [
-          "D5 Therapeutic Index & Safety"
+          "D5 Therapeutic index & safety"
         ],
         "parameters": [
           {
@@ -7739,6 +8344,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -7792,9 +8411,9 @@
     },
     "/clin/rwe": {
       "get": {
-        "summary": "Real-world evidence (FAERS etc.)",
+        "summary": "FAERS/RWE summaries (openFDA)",
         "tags": [
-          "D5 Therapeutic Index & Safety"
+          "D5 Therapeutic index & safety"
         ],
         "parameters": [
           {
@@ -7887,6 +8506,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -7940,9 +8573,9 @@
     },
     "/clin/on-target-ae-prior": {
       "get": {
-        "summary": "On-target AE priors",
+        "summary": "On\u2011target AE priors (DrugCentral/DGIdb/openFDA)",
         "tags": [
-          "D5 Therapeutic Index & Safety"
+          "D5 Therapeutic index & safety"
         ],
         "parameters": [
           {
@@ -8035,6 +8668,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -8088,9 +8735,9 @@
     },
     "/clin/feasibility": {
       "get": {
-        "summary": "Trial feasibility (sites/enrollment)",
+        "summary": "Feasibility & recruitment (CT.gov/ICTRP)",
         "tags": [
-          "D6 Clinical Translation"
+          "D6 Clinical translation"
         ],
         "parameters": [
           {
@@ -8121,6 +8768,14 @@
             "in": "query",
             "name": "efo",
             "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -8178,22 +8833,17 @@
           },
           {
             "in": "query",
-            "name": "condition",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
+            "name": "mode",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
-              "default": 50
-            }
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -8247,9 +8897,9 @@
     },
     "/comp/intensity": {
       "get": {
-        "summary": "Competition intensity (patents)",
+        "summary": "Patent activity intensity (PatentsView)",
         "tags": [
-          "D6 Clinical Translation"
+          "D6 Clinical translation"
         ],
         "parameters": [
           {
@@ -8342,6 +8992,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -8395,9 +9059,9 @@
     },
     "/comp/freedom": {
       "get": {
-        "summary": "Freedom-to-operate (patents)",
+        "summary": "Freedom\u2011to\u2011operate (PatentsView)",
         "tags": [
-          "D6 Clinical Translation"
+          "D6 Clinical translation"
         ],
         "parameters": [
           {
@@ -8490,6 +9154,20 @@
               "maximum": 1000,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "live",
+                "snapshot"
+              ]
+            },
+            "description": "Use `live` to bypass caches."
           }
         ],
         "responses": {
@@ -8541,5 +9219,287 @@
         }
       }
     }
-  }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "x-modules55": [
+    {
+      "key": "expr-baseline",
+      "path": "/expr/baseline",
+      "domain": "D3 Selectivity & expression"
+    },
+    {
+      "key": "expr-localization",
+      "path": "/expr/localization",
+      "domain": "D3 Selectivity & expression"
+    },
+    {
+      "key": "expr-inducibility",
+      "path": "/expr/inducibility",
+      "domain": "D3 Selectivity & expression"
+    },
+    {
+      "key": "assoc-bulk-rna",
+      "path": "/assoc/bulk-rna",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "assoc-sc",
+      "path": "/assoc/sc",
+      "domain": "D3 Selectivity & expression"
+    },
+    {
+      "key": "assoc-spatial",
+      "path": "/assoc/spatial",
+      "domain": "D3 Selectivity & expression"
+    },
+    {
+      "key": "sc-hubmap",
+      "path": "/sc/hubmap",
+      "domain": "D3 Selectivity & expression"
+    },
+    {
+      "key": "assoc-proteomics",
+      "path": "/assoc/proteomics",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "assoc-metabolomics",
+      "path": "/assoc/metabolomics",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "assoc-hpa-pathology",
+      "path": "/assoc/hpa-pathology",
+      "domain": "D3 Selectivity & expression"
+    },
+    {
+      "key": "assoc-perturb",
+      "path": "/assoc/perturb",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "genetics-l2g",
+      "path": "/genetics/l2g",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-coloc",
+      "path": "/genetics/coloc",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-mr",
+      "path": "/genetics/mr",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-rare",
+      "path": "/genetics/rare",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-mendelian",
+      "path": "/genetics/mendelian",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-phewas-human-knockout",
+      "path": "/genetics/phewas-human-knockout",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-sqtl",
+      "path": "/genetics/sqtl",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-pqtl",
+      "path": "/genetics/pqtl",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-chromatin-contacts",
+      "path": "/genetics/chromatin-contacts",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-3d-maps",
+      "path": "/genetics/3d-maps",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-regulatory",
+      "path": "/genetics/regulatory",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-annotation",
+      "path": "/genetics/annotation",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-consortia-summary",
+      "path": "/genetics/consortia-summary",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-functional",
+      "path": "/genetics/functional",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-mavedb",
+      "path": "/genetics/mavedb",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-lncrna",
+      "path": "/genetics/lncrna",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "genetics-mirna",
+      "path": "/genetics/mirna",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "genetics-pathogenicity-priors",
+      "path": "/genetics/pathogenicity-priors",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "genetics-intolerance",
+      "path": "/genetics/intolerance",
+      "domain": "D1 Human causality & validation"
+    },
+    {
+      "key": "mech-structure",
+      "path": "/mech/structure",
+      "domain": "D4 Druggability"
+    },
+    {
+      "key": "mech-ppi",
+      "path": "/mech/ppi",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "mech-pathways",
+      "path": "/mech/pathways",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "mech-ligrec",
+      "path": "/mech/ligrec",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "biology-causal-pathways",
+      "path": "/biology/causal-pathways",
+      "domain": "D2 Target & disease biology"
+    },
+    {
+      "key": "tract-drugs",
+      "path": "/tract/drugs",
+      "domain": "D4 Druggability"
+    },
+    {
+      "key": "tract-ligandability-sm",
+      "path": "/tract/ligandability-sm",
+      "domain": "D4 Druggability"
+    },
+    {
+      "key": "tract-ligandability-ab",
+      "path": "/tract/ligandability-ab",
+      "domain": "D4 Druggability"
+    },
+    {
+      "key": "tract-ligandability-oligo",
+      "path": "/tract/ligandability-oligo",
+      "domain": "D4 Druggability"
+    },
+    {
+      "key": "tract-modality",
+      "path": "/tract/modality",
+      "domain": "D4 Druggability"
+    },
+    {
+      "key": "tract-immunogenicity",
+      "path": "/tract/immunogenicity",
+      "domain": "D5 Therapeutic index & safety"
+    },
+    {
+      "key": "tract-mhc-binding",
+      "path": "/tract/mhc-binding",
+      "domain": "D5 Therapeutic index & safety"
+    },
+    {
+      "key": "tract-iedb-epitopes",
+      "path": "/tract/iedb-epitopes",
+      "domain": "D5 Therapeutic index & safety"
+    },
+    {
+      "key": "tract-surfaceome",
+      "path": "/tract/surfaceome",
+      "domain": "D4 Druggability"
+    },
+    {
+      "key": "function-dependency",
+      "path": "/function/dependency",
+      "domain": "D5 Therapeutic index & safety"
+    },
+    {
+      "key": "immuno-hla-coverage",
+      "path": "/immuno/hla-coverage",
+      "domain": "D5 Therapeutic index & safety"
+    },
+    {
+      "key": "clin-endpoints",
+      "path": "/clin/endpoints",
+      "domain": "D6 Clinical translation"
+    },
+    {
+      "key": "clin-biomarker-fit",
+      "path": "/clin/biomarker-fit",
+      "domain": "D6 Clinical translation"
+    },
+    {
+      "key": "clin-pipeline",
+      "path": "/clin/pipeline",
+      "domain": "D6 Clinical translation"
+    },
+    {
+      "key": "clin-safety",
+      "path": "/clin/safety",
+      "domain": "D5 Therapeutic index & safety"
+    },
+    {
+      "key": "clin-rwe",
+      "path": "/clin/rwe",
+      "domain": "D5 Therapeutic index & safety"
+    },
+    {
+      "key": "clin-on-target-ae-prior",
+      "path": "/clin/on-target-ae-prior",
+      "domain": "D5 Therapeutic index & safety"
+    },
+    {
+      "key": "clin-feasibility",
+      "path": "/clin/feasibility",
+      "domain": "D6 Clinical translation"
+    },
+    {
+      "key": "comp-intensity",
+      "path": "/comp/intensity",
+      "domain": "D6 Clinical translation"
+    },
+    {
+      "key": "comp-freedom",
+      "path": "/comp/freedom",
+      "domain": "D6 Clinical translation"
+    }
+  ]
 }
