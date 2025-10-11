@@ -3,7 +3,7 @@
   "info": {
     "title": "TargetVal Gateway API",
     "version": "2.3.0",
-    "description": "**Canonical 6\u2011domain / 55\u2011module** OpenAPI. Each module is a live endpoint returning an Evidence envelope. Literature and synthesis endpoints are additive and not counted as modules. Exactly 55 module paths are defined here."
+    "description": "**Canonical 6‑domain / 55‑module** OpenAPI. Each module is a live endpoint returning an Evidence envelope. Literature and synthesis endpoints are additive and not counted as modules. Exactly 55 module paths are defined here."
   },
   "servers": [
     {
@@ -132,13 +132,6 @@
           "results"
         ]
       }
-    },
-    "securitySchemes": {
-      "ApiKeyAuth": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-API-Key"
-      }
     }
   },
   "paths": {
@@ -152,7 +145,8 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "operationId": "getRoot"
       }
     },
     "/livez": {
@@ -165,7 +159,8 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "operationId": "getLivez"
       }
     },
     "/readyz": {
@@ -178,7 +173,8 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "operationId": "getReadyz"
       }
     },
     "/modules55": {
@@ -191,7 +187,8 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "operationId": "getModules55"
       }
     },
     "/registry/active55": {
@@ -204,7 +201,8 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "operationId": "getRegistryActive55"
       }
     },
     "/lit/search": {
@@ -280,7 +278,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getLitSearch"
       }
     },
     "/lit/triggers": {
@@ -293,7 +292,8 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "operationId": "postLitTriggers"
       }
     },
     "/synth/domain": {
@@ -306,7 +306,8 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "operationId": "postSynthDomain"
       }
     },
     "/expr/baseline": {
@@ -468,7 +469,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getExprBaseline"
       }
     },
     "/expr/localization": {
@@ -630,7 +632,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getExprLocalization"
       }
     },
     "/expr/inducibility": {
@@ -792,7 +795,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getExprInducibility"
       }
     },
     "/assoc/bulk-rna": {
@@ -954,7 +958,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getAssocBulkRna"
       }
     },
     "/assoc/sc": {
@@ -1116,7 +1121,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getAssocSc"
       }
     },
     "/assoc/spatial": {
@@ -1278,7 +1284,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getAssocSpatial"
       }
     },
     "/sc/hubmap": {
@@ -1440,7 +1447,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getScHubmap"
       }
     },
     "/assoc/proteomics": {
@@ -1602,7 +1610,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getAssocProteomics"
       }
     },
     "/assoc/metabolomics": {
@@ -1764,7 +1773,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getAssocMetabolomics"
       }
     },
     "/assoc/hpa-pathology": {
@@ -1926,7 +1936,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getAssocHpaPathology"
       }
     },
     "/assoc/perturb": {
@@ -2088,7 +2099,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getAssocPerturb"
       }
     },
     "/genetics/l2g": {
@@ -2250,7 +2262,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsL2g"
       }
     },
     "/genetics/coloc": {
@@ -2412,7 +2425,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsColoc"
       }
     },
     "/genetics/mr": {
@@ -2574,7 +2588,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsMr"
       }
     },
     "/genetics/rare": {
@@ -2736,7 +2751,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsRare"
       }
     },
     "/genetics/mendelian": {
@@ -2898,7 +2914,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsMendelian"
       }
     },
     "/genetics/phewas-human-knockout": {
@@ -3060,7 +3077,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsPhewasHumanKnockout"
       }
     },
     "/genetics/sqtl": {
@@ -3222,7 +3240,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsSqtl"
       }
     },
     "/genetics/pqtl": {
@@ -3384,7 +3403,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsPqtl"
       }
     },
     "/genetics/chromatin-contacts": {
@@ -3546,7 +3566,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsChromatinContacts"
       }
     },
     "/genetics/3d-maps": {
@@ -3708,7 +3729,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGenetics3dMaps"
       }
     },
     "/genetics/regulatory": {
@@ -3870,7 +3892,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsRegulatory"
       }
     },
     "/genetics/annotation": {
@@ -4032,7 +4055,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsAnnotation"
       }
     },
     "/genetics/consortia-summary": {
@@ -4194,7 +4218,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsConsortiaSummary"
       }
     },
     "/genetics/functional": {
@@ -4356,7 +4381,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsFunctional"
       }
     },
     "/genetics/mavedb": {
@@ -4518,7 +4544,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsMavedb"
       }
     },
     "/genetics/lncrna": {
@@ -4680,7 +4707,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsLncrna"
       }
     },
     "/genetics/mirna": {
@@ -4842,7 +4870,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsMirna"
       }
     },
     "/genetics/pathogenicity-priors": {
@@ -5004,7 +5033,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsPathogenicityPriors"
       }
     },
     "/genetics/intolerance": {
@@ -5166,7 +5196,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getGeneticsIntolerance"
       }
     },
     "/mech/structure": {
@@ -5328,7 +5359,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getMechStructure"
       }
     },
     "/mech/ppi": {
@@ -5490,7 +5522,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getMechPpi"
       }
     },
     "/mech/pathways": {
@@ -5652,12 +5685,13 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getMechPathways"
       }
     },
     "/mech/ligrec": {
       "get": {
-        "summary": "Ligand\u2013receptor pairs (OmniPath/IUPHAR/Reactome)",
+        "summary": "Ligand–receptor pairs (OmniPath/IUPHAR/Reactome)",
         "tags": [
           "D2 Target & disease biology"
         ],
@@ -5814,7 +5848,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getMechLigrec"
       }
     },
     "/biology/causal-pathways": {
@@ -5976,7 +6011,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getBiologyCausalPathways"
       }
     },
     "/tract/drugs": {
@@ -6138,12 +6174,13 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getTractDrugs"
       }
     },
     "/tract/ligandability-sm": {
       "get": {
-        "summary": "Small\u2011molecule ligandability (OT/BindingDB/structure)",
+        "summary": "Small‑molecule ligandability (OT/BindingDB/structure)",
         "tags": [
           "D4 Druggability"
         ],
@@ -6300,7 +6337,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getTractLigandabilitySm"
       }
     },
     "/tract/ligandability-ab": {
@@ -6462,7 +6500,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getTractLigandabilityAb"
       }
     },
     "/tract/ligandability-oligo": {
@@ -6624,12 +6663,13 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getTractLigandabilityOligo"
       }
     },
     "/tract/modality": {
       "get": {
-        "summary": "Best\u2011fit modality (UniProt/AlphaFold/Pharos/IUPHAR)",
+        "summary": "Best‑fit modality (UniProt/AlphaFold/Pharos/IUPHAR)",
         "tags": [
           "D4 Druggability"
         ],
@@ -6786,12 +6826,13 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getTractModality"
       }
     },
     "/tract/immunogenicity": {
       "get": {
-        "summary": "Immunogenicity (IEDB/IPD\u2011IMGT + lit)",
+        "summary": "Immunogenicity (IEDB/IPD‑IMGT + lit)",
         "tags": [
           "D5 Therapeutic index & safety"
         ],
@@ -6948,12 +6989,13 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getTractImmunogenicity"
       }
     },
     "/tract/mhc-binding": {
       "get": {
-        "summary": "MHC binding predictions (IEDB Tools/IPD\u2011IMGT)",
+        "summary": "MHC binding predictions (IEDB Tools/IPD‑IMGT)",
         "tags": [
           "D5 Therapeutic index & safety"
         ],
@@ -7110,7 +7152,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getTractMhcBinding"
       }
     },
     "/tract/iedb-epitopes": {
@@ -7272,7 +7315,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getTractIedbEpitopes"
       }
     },
     "/tract/surfaceome": {
@@ -7434,7 +7478,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getTractSurfaceome"
       }
     },
     "/function/dependency": {
@@ -7596,12 +7641,13 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getFunctionDependency"
       }
     },
     "/immuno/hla-coverage": {
       "get": {
-        "summary": "Population HLA coverage (IEDB/IPD\u2011IMGT)",
+        "summary": "Population HLA coverage (IEDB/IPD‑IMGT)",
         "tags": [
           "D5 Therapeutic index & safety"
         ],
@@ -7758,7 +7804,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getImmunoHlaCoverage"
       }
     },
     "/clin/endpoints": {
@@ -7920,12 +7967,13 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getClinEndpoints"
       }
     },
     "/clin/biomarker-fit": {
       "get": {
-        "summary": "Biomarker\u2013endpoint fit (OT/PharmGKB/Monarch)",
+        "summary": "Biomarker–endpoint fit (OT/PharmGKB/Monarch)",
         "tags": [
           "D6 Clinical translation"
         ],
@@ -8082,7 +8130,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getClinBiomarkerFit"
       }
     },
     "/clin/pipeline": {
@@ -8244,7 +8293,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getClinPipeline"
       }
     },
     "/clin/safety": {
@@ -8406,7 +8456,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getClinSafety"
       }
     },
     "/clin/rwe": {
@@ -8568,12 +8619,13 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getClinRwe"
       }
     },
     "/clin/on-target-ae-prior": {
       "get": {
-        "summary": "On\u2011target AE priors (DrugCentral/DGIdb/openFDA)",
+        "summary": "On‑target AE priors (DrugCentral/DGIdb/openFDA)",
         "tags": [
           "D5 Therapeutic index & safety"
         ],
@@ -8730,7 +8782,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getClinOnTargetAePrior"
       }
     },
     "/clin/feasibility": {
@@ -8892,7 +8945,8 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getClinFeasibility"
       }
     },
     "/comp/intensity": {
@@ -9054,12 +9108,13 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getCompIntensity"
       }
     },
     "/comp/freedom": {
       "get": {
-        "summary": "Freedom\u2011to\u2011operate (PatentsView)",
+        "summary": "Freedom‑to‑operate (PatentsView)",
         "tags": [
           "D6 Clinical translation"
         ],
@@ -9216,15 +9271,11 @@
               }
             }
           }
-        }
+        },
+        "operationId": "getCompFreedom"
       }
     }
   },
-  "security": [
-    {
-      "ApiKeyAuth": []
-    }
-  ],
   "x-modules55": [
     {
       "key": "expr-baseline",
