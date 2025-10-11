@@ -10,8 +10,9 @@ import sys
 import time
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import yaml
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -19,7 +20,7 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-# Use uvicorn's ProxyHeaders (available on Render) and fall back gracefully.
+# Optional middlewares depending on environment
 try:
     from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware  # type: ignore
 except Exception:  # pragma: no cover
@@ -48,6 +49,9 @@ ALLOW_METHODS = os.getenv("ALLOW_METHODS", "*")
 ALLOW_HEADERS = os.getenv("ALLOW_HEADERS", "*")
 TRUSTED_HOSTS = os.getenv("TRUSTED_HOSTS", "*")
 
+# Location of the 55-module registry
+MODCFG_PATH = os.getenv("TARGETVAL_MODULE_CONFIG", "app/routers/targetval_modules.yaml")
+
 HAS_INSIGHT = False  # set True if you include an insight router elsewhere
 
 
@@ -71,15 +75,16 @@ class AggregateRequest(BaseModel):
 # -----------------------------------------------------------------------------
 # Import helpers
 # -----------------------------------------------------------------------------
-def _import_router_module():
+def _import_router_module() -> Tuple[Optional[Any], Optional[str], Optional[str]]:
     """
     Try a few common import paths and return (module, where, error_text).
     We import the *module* and later access module.router to avoid brittle names.
     """
     attempts: List[str] = []
+
     def _try(mod: str):
         try:
-            m = __import__(mod, fromlist=["router"])
+            m = __import__(mod, fromlist=["router"])  # router must exist inside the module
             if getattr(m, "router", None) is None:
                 raise ImportError(f"module {mod} has no attribute 'router'")
             return m, mod, None
@@ -117,11 +122,29 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             duration_ms = (time.perf_counter() - start) * 1000.0
             logging.getLogger("uvicorn.access").info(
                 "%s %s -> %s (%.1f ms) rid=%s",
-                request.method, request.url.path, response.status_code, duration_ms, rid,
+                request.method,
+                request.url.path,
+                response.status_code,
+                duration_ms,
+                rid,
             )
         except Exception:
             pass
         return response
+
+
+# -----------------------------------------------------------------------------
+# Utility
+# -----------------------------------------------------------------------------
+def _normalize_path(p: Optional[str]) -> str:
+    if not p:
+        return "/"
+    p = p.strip()
+    if not p.startswith("/"):
+        p = "/" + p
+    if len(p) > 1 and p.endswith("/"):
+        p = p[:-1]
+    return p
 
 
 # -----------------------------------------------------------------------------
@@ -155,12 +178,12 @@ def create_app() -> FastAPI:
         allow_headers=[h.strip() for h in ALLOW_HEADERS.split(",")] if ALLOW_HEADERS != "*" else ["*"],
     )
 
-    # Import targetval_router module and include its router
+    # Import targetval_router module and include its router under /v1
     router_module, where, import_error = _import_router_module()
     app.state.router_location = where
     app.state.router_import_error = import_error
     if router_module:
-        app.include_router(router_module.router)
+        app.include_router(router_module.router, prefix="/v1")  # <--- mount at /v1
 
     # Detect presence of synthesis v2 endpoints
     has_v2 = False
@@ -168,7 +191,7 @@ def create_app() -> FastAPI:
         if router_module and hasattr(router_module, "router"):
             for r in router_module.router.routes:
                 p = getattr(r, "path", "")
-                if p in ("/synth/integrate", "/lit/meta") or p.startswith("/synth/bucket"):
+                if p in ("/synth/integrate", "/lit/meta") or str(p).startswith("/synth/bucket"):
                     has_v2 = True
                     break
     except Exception:
@@ -176,7 +199,7 @@ def create_app() -> FastAPI:
     app.state.has_v2 = has_v2
 
     # ---------------- Meta/debug endpoints ----------------
-    @app.get("/livez", tags=["_meta"])
+    @app.get("/livez", tags=["_meta"])  # liveness
     async def livez():
         return {
             "ok": True,
@@ -185,7 +208,7 @@ def create_app() -> FastAPI:
             "synthesis_v2": getattr(app.state, "has_v2", False),
         }
 
-    @app.get("/readyz", tags=["_meta"])
+    @app.get("/readyz", tags=["_meta"])  # readiness
     async def readyz():
         if getattr(app.state, "router_import_error", None) is not None:
             return JSONResponse(
@@ -204,21 +227,19 @@ def create_app() -> FastAPI:
             "synthesis_v2": getattr(app.state, "has_v2", False),
         }
 
-    @app.get("/", tags=["_meta"])
+    @app.get("/", tags=["_meta"])  # about/root
     async def about():
         has_v2_local = getattr(app.state, "has_v2", False)
         tip = {
             "message": "TARGETVAL Gateway â Synthesis v2 available" if has_v2_local else "TARGETVAL Gateway",
             "try": [
-                "/synth/bucket?name=genetics&gene=IL6&condition=ulcerative%20colitis&mode=math",
-                "/synth/bucket?name=association&gene=IL6&mode=hybrid",
-                "/synth/integrate?gene=IL6&condition=ulcerative%20colitis",
-                "/lit/meta?symbol=IL6&condition=ulcerative%20colitis",
-            ] if has_v2_local else ["/docs", "/redoc"],
+                "/v1/module/genetics-l2g?symbol=IL6&efo=EFO_0003767",
+                "/v1/aggregate",
+            ],
         }
         return tip
 
-    @app.get("/_debug/import", tags=["_meta"])
+    @app.get("/_debug/import", tags=["_meta"])  # import diagnostics
     async def debug_import():
         return {
             "attempted": getattr(app.state, "router_location", None),
@@ -226,16 +247,18 @@ def create_app() -> FastAPI:
             "sys_path": sys.path,
         }
 
-    @app.get("/meta/routes", tags=["_meta"])
-    async def list_routes() -> Dict[str, Any]:
+    @app.get("/meta/routes", tags=["_meta"])  # list registered routes
+    async def list_routes_meta() -> Dict[str, Any]:
         routes: List[Dict[str, Any]] = []
         for r in app.router.routes:
             try:
-                routes.append({
-                    "path": getattr(r, "path", None),
-                    "name": getattr(r, "name", None),
-                    "methods": sorted(list(getattr(r, "methods", []) or [])),
-                })
+                routes.append(
+                    {
+                        "path": getattr(r, "path", None),
+                        "name": getattr(r, "name", None),
+                        "methods": sorted(list(getattr(r, "methods", []) or [])),
+                    }
+                )
             except Exception:
                 pass
         routes.sort(key=lambda x: (x["path"] or ""))
@@ -247,33 +270,67 @@ def create_app() -> FastAPI:
         }
 
     # ---------------- Module aggregator wiring ----------------
-    def _build_module_map() -> Dict[str, Any]:
-        """
-        Derive MODULE_MAP from the included APIRouter. This makes the app future-proof
-        when new endpoints are added to router.py (no hand-maintained dicts).
-        We keep a couple of human-friendly aliases stable.
-        """
-        mapping: Dict[str, Any] = {}
-        prefixes = ("/genetics/", "/assoc/", "/expr/", "/mech/", "/tract/", "/clin/", "/comp/", "/lit/")
+    def _index_router_endpoints() -> Dict[str, Any]:
+        """Build a lookup of path (with and without /v1) -> endpoint function."""
+        index: Dict[str, Any] = {}
         if not router_module:
-            return mapping
+            return index
         for r in getattr(router_module, "router").routes:
             try:
-                path = getattr(r, "path", "") or ""
+                path = _normalize_path(getattr(r, "path", ""))
                 endpoint = getattr(r, "endpoint", None)
-                name = getattr(endpoint, "__name__", None)
-                if endpoint and name and any(path.startswith(p) for p in prefixes):
-                    mapping[name] = endpoint
+                if not endpoint or not path:
+                    continue
+                # Store exact path
+                index[path] = endpoint
+                # Store without /v1 prefix if present
+                if path.startswith("/v1/"):
+                    index[_normalize_path(path[len("/v1"):])] = endpoint
             except Exception:
                 continue
-        # Stable aliases users expect
-        if "expression_baseline" in mapping and "expr_baseline" not in mapping:
-            mapping["expr_baseline"] = mapping["expression_baseline"]
-        if "genetics_cross_species" in mapping and "genetics_cross" not in mapping:
-            mapping["genetics_cross"] = mapping["genetics_cross_species"]
-        # Allow eqtl alias to hit sQTL/eQTL union
-        if "genetics_sqtl" in mapping and "genetics_eqtl" not in mapping:
-            mapping["genetics_eqtl"] = mapping["genetics_sqtl"]
+        return index
+
+    def _load_yaml_registry() -> List[Dict[str, Any]]:
+        try:
+            with open(MODCFG_PATH, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+            modules = cfg.get("modules") or []
+            # Normalize 'key' and 'path'
+            out = []
+            for m in modules:
+                key = (m.get("key") or m.get("id") or "").strip()
+                path = _normalize_path(m.get("path"))
+                if key and path:
+                    out.append({"key": key, "path": path})
+            return out
+        except Exception:
+            return []
+
+    def _build_module_map() -> Dict[str, Any]:
+        """Derive MODULE_MAP from the included APIRouter and the YAML registry."""
+        mapping: Dict[str, Any] = {}
+        route_index = _index_router_endpoints()
+        registry = _load_yaml_registry()
+
+        # First pass: direct matches
+        for m in registry:
+            key = m["key"]
+            path = m["path"]
+            func = route_index.get(path) or route_index.get(_normalize_path("/v1" + path))
+            if func:
+                mapping[key] = func
+
+        # Second pass: suffix matches (defensive)
+        for m in registry:
+            key = m["key"]
+            if key in mapping:
+                continue
+            target = m["path"]
+            for rp, ep in route_index.items():
+                if rp.endswith(target):
+                    mapping[key] = ep
+                    break
+
         return mapping
 
     MODULE_MAP: Dict[str, Any] = _build_module_map()
@@ -291,9 +348,19 @@ def create_app() -> FastAPI:
 
     def _bind_kwargs(func: Any, provided: Dict[str, Any]) -> Dict[str, Any]:
         """Return only the kwargs that the target function actually accepts."""
-        sig = inspect.signature(func)
-        allowed = set(sig.parameters.keys())
-        return {k: v for k, v in provided.items() if k in allowed and v is not None}
+        try:
+            sig = inspect.signature(func)
+            allowed = set(sig.parameters.keys())
+            return {k: v for k, v in provided.items() if k in allowed and v is not None}
+        except Exception:
+            # Best-effort: if we can't introspect, pass only common fields
+            common = {
+                k: v
+                for k, v in provided.items()
+                if k in {"gene", "symbol", "ensembl", "ensembl_id", "efo", "condition", "limit"}
+                and v is not None
+            }
+            return common
 
     async def _run_module(
         name: str,
@@ -305,7 +372,7 @@ def create_app() -> FastAPI:
         condition: Optional[str],
         limit: Optional[int],
         extra: Optional[Dict[str, Any]],
-    ):
+    ) -> Tuple[str, Dict[str, Any]]:
         """Invoke a single module function safely and return (name, result_dict)."""
         # Safer fallback: only use gene as symbol if it looks like an HGNC symbol
         symbol_effective = symbol if symbol else (gene if _looks_like_symbol(gene) else None)
@@ -317,7 +384,8 @@ def create_app() -> FastAPI:
             "condition": condition,
             "disease": condition,  # some functions use 'disease' as the param name
             "limit": limit,
-            # passthrough for modules that accept it (e.g., genetics_l2g can take ensembl)
+            # pass BOTH names so handlers can pick what they accept
+            "ensembl_id": ensembl_id,
             "ensembl": ensembl_id,
         }
         if extra:
@@ -367,39 +435,54 @@ def create_app() -> FastAPI:
             }
 
     # ---------------- Public convenience endpoints ----------------
-    @app.get("/healthz")
+    @app.get("/v1/healthz")
     async def healthz():
-        return {"ok": True, "modules": len(MODULE_MAP), "version": APP_VERSION, "has_insight": HAS_INSIGHT}
+        return {
+            "ok": True,
+            "modules": len(MODULE_MAP),
+            "version": APP_VERSION,
+            "has_insight": HAS_INSIGHT,
+        }
 
-    @app.get("/modules")
+    @app.get("/v1/modules")
     async def list_modules():
+        # Return canonical 55 keys from YAML mapping
         return sorted(MODULE_MAP.keys())
 
-    @app.get("/module/{name}")
+    @app.get("/v1/module/{module_key}")
     async def run_single_module(
         request: Request,
-        name: str,
+        module_key: str,
         gene: Optional[str] = Query(default=None),
         symbol: Optional[str] = Query(default=None),
-        ensembl: Optional[str] = Query(default=None, description="Optional Ensembl gene ID"),
+        ensembl_id: Optional[str] = Query(default=None, alias="ensembl"),
         efo: Optional[str] = Query(default=None),
         condition: Optional[str] = Query(default=None),
         limit: int = Query(default=50, ge=1, le=1000),
     ):
-        func = MODULE_MAP.get(name)
+        func = MODULE_MAP.get(module_key)
         if not func:
-            raise HTTPException(status_code=404, detail=f"Unknown module: {name}")
+            raise HTTPException(status_code=404, detail=f"Unknown module: {module_key}")
 
-        # Pass through any extra query params (species, cutoff, tissue, cell_type, etc.)
-        known = {"gene", "symbol", "ensembl", "efo", "condition", "limit"}
-        extras: Dict[str, Any] = {k: v for k, v in request.query_params.items() if k not in known}
+        # Pass through any extra query params (species, cutoff, tissue, cell_type, variant, drug, etc.)
+        known = {"gene", "symbol", "ensembl_id", "ensembl", "efo", "condition", "limit"}
+        extras: Dict[str, Any] = {}
+        for k, v in request.query_params.items():
+            if k not in known:
+                # best-effort casting for numeric limit-like values
+                if k in {"limit", "offset"}:
+                    try:
+                        v = int(v)
+                    except Exception:
+                        pass
+                extras[k] = v
 
         _, res = await _run_module(
-            name=name,
+            name=module_key,
             func=func,
             gene=gene,
             symbol=symbol,
-            ensembl_id=ensembl,
+            ensembl_id=ensembl_id,
             efo=efo,
             condition=condition,
             limit=limit,
@@ -409,7 +492,7 @@ def create_app() -> FastAPI:
 
     AGG_LIMIT = int(os.getenv("AGG_CONCURRENCY", "8"))
 
-    @app.post("/aggregate")
+    @app.post("/v1/aggregate")
     async def aggregate(body: AggregateRequest):
         modules = body.modules or list(MODULE_MAP.keys())
         unknown = [m for m in modules if m not in MODULE_MAP]
@@ -444,10 +527,20 @@ def create_app() -> FastAPI:
         results = await asyncio.gather(*[_guarded(m, MODULE_MAP[m]) for m in modules])
 
         # Provide a slightly smarter echo of the query (mirroring symbol fallback)
-        sym = body.symbol if body.symbol else (
-            body.gene if (body.gene and re.match(r"^[A-Za-z0-9-]+$", body.gene)
-                          and not body.gene.upper().startswith("ENSG")
-                          and ":" not in body.gene and "_" not in body.gene) else None
+        sym = (
+            body.symbol
+            if body.symbol
+            else (
+                body.gene
+                if (
+                    body.gene
+                    and re.match(r"^[A-Za-z0-9-]+$", body.gene)
+                    and not body.gene.upper().startswith("ENSG")
+                    and ":" not in body.gene
+                    and "_" not in body.gene
+                )
+                else None
+            )
         )
         out = {
             "request": {
@@ -467,7 +560,9 @@ def create_app() -> FastAPI:
     async def unhandled_exception_handler(request: Request, exc: Exception):
         logging.exception("Unhandled error: %r", exc)
         rid = getattr(request.state, "request_id", None)
-        return JSONResponse(status_code=500, content={"status": "ERROR", "detail": "internal error", "request_id": rid})
+        return JSONResponse(
+            status_code=500, content={"status": "ERROR", "detail": "internal error", "request_id": rid}
+        )
 
     return app
 
