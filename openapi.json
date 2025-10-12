@@ -1,20 +1,23 @@
-
-  "openapi": "3.0.3",
+{
+  "openapi": "3.1.0",
   "info": {
-    "title": "TargetVal Gateway (Actions Surface)",
-    "version": "2025.10.4",
-    "description": "Compact OpenAPI for ChatGPT Actions. Dynamic access to all 55 modules via module keys, literature meta, synthesis, and domain sequential runs. Mounted at /v1."
+    "title": "TargetVal Gateway",
+    "version": "2025.10-final",
+    "description": "Biologic target validation API gateway with 55 live modules across 6 domains (Genetics, Assoc/Expression, Mechanism, Tractability, Safety, Clinical/Comp). Each module fetches real-time data from public biomedical APIs."
   },
   "servers": [
     {
-      "url": "https://targetval-gateway.onrender.com/v1"
+      "url": "https://targetval-gateway.onrender.com/v1",
+      "description": "Production server"
     }
   ],
   "paths": {
     "/healthz": {
       "get": {
-        "operationId": "healthzV1",
+        "operationId": "healthCheck",
         "summary": "Health check",
+        "description": "Check API health and get module count",
+        "tags": ["system"],
         "responses": {
           "200": {
             "description": "OK",
@@ -22,7 +25,11 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true
+                  "properties": {
+                    "ok": {"type": "boolean"},
+                    "modules": {"type": "integer"},
+                    "version": {"type": "string"}
+                  }
                 }
               }
             }
@@ -32,8 +39,10 @@
     },
     "/modules": {
       "get": {
-        "operationId": "listModulesV1",
-        "summary": "List canonical module keys (55) from YAML",
+        "operationId": "listModules",
+        "summary": "List all 55 module keys",
+        "description": "Returns array of all available module identifiers",
+        "tags": ["system"],
         "responses": {
           "200": {
             "description": "OK",
@@ -41,9 +50,7 @@
               "application/json": {
                 "schema": {
                   "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
+                  "items": {"type": "string"}
                 }
               }
             }
@@ -53,63 +60,59 @@
     },
     "/module": {
       "post": {
-        "operationId": "runModuleV1",
+        "operationId": "runModule",
         "summary": "Run a single module by key",
+        "description": "Execute one of the 55 modules with POST request",
+        "tags": ["modules"],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
+                "required": ["module_key"],
                 "properties": {
                   "module_key": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Module identifier (e.g., 'genetics-l2g', 'expr-baseline')"
                   },
-                  "gene": {
-                    "type": "string"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "ensembl": {
-                    "type": "string"
-                  },
-                  "efo": {
-                    "type": "string"
-                  },
-                  "condition": {
-                    "type": "string"
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "default": 50
-                  },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true
-                  }
-                },
-                "required": [
-                  "module_key"
-                ]
+                  "gene": {"type": "string", "description": "Gene symbol or ID"},
+                  "symbol": {"type": "string", "description": "Gene symbol"},
+                  "ensembl": {"type": "string", "description": "Ensembl gene ID"},
+                  "efo": {"type": "string", "description": "EFO disease ID"},
+                  "condition": {"type": "string", "description": "Disease/condition name"},
+                  "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 1000},
+                  "extra": {"type": "object", "additionalProperties": true}
+                }
               },
-              "example": {
-                "module_key": "genetics-l2g",
-                "symbol": "IL6",
-                "efo": "EFO_0003767",
-                "limit": 50
+              "examples": {
+                "genetics": {
+                  "value": {
+                    "module_key": "genetics-l2g",
+                    "symbol": "IL6",
+                    "condition": "ulcerative colitis",
+                    "limit": 50
+                  }
+                }
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "Module execution result",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true
+                  "properties": {
+                    "status": {"type": "string"},
+                    "source": {"type": "string"},
+                    "fetched_n": {"type": "integer"},
+                    "data": {"type": "object"},
+                    "citations": {"type": "array", "items": {"type": "string"}},
+                    "fetched_at": {"type": "string"}
+                  }
                 }
               }
             }
@@ -119,70 +122,60 @@
     },
     "/module/{name}": {
       "get": {
-        "operationId": "runModuleByNameV1",
-        "summary": "Run a single module by key (GET)",
+        "operationId": "runModuleGet",
+        "summary": "Run a module with GET",
+        "description": "Execute one of the 55 modules using GET parameters",
+        "tags": ["modules"],
         "parameters": [
           {
-            "in": "path",
             "name": "name",
+            "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": {"type": "string"},
+            "description": "Module key"
           },
           {
-            "in": "query",
             "name": "gene",
-            "schema": {
-              "type": "string"
-            }
+            "in": "query",
+            "schema": {"type": "string"},
+            "description": "Gene symbol or ID"
           },
           {
-            "in": "query",
             "name": "symbol",
-            "schema": {
-              "type": "string"
-            }
+            "in": "query",
+            "schema": {"type": "string"},
+            "description": "Gene symbol"
           },
           {
-            "in": "query",
             "name": "ensembl",
-            "schema": {
-              "type": "string"
-            }
+            "in": "query",
+            "schema": {"type": "string"},
+            "description": "Ensembl ID"
           },
           {
-            "in": "query",
             "name": "efo",
-            "schema": {
-              "type": "string"
-            }
+            "in": "query",
+            "schema": {"type": "string"},
+            "description": "EFO disease ID"
           },
           {
-            "in": "query",
             "name": "condition",
-            "schema": {
-              "type": "string"
-            }
+            "in": "query",
+            "schema": {"type": "string"},
+            "description": "Disease/condition"
           },
           {
-            "in": "query",
             "name": "limit",
-            "schema": {
-              "type": "integer",
-              "default": 50
-            }
+            "in": "query",
+            "schema": {"type": "integer", "default": 50, "minimum": 1, "maximum": 1000}
           }
         ],
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "Module result",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true
-                }
+                "schema": {"type": "object"}
               }
             }
           }
@@ -191,8 +184,10 @@
     },
     "/aggregate": {
       "post": {
-        "operationId": "aggregateModulesV1",
-        "summary": "Run many modules; sequential or parallel; domain filter",
+        "operationId": "aggregateModules",
+        "summary": "Run multiple modules",
+        "description": "Execute multiple modules sequentially or in parallel, with optional domain filtering",
+        "tags": ["modules"],
         "requestBody": {
           "required": true,
           "content": {
@@ -202,84 +197,72 @@
                 "properties": {
                   "modules": {
                     "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "items": {"type": "string"},
+                    "description": "List of module keys to run"
                   },
                   "domain": {
-                    "type": "string",
-                    "description": "D1..D6 or 1..6"
+                    "oneOf": [
+                      {"type": "integer", "minimum": 1, "maximum": 6},
+                      {"type": "string", "pattern": "^D?[1-6]$"}
+                    ],
+                    "description": "Domain filter: 1=Genetics, 2=Assoc, 3=Expression, 4=Tractability, 5=Safety, 6=Clinical"
                   },
-                  "primary_only": {
-                    "type": "boolean",
-                    "default": true
-                  },
+                  "primary_only": {"type": "boolean", "default": true},
                   "order": {
                     "type": "string",
-                    "enum": [
-                      "sequential",
-                      "parallel"
-                    ],
+                    "enum": ["sequential", "parallel"],
                     "default": "sequential"
                   },
-                  "continue_on_error": {
-                    "type": "boolean",
-                    "default": true
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "default": 50
-                  },
-                  "gene": {
-                    "type": "string"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "ensembl_id": {
-                    "type": "string"
-                  },
-                  "efo": {
-                    "type": "string"
-                  },
-                  "condition": {
-                    "type": "string"
-                  },
-                  "species": {
-                    "type": "integer"
-                  },
-                  "cutoff": {
-                    "type": "number"
-                  },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true
-                  }
+                  "continue_on_error": {"type": "boolean", "default": true},
+                  "gene": {"type": "string"},
+                  "symbol": {"type": "string"},
+                  "ensembl_id": {"type": "string"},
+                  "efo": {"type": "string"},
+                  "condition": {"type": "string"},
+                  "limit": {"type": "integer", "default": 50},
+                  "species": {"type": "integer"},
+                  "cutoff": {"type": "number"},
+                  "extra": {"type": "object"}
                 }
               },
-              "example": {
-                "modules": [
-                  "genetics-l2g",
-                  "genetics-coloc",
-                  "expr-baseline"
-                ],
-                "symbol": "IL6",
-                "efo": "EFO_0003767",
-                "order": "sequential",
-                "continue_on_error": true,
-                "limit": 50
+              "examples": {
+                "domain1": {
+                  "summary": "Domain 1 (Genetics)",
+                  "value": {
+                    "domain": 1,
+                    "symbol": "PCSK9",
+                    "condition": "hypercholesterolemia",
+                    "order": "sequential",
+                    "limit": 50
+                  }
+                },
+                "multiModule": {
+                  "summary": "Specific modules",
+                  "value": {
+                    "modules": ["genetics-l2g", "expr-baseline", "mech-ppi"],
+                    "symbol": "IL6",
+                    "condition": "ulcerative colitis",
+                    "order": "parallel"
+                  }
+                }
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "Aggregated results",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true
+                  "properties": {
+                    "query": {"type": "object"},
+                    "results": {
+                      "type": "object",
+                      "additionalProperties": {"type": "object"}
+                    }
+                  }
                 }
               }
             }
@@ -289,18 +272,17 @@
     },
     "/domain/{domain_id}/run": {
       "post": {
-        "operationId": "runDomainV1",
-        "summary": "Run all modules of a domain sequentially; continue on errors",
+        "operationId": "runDomain",
+        "summary": "Run all modules in a domain",
+        "description": "Execute all primary modules for a specific domain (1-6) sequentially",
+        "tags": ["modules"],
         "parameters": [
           {
-            "in": "path",
             "name": "domain_id",
+            "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 6
-            }
+            "schema": {"type": "integer", "minimum": 1, "maximum": 6},
+            "description": "Domain: 1=Genetics, 2=Assoc, 3=Expression, 4=Tractability, 5=Safety, 6=Clinical"
           }
         ],
         "requestBody": {
@@ -309,240 +291,25 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "additionalProperties": true
-              },
-              "example": {
-                "symbol": "IL6",
-                "condition": "ulcerative colitis",
-                "limit": 50
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/lit/meta": {
-      "get": {
-        "operationId": "litMetaV1",
-        "summary": "Literature meta/search",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "gene",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "symbol",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "efo",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "type": "integer",
-              "default": 50
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/synth/integrate": {
-      "post": {
-        "operationId": "synthIntegrateV1",
-        "summary": "Synthesis across modules",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
                 "properties": {
-                  "gene": {
-                    "type": "string"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "efo": {
-                    "type": "string"
-                  },
-                  "condition": {
-                    "type": "string"
-                  },
-                  "modules": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "method": {
-                    "type": "string",
-                    "enum": [
-                      "math",
-                      "vote",
-                      "rank",
-                      "bayes",
-                      "hybrid"
-                    ],
-                    "default": "math"
-                  },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true
-                  }
+                  "gene": {"type": "string"},
+                  "symbol": {"type": "string"},
+                  "ensembl_id": {"type": "string"},
+                  "efo": {"type": "string"},
+                  "condition": {"type": "string"},
+                  "limit": {"type": "integer", "default": 50},
+                  "primary_only": {"type": "boolean", "default": true}
                 }
-              },
-              "example": {
-                "symbol": "IL6",
-                "condition": "ulcerative colitis",
-                "modules": [
-                  "genetics-l2g",
-                  "expr-baseline",
-                  "mech-ppi"
-                ],
-                "method": "math"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "Domain results",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/synth/bucket": {
-      "get": {
-        "operationId": "synthBucketV1",
-        "summary": "Math synthesis per bucket",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "gene",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "symbol",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "efo",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "type": "integer",
-              "default": 50
-            }
-          },
-          {
-            "in": "query",
-            "name": "mode",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true
-                }
+                "schema": {"type": "object"}
               }
             }
           }
@@ -550,5 +317,19 @@
       }
     }
   },
-  "components": {}
+  "components": {
+    "schemas": {
+      "Evidence": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "string", "enum": ["OK", "NO_DATA", "ERROR"]},
+          "source": {"type": "string"},
+          "fetched_n": {"type": "integer"},
+          "data": {"type": "object"},
+          "citations": {"type": "array", "items": {"type": "string"}},
+          "fetched_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  }
 }
