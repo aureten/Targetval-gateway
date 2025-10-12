@@ -1,9 +1,9 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "TargetVal Gateway (Actions Surface)",
-    "version": "2025.10.2",
-    "description": "Compact Action surface for ChatGPT. Access all 55 modules (dynamic keys), literature, synthesis, and domain sequential runs."
+    "title": "TargetVal Gateway (ChatGPT Action Surface)",
+    "version": "2025.10.3",
+    "description": "Compact surface for ChatGPT Actions. It enables live access to all 55 modules via dynamic keys, literature search/meta, and synthesis (math/iteration). The server mounts at /v1 and reads module keys from targetval_modules.yaml."
   },
   "servers": [
     {
@@ -76,7 +76,80 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/module/{name}": {
+      "get": {
+        "operationId": "runModuleByNameV1",
+        "summary": "Run one module by key (GET flavor with query params)",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "gene",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "condition",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
                 }
               }
             }
@@ -87,7 +160,7 @@
     "/aggregate": {
       "post": {
         "operationId": "aggregateModulesV1",
-        "summary": "Run many modules; supports sequential or parallel order",
+        "summary": "Run many modules; supports sequential or parallel order; optional domain filter",
         "requestBody": {
           "required": true,
           "content": {
@@ -355,8 +428,45 @@
     "schemas": {
       "GenericObject": {
         "type": "object",
-        "additionalProperties": true,
-        "description": "Flexible JSON object"
+        "additionalProperties": true
+      },
+      "Evidence": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "OK",
+              "ERROR",
+              "NO_DATA"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "fetched_n": {
+            "type": "integer"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "citations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fetched_at": {
+            "type": "number"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ]
       },
       "ModuleRunRequest": {
         "type": "object",
