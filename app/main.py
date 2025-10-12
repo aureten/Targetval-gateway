@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
@@ -10,33 +11,32 @@ import sys
 import time
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Iterable
 
-import yaml
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Path, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-# Optional middlewares depending on environment
+# Optional middlewares (Render-friendly)
 try:
     from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:
     ProxyHeadersMiddleware = None  # type: ignore
 
 try:
     from starlette.middleware.trustedhost import TrustedHostMiddleware  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:
     TrustedHostMiddleware = None  # type: ignore
 
 
 # -----------------------------------------------------------------------------
-# App config (env-tunable; safe defaults for Render)
+# App config
 # -----------------------------------------------------------------------------
 APP_NAME = os.getenv("APP_NAME", "TargetVal Gateway")
-APP_VERSION = os.getenv("APP_VERSION", "2025.10-adapted")
+APP_VERSION = os.getenv("APP_VERSION", "2025.10-actions")
 DEBUG = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}
 
 ROOT_PATH = os.getenv("ROOT_PATH", "")
@@ -49,54 +49,71 @@ ALLOW_METHODS = os.getenv("ALLOW_METHODS", "*")
 ALLOW_HEADERS = os.getenv("ALLOW_HEADERS", "*")
 TRUSTED_HOSTS = os.getenv("TRUSTED_HOSTS", "*")
 
-# Location of the 55-module registry
-MODCFG_PATH = os.getenv("TARGETVAL_MODULE_CONFIG", "app/routers/targetval_modules.yaml")
+# Aggregation behavior defaults (can be overridden per request)
+DEFAULT_ORDER = os.getenv("AGG_DEFAULT_ORDER", "sequential").lower()  # "sequential" | "parallel"
+DEFAULT_CONCURRENCY = int(os.getenv("AGG_CONCURRENCY", "8"))
+DEFAULT_CONTINUE = os.getenv("AGG_CONTINUE_ON_ERROR", "true").lower() in {"1","true","yes"}
 
-HAS_INSIGHT = False  # set True if you include an insight router elsewhere
+# YAML registry path (module keys/paths and domain mapping 1..6)
+REGISTRY_PATH = os.getenv("TARGETVAL_MODULE_CONFIG", "app/routers/targetval_modules.yaml")
 
 
 # -----------------------------------------------------------------------------
-# Pydantic models (must be at module scope; FastAPI resolves here)
+# Models
 # -----------------------------------------------------------------------------
 class AggregateRequest(BaseModel):
+    # Query-like fields
     gene: Optional[str] = None
     symbol: Optional[str] = None
     ensembl_id: Optional[str] = None
     efo: Optional[str] = None
     condition: Optional[str] = None
-    modules: Optional[List[str]] = None
     limit: Optional[int] = 50
-    # Passthroughs used by specific modules
+
+    # Which modules to run
+    modules: Optional[List[str]] = None
+    domain: Optional[str | int] = None
+    primary_only: bool = True
+
+    # Execution behavior
+    order: str = Field(default=DEFAULT_ORDER, pattern="^(sequential|parallel)$")
+    continue_on_error: bool = DEFAULT_CONTINUE
+
+    # misc passthroughs used by specific modules
     species: Optional[int] = None
     cutoff: Optional[float] = None
-    extra: Optional[Dict[str, Any]] = None  # arbitrary passthrough
+    extra: Optional[Dict[str, Any]] = None
+
+
+class ModuleRunRequest(BaseModel):
+    module_key: str
+    gene: Optional[str] = None
+    symbol: Optional[str] = None
+    ensembl: Optional[str] = None
+    efo: Optional[str] = None
+    condition: Optional[str] = None
+    limit: Optional[int] = 50
+    extra: Optional[Dict[str, Any]] = None
 
 
 # -----------------------------------------------------------------------------
 # Import helpers
 # -----------------------------------------------------------------------------
-def _import_router_module() -> Tuple[Optional[Any], Optional[str], Optional[str]]:
-    """
-    Try a few common import paths and return (module, where, error_text).
-    We import the *module* and later access module.router to avoid brittle names.
-    """
-    attempts: List[str] = []
-
+def _import_router_module():
+    attempts = []
     def _try(mod: str):
         try:
-            m = __import__(mod, fromlist=["router"])  # router must exist inside the module
+            m = __import__(mod, fromlist=["router"])
             if getattr(m, "router", None) is None:
                 raise ImportError(f"module {mod} has no attribute 'router'")
             return m, mod, None
         except Exception:
             return None, None, traceback.format_exc()
 
-    for mod in (
-        "app.routers.targetval_router",
-        "routers.targetval_router",
-        "targetval_router",
-        "router",
-    ):
+    for mod in ("app.routers.targetval_router",
+                "routers.targetval_router",
+                "targetval_router",
+                "router"):
         module, where, err = _try(mod)
         if module is not None:
             return module, where, None
@@ -122,11 +139,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             duration_ms = (time.perf_counter() - start) * 1000.0
             logging.getLogger("uvicorn.access").info(
                 "%s %s -> %s (%.1f ms) rid=%s",
-                request.method,
-                request.url.path,
-                response.status_code,
-                duration_ms,
-                rid,
+                request.method, request.url.path, response.status_code, duration_ms, rid,
             )
         except Exception:
             pass
@@ -134,21 +147,38 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 
 # -----------------------------------------------------------------------------
-# Utility
+# Registry utils (read YAML once and build maps)
 # -----------------------------------------------------------------------------
-def _normalize_path(p: Optional[str]) -> str:
-    if not p:
-        return "/"
-    p = p.strip()
-    if not p.startswith("/"):
-        p = "/" + p
-    if len(p) > 1 and p.endswith("/"):
-        p = p[:-1]
-    return p
+def _safe_load_yaml(path: str) -> Dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except Exception as e:
+        raise RuntimeError("PyYAML is required to load module registry") from e
+    with open(path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh)
+
+def _build_key_to_path_and_domains(registry: Dict[str, Any]) -> Tuple[Dict[str,str], Dict[str, List[int]], List[str]]:
+    key_to_path: Dict[str, str] = {}
+    key_to_domains: Dict[str, List[int]] = {}
+    all_keys: List[str] = []
+    for m in registry.get("modules", []):
+        k = m.get("key")
+        p = m.get("path")
+        if not k or not p:
+            continue
+        all_keys.append(k)
+        key_to_path[k] = p
+        # domains.primary is a list of ints (IDs 1..6) in the YAML
+        doms = m.get("domains", {}) or {}
+        primary = doms.get("primary", []) or []
+        # normalise to int list
+        primary_ids = [int(d) for d in primary if isinstance(d, (int, str)) and str(d).isdigit()]
+        key_to_domains[k] = primary_ids
+    return key_to_path, key_to_domains, all_keys
 
 
 # -----------------------------------------------------------------------------
-# FastAPI app factory
+# App factory
 # -----------------------------------------------------------------------------
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -172,20 +202,20 @@ def create_app() -> FastAPI:
             app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[o.strip() for o in ALLOW_ORIGINS.split(",")] if ALLOW_ORIGINS != "*" else ["*"],
+        allow_origins=["*"] if ALLOW_ORIGINS == "*" else [o.strip() for o in ALLOW_ORIGINS.split(",") if o.strip()],
         allow_credentials=True,
-        allow_methods=[m.strip() for m in ALLOW_METHODS.split(",")] if ALLOW_METHODS != "*" else ["*"],
-        allow_headers=[h.strip() for h in ALLOW_HEADERS.split(",")] if ALLOW_HEADERS != "*" else ["*"],
+        allow_methods=["*"] if ALLOW_METHODS == "*" else [m.strip() for m in ALLOW_METHODS.split(",") if m.strip()],
+        allow_headers=["*"] if ALLOW_HEADERS == "*" else [h.strip() for h in ALLOW_HEADERS.split(",") if h.strip()],
     )
 
-    # Import targetval_router module and include its router under /v1
+    # Import router and include under /v1
     router_module, where, import_error = _import_router_module()
     app.state.router_location = where
     app.state.router_import_error = import_error
     if router_module:
-        app.include_router(router_module.router, prefix="/v1")  # <--- mount at /v1
+        app.include_router(router_module.router, prefix="/v1")
 
-    # Detect presence of synthesis v2 endpoints
+    # Detect presence of optional synthesis v2 routes
     has_v2 = False
     try:
         if router_module and hasattr(router_module, "router"):
@@ -198,8 +228,45 @@ def create_app() -> FastAPI:
         has_v2 = False
     app.state.has_v2 = has_v2
 
+    # Load registry and build maps
+    try:
+        reg = _safe_load_yaml(REGISTRY_PATH)
+    except Exception as e:
+        logging.exception("Failed to load registry %s: %r", REGISTRY_PATH, e)
+        reg = {"modules": []}
+    key_to_path, key_to_domains, all_keys = _build_key_to_path_and_domains(reg)
+    app.state.key_to_path = key_to_path
+    app.state.key_to_domains = key_to_domains
+    app.state.module_keys = all_keys
+
+    # Build function map from included router by matching function.__name__ to path handlers
+    # We'll build a dict: path -> endpoint function
+    path_to_endpoint: Dict[str, Any] = {}
+    if router_module and hasattr(router_module, "router"):
+        for r in router_module.router.routes:
+            try:
+                path = getattr(r, "path", "") or ""
+                endpoint = getattr(r, "endpoint", None)
+                if path and endpoint:
+                    path_to_endpoint[path] = endpoint
+            except Exception:
+                continue
+    app.state.path_to_endpoint = path_to_endpoint
+
+    # Compute a module_key -> callable map based on registry path
+    def _resolve_callable_for_key(module_key: str) -> Optional[Any]:
+        # registry path (without /v1 prefix)
+        p = key_to_path.get(module_key)
+        if not p:
+            return None
+        # when included under /v1, effective path is /v1 + p
+        f = path_to_endpoint.get(p) or path_to_endpoint.get("/v1" + p) or None
+        return f
+
+    app.state.resolve_callable_for_key = _resolve_callable_for_key
+
     # ---------------- Meta/debug endpoints ----------------
-    @app.get("/livez", tags=["_meta"])  # liveness
+    @app.get("/livez", tags=["_meta"])
     async def livez():
         return {
             "ok": True,
@@ -208,7 +275,7 @@ def create_app() -> FastAPI:
             "synthesis_v2": getattr(app.state, "has_v2", False),
         }
 
-    @app.get("/readyz", tags=["_meta"])  # readiness
+    @app.get("/readyz", tags=["_meta"])
     async def readyz():
         if getattr(app.state, "router_import_error", None) is not None:
             return JSONResponse(
@@ -220,26 +287,18 @@ def create_app() -> FastAPI:
                     "synthesis_v2": getattr(app.state, "has_v2", False),
                 },
             )
-        return {
-            "ok": True,
-            "root_path": ROOT_PATH,
-            "docs": DOCS_URL,
-            "synthesis_v2": getattr(app.state, "has_v2", False),
-        }
+        return {"ok": True, "root_path": ROOT_PATH, "docs": DOCS_URL, "synthesis_v2": getattr(app.state, "has_v2", False)}
 
-    @app.get("/", tags=["_meta"])  # about/root
+    @app.get("/", tags=["_meta"])
     async def about():
         has_v2_local = getattr(app.state, "has_v2", False)
         tip = {
-            "message": "TARGETVAL Gateway â Synthesis v2 available" if has_v2_local else "TARGETVAL Gateway",
-            "try": [
-                "/v1/module/genetics-l2g?symbol=IL6&efo=EFO_0003767",
-                "/v1/aggregate",
-            ],
+            "message": "TargetVal Gateway â Synthesis v2 available" if has_v2_local else "TargetVal Gateway",
+            "try": ["/v1/aggregate", "/v1/modules", "/docs"]
         }
         return tip
 
-    @app.get("/_debug/import", tags=["_meta"])  # import diagnostics
+    @app.get("/_debug/import", tags=["_meta"])
     async def debug_import():
         return {
             "attempted": getattr(app.state, "router_location", None),
@@ -247,18 +306,16 @@ def create_app() -> FastAPI:
             "sys_path": sys.path,
         }
 
-    @app.get("/meta/routes", tags=["_meta"])  # list registered routes
-    async def list_routes_meta() -> Dict[str, Any]:
+    @app.get("/meta/routes", tags=["_meta"])
+    async def list_routes() -> Dict[str, Any]:
         routes: List[Dict[str, Any]] = []
         for r in app.router.routes:
             try:
-                routes.append(
-                    {
-                        "path": getattr(r, "path", None),
-                        "name": getattr(r, "name", None),
-                        "methods": sorted(list(getattr(r, "methods", []) or [])),
-                    }
-                )
+                routes.append({
+                    "path": getattr(r, "path", None),
+                    "name": getattr(r, "name", None),
+                    "methods": sorted(list(getattr(r, "methods", []) or [])),
+                })
             except Exception:
                 pass
         routes.sort(key=lambda x: (x["path"] or ""))
@@ -269,73 +326,7 @@ def create_app() -> FastAPI:
             "import_ok": getattr(app.state, "router_import_error", None) is None,
         }
 
-    # ---------------- Module aggregator wiring ----------------
-    def _index_router_endpoints() -> Dict[str, Any]:
-        """Build a lookup of path (with and without /v1) -> endpoint function."""
-        index: Dict[str, Any] = {}
-        if not router_module:
-            return index
-        for r in getattr(router_module, "router").routes:
-            try:
-                path = _normalize_path(getattr(r, "path", ""))
-                endpoint = getattr(r, "endpoint", None)
-                if not endpoint or not path:
-                    continue
-                # Store exact path
-                index[path] = endpoint
-                # Store without /v1 prefix if present
-                if path.startswith("/v1/"):
-                    index[_normalize_path(path[len("/v1"):])] = endpoint
-            except Exception:
-                continue
-        return index
-
-    def _load_yaml_registry() -> List[Dict[str, Any]]:
-        try:
-            with open(MODCFG_PATH, "r") as f:
-                cfg = yaml.safe_load(f) or {}
-            modules = cfg.get("modules") or []
-            # Normalize 'key' and 'path'
-            out = []
-            for m in modules:
-                key = (m.get("key") or m.get("id") or "").strip()
-                path = _normalize_path(m.get("path"))
-                if key and path:
-                    out.append({"key": key, "path": path})
-            return out
-        except Exception:
-            return []
-
-    def _build_module_map() -> Dict[str, Any]:
-        """Derive MODULE_MAP from the included APIRouter and the YAML registry."""
-        mapping: Dict[str, Any] = {}
-        route_index = _index_router_endpoints()
-        registry = _load_yaml_registry()
-
-        # First pass: direct matches
-        for m in registry:
-            key = m["key"]
-            path = m["path"]
-            func = route_index.get(path) or route_index.get(_normalize_path("/v1" + path))
-            if func:
-                mapping[key] = func
-
-        # Second pass: suffix matches (defensive)
-        for m in registry:
-            key = m["key"]
-            if key in mapping:
-                continue
-            target = m["path"]
-            for rp, ep in route_index.items():
-                if rp.endswith(target):
-                    mapping[key] = ep
-                    break
-
-        return mapping
-
-    MODULE_MAP: Dict[str, Any] = _build_module_map()
-    app.state.module_map = MODULE_MAP  # expose for debug
-
+    # ---------------- Utilities ----------------
     SYMBOLISH = re.compile(r"^[A-Za-z0-9-]+$")
 
     def _looks_like_symbol(s: Optional[str]) -> bool:
@@ -347,66 +338,22 @@ def create_app() -> FastAPI:
         return bool(SYMBOLISH.match(up))
 
     def _bind_kwargs(func: Any, provided: Dict[str, Any]) -> Dict[str, Any]:
-        """Return only the kwargs that the target function actually accepts."""
-        try:
-            sig = inspect.signature(func)
-            allowed = set(sig.parameters.keys())
-            return {k: v for k, v in provided.items() if k in allowed and v is not None}
-        except Exception:
-            # Best-effort: if we can't introspect, pass only common fields
-            common = {
-                k: v
-                for k, v in provided.items()
-                if k in {"gene", "symbol", "ensembl", "ensembl_id", "efo", "condition", "limit"}
-                and v is not None
-            }
-            return common
+        sig = inspect.signature(func)
+        allowed = set(sig.parameters.keys())
+        return {k: v for k, v in provided.items() if k in allowed and v is not None}
 
-    async def _run_module(
-        name: str,
-        func: Any,
-        gene: Optional[str],
-        symbol: Optional[str],
-        ensembl_id: Optional[str],
-        efo: Optional[str],
-        condition: Optional[str],
-        limit: Optional[int],
-        extra: Optional[Dict[str, Any]],
-    ) -> Tuple[str, Dict[str, Any]]:
-        """Invoke a single module function safely and return (name, result_dict)."""
-        # Safer fallback: only use gene as symbol if it looks like an HGNC symbol
-        symbol_effective = symbol if symbol else (gene if _looks_like_symbol(gene) else None)
-
-        kwargs_all: Dict[str, Any] = {
-            "gene": gene,
-            "symbol": symbol_effective,
-            "efo": efo,
-            "condition": condition,
-            "disease": condition,  # some functions use 'disease' as the param name
-            "limit": limit,
-            # pass BOTH names so handlers can pick what they accept
-            "ensembl_id": ensembl_id,
-            "ensembl": ensembl_id,
-        }
-        if extra:
-            kwargs_all.update(extra)
-
+    async def _run_callable(name: str, func: Any, kwargs_all: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         kwargs = _bind_kwargs(func, kwargs_all)
-
         try:
             result = func(**kwargs)
             if asyncio.iscoroutine(result):
                 result = await result
-
-            # Coerce to plain dict without relying on Pydantic class specifics
             if hasattr(result, "dict") and callable(result.dict):
                 return name, result.dict()
-            if hasattr(result, "model_dump") and callable(result.model_dump):  # pydantic v2
+            if hasattr(result, "model_dump") and callable(result.model_dump):
                 return name, result.model_dump()
             if isinstance(result, dict):
                 return name, result
-
-            # Unexpected type; wrap
             return name, {
                 "status": "ERROR",
                 "source": "Unexpected return type",
@@ -415,7 +362,7 @@ def create_app() -> FastAPI:
                 "citations": [],
                 "fetched_at": 0.0,
             }
-        except HTTPException as he:  # bubble up details but keep shape
+        except HTTPException as he:
             return name, {
                 "status": "ERROR",
                 "source": f"HTTP {he.status_code}: {he.detail}",
@@ -434,135 +381,192 @@ def create_app() -> FastAPI:
                 "fetched_at": 0.0,
             }
 
-    # ---------------- Public convenience endpoints ----------------
+    def _build_shared_kwargs(body_like: Dict[str, Any]) -> Dict[str, Any]:
+        gene = body_like.get("gene")
+        symbol = body_like.get("symbol")
+        ensembl_id = body_like.get("ensembl_id") or body_like.get("ensembl")
+        efo = body_like.get("efo")
+        condition = body_like.get("condition")
+        limit = body_like.get("limit", 50)
+        # Safe fallback gene->symbol
+        symbol_effective = symbol if symbol else (gene if _looks_like_symbol(gene) else None)
+
+        kwargs_all: Dict[str, Any] = {
+            "gene": gene,
+            "symbol": symbol_effective,
+            "efo": efo,
+            "condition": condition,
+            "disease": condition,
+            "limit": limit,
+            "ensembl": ensembl_id,
+        }
+        # passthroughs
+        for k in ("species", "cutoff"):
+            if k in body_like and body_like.get(k) is not None:
+                kwargs_all[k] = body_like[k]
+        extra = body_like.get("extra") or {}
+        if isinstance(extra, dict):
+            kwargs_all.update(extra)
+        return kwargs_all
+
+    def _filter_modules_for_domain(all_keys: Iterable[str], key_to_domains: Dict[str, List[int]], domain: int, primary_only: bool = True) -> List[str]:
+        out = []
+        for k in all_keys:
+            doms = key_to_domains.get(k, [])
+            if primary_only:
+                if domain in doms:
+                    out.append(k)
+            else:
+                # when not primary_only, include if domain appears anywhere (primary list only in registry here)
+                if domain in doms:
+                    out.append(k)
+        return out
+
+    # ---------------- Public endpoints under /v1 ----------------
     @app.get("/v1/healthz")
     async def healthz():
-        return {
-            "ok": True,
-            "modules": len(MODULE_MAP),
-            "version": APP_VERSION,
-            "has_insight": HAS_INSIGHT,
-        }
+        return {"ok": True, "modules": len(app.state.module_keys), "version": APP_VERSION}
 
     @app.get("/v1/modules")
     async def list_modules():
-        # Return canonical 55 keys from YAML mapping
-        return sorted(MODULE_MAP.keys())
+        return sorted(app.state.module_keys)
 
-    @app.get("/v1/module/{module_key}")
-    async def run_single_module(
+    @app.post("/v1/module")
+    async def run_single_module_post(body: ModuleRunRequest):
+        func = app.state.resolve_callable_for_key(body.module_key)
+        if not func:
+            raise HTTPException(status_code=404, detail=f"Unknown module: {body.module_key}")
+        kwargs_all = _build_shared_kwargs(body.model_dump())
+        _, res = await _run_callable(name=body.module_key, func=func, kwargs_all=kwargs_all)
+        return res
+
+    @app.get("/v1/module/{name}")
+    async def run_single_module_get(
         request: Request,
-        module_key: str,
+        name: str,
         gene: Optional[str] = Query(default=None),
         symbol: Optional[str] = Query(default=None),
-        ensembl_id: Optional[str] = Query(default=None, alias="ensembl"),
+        ensembl: Optional[str] = Query(default=None, description="Optional Ensembl gene ID"),
         efo: Optional[str] = Query(default=None),
         condition: Optional[str] = Query(default=None),
         limit: int = Query(default=50, ge=1, le=1000),
     ):
-        func = MODULE_MAP.get(module_key)
+        func = app.state.resolve_callable_for_key(name)
         if not func:
-            raise HTTPException(status_code=404, detail=f"Unknown module: {module_key}")
+            raise HTTPException(status_code=404, detail=f"Unknown module: {name}")
+        # Pass through extra query params
+        known = {"gene", "symbol", "ensembl", "efo", "condition", "limit"}
+        extras: Dict[str, Any] = {k: v for k, v in request.query_params.items() if k not in known}
 
-        # Pass through any extra query params (species, cutoff, tissue, cell_type, variant, drug, etc.)
-        known = {"gene", "symbol", "ensembl_id", "ensembl", "efo", "condition", "limit"}
-        extras: Dict[str, Any] = {}
-        for k, v in request.query_params.items():
-            if k not in known:
-                # best-effort casting for numeric limit-like values
-                if k in {"limit", "offset"}:
-                    try:
-                        v = int(v)
-                    except Exception:
-                        pass
-                extras[k] = v
-
-        _, res = await _run_module(
-            name=module_key,
-            func=func,
-            gene=gene,
-            symbol=symbol,
-            ensembl_id=ensembl_id,
-            efo=efo,
-            condition=condition,
-            limit=limit,
-            extra=extras or None,
-        )
+        kwargs_all = _build_shared_kwargs({
+            "gene": gene, "symbol": symbol, "ensembl": ensembl, "efo": efo, "condition": condition,
+            "limit": limit, "extra": extras,
+        })
+        _, res = await _run_callable(name=name, func=func, kwargs_all=kwargs_all)
         return res
 
-    AGG_LIMIT = int(os.getenv("AGG_CONCURRENCY", "8"))
+    async def _aggregate_impl(mod_keys: List[str], body: Dict[str, Any], order: str, continue_on_error: bool) -> Dict[str, Any]:
+        results: Dict[str, Any] = {}
+        kwargs_all = _build_shared_kwargs(body)
+
+        if order == "parallel":
+            sem = asyncio.Semaphore(DEFAULT_CONCURRENCY)
+            async def _guarded(mk: str, fn: Any):
+                async with sem:
+                    _, res = await _run_callable(mk, fn, kwargs_all)
+                    return mk, res
+            tasks = []
+            for mk in mod_keys:
+                fn = app.state.resolve_callable_for_key(mk)
+                if fn:
+                    tasks.append(_guarded(mk, fn))
+            if tasks:
+                pairs = await asyncio.gather(*tasks)
+                results = {k: v for (k, v) in pairs}
+            return results
+
+        # sequential
+        for mk in mod_keys:
+            fn = app.state.resolve_callable_for_key(mk)
+            if not fn:
+                results[mk] = {"status": "ERROR", "source": "Unknown module", "data": {}}
+                if not continue_on_error:
+                    break
+                continue
+            _, res = await _run_callable(mk, fn, kwargs_all)
+            results[mk] = res
+            # keep going regardless, unless continue_on_error is false and we saw a hard error
+            if not continue_on_error and (not isinstance(res, dict) or res.get("status") == "ERROR"):
+                break
+        return results
 
     @app.post("/v1/aggregate")
     async def aggregate(body: AggregateRequest):
-        modules = body.modules or list(MODULE_MAP.keys())
-        unknown = [m for m in modules if m not in MODULE_MAP]
-        if unknown:
-            raise HTTPException(status_code=400, detail=f"Unknown modules: {', '.join(unknown)}")
+        # Choose modules
+        module_keys = body.modules or list(app.state.module_keys)
+        # Domain filter if provided
+        domain = body.domain
+        domain_id: Optional[int] = None
+        if domain is not None:
+            if isinstance(domain, int):
+                domain_id = int(domain)
+            else:
+                # accept strings like "D1", "d3", "3"
+                ds = str(domain).strip().upper().lstrip("D")
+                if ds.isdigit():
+                    domain_id = int(ds)
+            if domain_id not in {1,2,3,4,5,6}:
+                raise HTTPException(status_code=400, detail="domain must be 1..6 or 'D1'..'D6'")
+            # filter by domain
+            module_keys = _filter_modules_for_domain(module_keys, app.state.key_to_domains, domain_id, primary_only=body.primary_only)
 
-        # Build a shared extras dict from common passthroughs + explicit extra
-        extras: Dict[str, Any] = {}
-        if body.species is not None:
-            extras["species"] = body.species
-        if body.cutoff is not None:
-            extras["cutoff"] = body.cutoff
-        if body.extra:
-            extras.update(body.extra)
+        # Deterministic stable order by registry order (module_ids increasing if available)
+        # We will sort by the index in app.state.module_keys (which mirrors registry order).
+        key_order = {k: i for i, k in enumerate(app.state.module_keys)}
+        module_keys = sorted(module_keys, key=lambda k: key_order.get(k, 1_000_000))
 
-        sem = asyncio.Semaphore(AGG_LIMIT)
+        results = await _aggregate_impl(module_keys, body.model_dump(), body.order, body.continue_on_error)
 
-        async def _guarded(mname: str, mfunc: Any):
-            async with sem:
-                return await _run_module(
-                    name=mname,
-                    func=mfunc,
-                    gene=body.gene,
-                    symbol=body.symbol,
-                    ensembl_id=body.ensembl_id,
-                    efo=body.efo,
-                    condition=body.condition,
-                    limit=body.limit or 50,
-                    extra=extras or None,
-                )
-
-        results = await asyncio.gather(*[_guarded(m, MODULE_MAP[m]) for m in modules])
-
-        # Provide a slightly smarter echo of the query (mirroring symbol fallback)
-        sym = (
-            body.symbol
-            if body.symbol
-            else (
-                body.gene
-                if (
-                    body.gene
-                    and re.match(r"^[A-Za-z0-9-]+$", body.gene)
-                    and not body.gene.upper().startswith("ENSG")
-                    and ":" not in body.gene
-                    and "_" not in body.gene
-                )
-                else None
-            )
+        # Return envelope
+        sym = body.symbol if body.symbol else (
+            body.gene if (body.gene and re.match(r"^[A-Za-z0-9-]+$", body.gene)
+                          and not body.gene.upper().startswith("ENSG")
+                          and ":" not in body.gene and "_" not in body.gene) else None
         )
-        out = {
-            "request": {
+        return {
+            "query": {
                 "gene": body.gene,
                 "symbol": sym,
                 "ensembl_id": body.ensembl_id,
                 "efo": body.efo,
                 "condition": body.condition,
                 "limit": body.limit or 50,
-                "modules": modules,
+                "modules": module_keys,
+                "domain": domain_id,
+                "order": body.order,
             },
-            "results": {name: payload for (name, payload) in results},
+            "results": results,
         }
-        return out
 
-    @app.exception_handler(Exception)
-    async def unhandled_exception_handler(request: Request, exc: Exception):
-        logging.exception("Unhandled error: %r", exc)
-        rid = getattr(request.state, "request_id", None)
-        return JSONResponse(
-            status_code=500, content={"status": "ERROR", "detail": "internal error", "request_id": rid}
-        )
+    @app.post("/v1/domain/{domain_id}/run")
+    async def run_domain(
+        domain_id: int = Path(ge=1, le=6),
+        body: Dict[str, Any] | None = Body(default=None)
+    ):
+        payload = body or {}
+        primary_only = bool(payload.get("primary_only", True))
+        # pick module keys for this domain from registry, in registry order
+        module_keys = _filter_modules_for_domain(app.state.module_keys, app.state.key_to_domains, domain_id, primary_only=primary_only)
+        if not module_keys:
+            raise HTTPException(status_code=404, detail=f"No modules registered for domain {domain_id}")
+        # Force sequential, never stop on individual errors
+        payload.setdefault("order", "sequential")
+        payload.setdefault("continue_on_error", True)
+        results = await _aggregate_impl(module_keys, payload, "sequential", True)
+        return {
+            "query": {"domain": domain_id, "modules": module_keys, "order": "sequential"},
+            "results": results,
+        }
 
     return app
 
@@ -576,5 +580,4 @@ if __name__ == "__main__":
         print("uvicorn is not installed. For local dev: pip install uvicorn[standard]")
         sys.exit(1)
     port = int(os.getenv("PORT", "8000"))
-    # If your module path is different, replace "app.main:app"
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
