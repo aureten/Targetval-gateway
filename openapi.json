@@ -1,9 +1,9 @@
 {
-  "openapi": "3.1.0",
+  "openapi": "3.0.3",
   "info": {
-    "title": "TargetVal Gateway (ChatGPT Action Surface)",
-    "version": "2025.10",
-    "description": "Minimal Action surface that still exposes all capabilities:\n- Run ANY of the 55 modules (via module_key) with POST /v1/module\n- Aggregate many modules with ordering control (sequential/parallel)\n- Domain aggregation (D1..D6) with continue-on-error semantics\n- Literature meta endpoint\n- Synthesis (integration) + bucketed math layer\n\nNOTE: The live server mounts the API at /v1.\n"
+    "title": "TargetVal Gateway (Actions Surface)",
+    "version": "2025.10.2",
+    "description": "Compact Action surface for ChatGPT. Access all 55 modules (dynamic keys), literature, synthesis, and domain sequential runs."
   },
   "servers": [
     {
@@ -13,19 +13,26 @@
   "paths": {
     "/healthz": {
       "get": {
+        "operationId": "healthzV1",
         "summary": "Health check",
-        "operationId": "healthz",
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
           }
         }
       }
     },
     "/modules": {
       "get": {
-        "summary": "List canonical module keys available on this deployment",
-        "operationId": "listModules",
+        "operationId": "listModulesV1",
+        "summary": "List canonical module keys (55) from YAML registry",
         "responses": {
           "200": {
             "description": "OK",
@@ -45,49 +52,20 @@
     },
     "/module": {
       "post": {
-        "summary": "Run a single module (by module_key) with flexible parameters",
-        "operationId": "runModule",
+        "operationId": "runModuleV1",
+        "summary": "Run one module by key",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "module_key": {
-                    "type": "string",
-                    "description": "One of the 55 canonical keys from /v1/modules"
-                  },
-                  "gene": {
-                    "type": "string"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "ensembl": {
-                    "type": "string"
-                  },
-                  "efo": {
-                    "type": "string"
-                  },
-                  "condition": {
-                    "type": "string"
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000,
-                    "default": 50
-                  },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true,
-                    "description": "Free-form passthrough (species, tissue, cell_type, cutoff, variant, drug, uniprot, etc.)"
-                  }
-                },
-                "required": [
-                  "module_key"
-                ]
+                "$ref": "#/components/schemas/ModuleRunRequest"
+              },
+              "example": {
+                "module_key": "genetics-l2g",
+                "symbol": "IL6",
+                "efo": "EFO_0003767",
+                "limit": 50
               }
             }
           }
@@ -98,8 +76,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/GenericObject"
                 }
               }
             }
@@ -109,84 +86,26 @@
     },
     "/aggregate": {
       "post": {
-        "summary": "Run many modules (optionally filtered by domain) with order control",
-        "operationId": "aggregateModules",
+        "operationId": "aggregateModulesV1",
+        "summary": "Run many modules; supports sequential or parallel order",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "modules": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    },
-                    "description": "If omitted, runs all 55 modules."
-                  },
-                  "domain": {
-                    "oneOf": [
-                      {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 6
-                      },
-                      {
-                        "type": "string"
-                      }
-                    ],
-                    "description": "D1..D6 name or 1..6 to restrict modules."
-                  },
-                  "primary_only": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "When domain is set, restrict to primary domain only."
-                  },
-                  "order": {
-                    "type": "string",
-                    "enum": [
-                      "sequential",
-                      "parallel"
-                    ],
-                    "default": "sequential"
-                  },
-                  "continue_on_error": {
-                    "type": "boolean",
-                    "default": true
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000,
-                    "default": 50
-                  },
-                  "gene": {
-                    "type": "string"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "ensembl_id": {
-                    "type": "string"
-                  },
-                  "efo": {
-                    "type": "string"
-                  },
-                  "condition": {
-                    "type": "string"
-                  },
-                  "species": {
-                    "type": "integer"
-                  },
-                  "cutoff": {
-                    "type": "number"
-                  },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true
-                  }
-                }
+                "$ref": "#/components/schemas/AggregateRequest"
+              },
+              "example": {
+                "modules": [
+                  "genetics-l2g",
+                  "genetics-coloc",
+                  "expr-baseline"
+                ],
+                "symbol": "IL6",
+                "efo": "EFO_0003767",
+                "order": "sequential",
+                "continue_on_error": true,
+                "limit": 50
               }
             }
           }
@@ -197,8 +116,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/GenericObject"
                 }
               }
             }
@@ -208,8 +126,8 @@
     },
     "/domain/{domain_id}/run": {
       "post": {
-        "summary": "Run all modules of a domain (D1..D6) sequentially; never stops on individual errors",
-        "operationId": "runDomain",
+        "operationId": "runDomainV1",
+        "summary": "Run all modules of a domain (D1..D6) sequentially and continue on errors",
         "parameters": [
           {
             "in": "path",
@@ -227,44 +145,12 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "primary_only": {
-                    "type": "boolean",
-                    "default": true
-                  },
-                  "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000,
-                    "default": 50
-                  },
-                  "gene": {
-                    "type": "string"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "ensembl_id": {
-                    "type": "string"
-                  },
-                  "efo": {
-                    "type": "string"
-                  },
-                  "condition": {
-                    "type": "string"
-                  },
-                  "species": {
-                    "type": "integer"
-                  },
-                  "cutoff": {
-                    "type": "number"
-                  },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true
-                  }
-                }
+                "$ref": "#/components/schemas/DomainRunRequest"
+              },
+              "example": {
+                "symbol": "IL6",
+                "condition": "ulcerative colitis",
+                "limit": 50
               }
             }
           }
@@ -275,8 +161,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/GenericObject"
                 }
               }
             }
@@ -286,13 +171,12 @@
     },
     "/lit/meta": {
       "get": {
-        "summary": "Literature meta/search (Europe PMC / PubMed, deployment\u2011specific)",
-        "operationId": "litMeta",
+        "operationId": "litMetaV1",
+        "summary": "Literature meta/search",
         "parameters": [
           {
             "in": "query",
             "name": "query",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -300,7 +184,6 @@
           {
             "in": "query",
             "name": "gene",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -308,7 +191,6 @@
           {
             "in": "query",
             "name": "symbol",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -316,7 +198,6 @@
           {
             "in": "query",
             "name": "efo",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -324,7 +205,6 @@
           {
             "in": "query",
             "name": "condition",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -332,12 +212,11 @@
           {
             "in": "query",
             "name": "limit",
-            "required": false,
             "schema": {
               "type": "integer",
-              "default": 50,
               "minimum": 1,
-              "maximum": 200
+              "maximum": 200,
+              "default": 50
             }
           }
         ],
@@ -347,8 +226,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/GenericObject"
                 }
               }
             }
@@ -358,61 +236,35 @@
     },
     "/synth/integrate": {
       "post": {
+        "operationId": "synthIntegrateV1",
         "summary": "Synthesis/integration layer across modules",
-        "operationId": "synthIntegrate",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "gene": {
-                    "type": "string"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "efo": {
-                    "type": "string"
-                  },
-                  "condition": {
-                    "type": "string"
-                  },
-                  "modules": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "method": {
-                    "type": "string",
-                    "enum": [
-                      "math",
-                      "vote",
-                      "rank",
-                      "bayes",
-                      "hybrid"
-                    ],
-                    "default": "math"
-                  },
-                  "extra": {
-                    "type": "object",
-                    "additionalProperties": true
-                  }
-                }
+                "$ref": "#/components/schemas/SynthIntegrateRequest"
+              },
+              "example": {
+                "symbol": "IL6",
+                "condition": "ulcerative colitis",
+                "modules": [
+                  "genetics-l2g",
+                  "expr-baseline",
+                  "mech-ppi"
+                ],
+                "method": "math"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Synthesis output",
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/GenericObject"
                 }
               }
             }
@@ -422,8 +274,8 @@
     },
     "/synth/bucket": {
       "get": {
-        "summary": "Mathematical synthesis per evidence bucket",
-        "operationId": "synthBucket",
+        "operationId": "synthBucketV1",
+        "summary": "Mathematical synthesis per bucket",
         "parameters": [
           {
             "in": "query",
@@ -431,13 +283,11 @@
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "description": "e.g., genetics, association, expression, mechanism, tract, clinical"
+            }
           },
           {
             "in": "query",
             "name": "gene",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -445,7 +295,6 @@
           {
             "in": "query",
             "name": "symbol",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -453,7 +302,6 @@
           {
             "in": "query",
             "name": "efo",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -461,7 +309,6 @@
           {
             "in": "query",
             "name": "condition",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -469,18 +316,16 @@
           {
             "in": "query",
             "name": "limit",
-            "required": false,
             "schema": {
               "type": "integer",
-              "default": 50,
               "minimum": 1,
-              "maximum": 1000
+              "maximum": 1000,
+              "default": 50
             }
           },
           {
             "in": "query",
             "name": "mode",
-            "required": false,
             "schema": {
               "type": "string",
               "enum": [
@@ -497,11 +342,196 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/GenericObject"
                 }
               }
             }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "GenericObject": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Flexible JSON object"
+      },
+      "ModuleRunRequest": {
+        "type": "object",
+        "properties": {
+          "module_key": {
+            "type": "string",
+            "description": "One of the 55 keys from /v1/modules"
+          },
+          "gene": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "ensembl": {
+            "type": "string"
+          },
+          "efo": {
+            "type": "string"
+          },
+          "condition": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          },
+          "extra": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "module_key"
+        ]
+      },
+      "AggregateRequest": {
+        "type": "object",
+        "properties": {
+          "modules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "domain": {
+            "type": "string",
+            "description": "Accepts 'D1'..'D6' or '1'..'6'"
+          },
+          "primary_only": {
+            "type": "boolean",
+            "default": true
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "sequential",
+              "parallel"
+            ],
+            "default": "sequential"
+          },
+          "continue_on_error": {
+            "type": "boolean",
+            "default": true
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          },
+          "gene": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "ensembl_id": {
+            "type": "string"
+          },
+          "efo": {
+            "type": "string"
+          },
+          "condition": {
+            "type": "string"
+          },
+          "species": {
+            "type": "integer"
+          },
+          "cutoff": {
+            "type": "number"
+          },
+          "extra": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "DomainRunRequest": {
+        "type": "object",
+        "properties": {
+          "primary_only": {
+            "type": "boolean",
+            "default": true
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          },
+          "gene": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "ensembl_id": {
+            "type": "string"
+          },
+          "efo": {
+            "type": "string"
+          },
+          "condition": {
+            "type": "string"
+          },
+          "species": {
+            "type": "integer"
+          },
+          "cutoff": {
+            "type": "number"
+          },
+          "extra": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "SynthIntegrateRequest": {
+        "type": "object",
+        "properties": {
+          "gene": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "efo": {
+            "type": "string"
+          },
+          "condition": {
+            "type": "string"
+          },
+          "modules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "math",
+              "vote",
+              "rank",
+              "bayes",
+              "hybrid"
+            ],
+            "default": "math"
+          },
+          "extra": {
+            "type": "object",
+            "additionalProperties": true
           }
         }
       }
