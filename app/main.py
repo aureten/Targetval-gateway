@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
 import os
 import re
@@ -155,7 +154,7 @@ def _safe_load_yaml(path: str) -> Dict[str, Any]:
     except Exception as e:
         raise RuntimeError("PyYAML is required to load module registry") from e
     with open(path, "r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+        return yaml.safe_load(fh) or {}
 
 def _build_key_to_path_and_domains(registry: Dict[str, Any]) -> Tuple[Dict[str,str], Dict[str, List[int]], List[str]]:
     key_to_path: Dict[str, str] = {}
@@ -172,7 +171,7 @@ def _build_key_to_path_and_domains(registry: Dict[str, Any]) -> Tuple[Dict[str,s
         doms = m.get("domains", {}) or {}
         primary = doms.get("primary", []) or []
         # normalise to int list
-        primary_ids = [int(d) for d in primary if isinstance(d, (int, str)) and str(d).isdigit()]
+        primary_ids = [int(d) for d in primary if str(d).isdigit()]
         key_to_domains[k] = primary_ids
     return key_to_path, key_to_domains, all_keys
 
@@ -239,8 +238,7 @@ def create_app() -> FastAPI:
     app.state.key_to_domains = key_to_domains
     app.state.module_keys = all_keys
 
-    # Build function map from included router by matching function.__name__ to path handlers
-    # We'll build a dict: path -> endpoint function
+    # Build function map from included router by matching paths -> endpoint function
     path_to_endpoint: Dict[str, Any] = {}
     if router_module and hasattr(router_module, "router"):
         for r in router_module.router.routes:
@@ -398,7 +396,9 @@ def create_app() -> FastAPI:
             "condition": condition,
             "disease": condition,
             "limit": limit,
+            # pass both names so handlers can pick what they accept
             "ensembl": ensembl_id,
+            "ensembl_id": ensembl_id,
         }
         # passthroughs
         for k in ("species", "cutoff"):
@@ -417,7 +417,6 @@ def create_app() -> FastAPI:
                 if domain in doms:
                     out.append(k)
             else:
-                # when not primary_only, include if domain appears anywhere (primary list only in registry here)
                 if domain in doms:
                     out.append(k)
         return out
@@ -495,7 +494,6 @@ def create_app() -> FastAPI:
                 continue
             _, res = await _run_callable(mk, fn, kwargs_all)
             results[mk] = res
-            # keep going regardless, unless continue_on_error is false and we saw a hard error
             if not continue_on_error and (not isinstance(res, dict) or res.get("status") == "ERROR"):
                 break
         return results
@@ -511,23 +509,19 @@ def create_app() -> FastAPI:
             if isinstance(domain, int):
                 domain_id = int(domain)
             else:
-                # accept strings like "D1", "d3", "3"
                 ds = str(domain).strip().upper().lstrip("D")
                 if ds.isdigit():
                     domain_id = int(ds)
             if domain_id not in {1,2,3,4,5,6}:
                 raise HTTPException(status_code=400, detail="domain must be 1..6 or 'D1'..'D6'")
-            # filter by domain
             module_keys = _filter_modules_for_domain(module_keys, app.state.key_to_domains, domain_id, primary_only=body.primary_only)
 
-        # Deterministic stable order by registry order (module_ids increasing if available)
-        # We will sort by the index in app.state.module_keys (which mirrors registry order).
+        # Stable order by registry order
         key_order = {k: i for i, k in enumerate(app.state.module_keys)}
         module_keys = sorted(module_keys, key=lambda k: key_order.get(k, 1_000_000))
 
         results = await _aggregate_impl(module_keys, body.model_dump(), body.order, body.continue_on_error)
 
-        # Return envelope
         sym = body.symbol if body.symbol else (
             body.gene if (body.gene and re.match(r"^[A-Za-z0-9-]+$", body.gene)
                           and not body.gene.upper().startswith("ENSG")
@@ -555,11 +549,9 @@ def create_app() -> FastAPI:
     ):
         payload = body or {}
         primary_only = bool(payload.get("primary_only", True))
-        # pick module keys for this domain from registry, in registry order
         module_keys = _filter_modules_for_domain(app.state.module_keys, app.state.key_to_domains, domain_id, primary_only=primary_only)
         if not module_keys:
             raise HTTPException(status_code=404, detail=f"No modules registered for domain {domain_id}")
-        # Force sequential, never stop on individual errors
         payload.setdefault("order", "sequential")
         payload.setdefault("continue_on_error", True)
         results = await _aggregate_impl(module_keys, payload, "sequential", True)
@@ -567,6 +559,121 @@ def create_app() -> FastAPI:
             "query": {"domain": domain_id, "modules": module_keys, "order": "sequential"},
             "results": results,
         }
+
+    # ---------------- Serve Actions-friendly OpenAPI from the API itself ----------------
+    ACTIONS_OPENAPI = {
+        "openapi": "3.0.3",
+        "info": {"title": "TargetVal Gateway (Actions Surface)", "version": "2025.10.4",
+                 "description": "Compact surface for ChatGPT Actions; dynamic access to 55 modules via keys; literature; synthesis; domain sequential runner."},
+        "servers": [{"url": "https://targetval-gateway.onrender.com/v1"}],
+        "paths": {
+            "/healthz": {"get": {"operationId": "healthzV1", "summary": "Health check",
+                                 "responses": {"200": {"description": "OK",
+                                                       "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}}}}}},
+            "/modules": {"get": {"operationId": "listModulesV1", "summary": "List canonical module keys (55) from YAML",
+                                 "responses": {"200": {"description": "OK",
+                                                       "content": {"application/json": {"schema": {"type": "array", "items": {"type": "string"}}}}}}}},
+            "/module": {"post": {"operationId": "runModuleV1", "summary": "Run a single module by key",
+                                 "requestBody": {"required": True,
+                                                 "content": {"application/json": {"schema": {"type": "object",
+                                                                                             "properties": {
+                                                                                                 "module_key": {"type": "string"},
+                                                                                                 "gene": {"type": "string"},
+                                                                                                 "symbol": {"type": "string"},
+                                                                                                 "ensembl": {"type": "string"},
+                                                                                                 "efo": {"type": "string"},
+                                                                                                 "condition": {"type": "string"},
+                                                                                                 "limit": {"type": "integer", "default": 50},
+                                                                                                 "extra": {"type": "object", "additionalProperties": True}},
+                                                                                             "required": ["module_key"]},
+                                                                      "example": {"module_key": "genetics-l2g", "symbol": "IL6", "efo": "EFO_0003767", "limit": 50}}}},
+                                 "responses": {"200": {"description": "OK",
+                                                       "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}}}}}},
+            "/module/{name}": {"get": {"operationId": "runModuleByNameV1", "summary": "Run a single module by key (GET)",
+                                       "parameters": [{"in": "path", "name": "name", "required": True, "schema": {"type": "string"}},
+                                                      {"in": "query", "name": "gene", "schema": {"type": "string"}},
+                                                      {"in": "query", "name": "symbol", "schema": {"type": "string"}},
+                                                      {"in": "query", "name": "ensembl", "schema": {"type": "string"}},
+                                                      {"in": "query", "name": "efo", "schema": {"type": "string"}},
+                                                      {"in": "query", "name": "condition", "schema": {"type": "string"}},
+                                                      {"in": "query", "name": "limit", "schema": {"type": "integer", "default": 50}}],
+                                       "responses": {"200": {"description": "OK",
+                                                             "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}}}}}},
+            "/aggregate": {"post": {"operationId": "aggregateModulesV1",
+                                    "summary": "Run many modules; sequential or parallel; optional domain filter",
+                                    "requestBody": {"required": True,
+                                                    "content": {"application/json": {"schema": {"type": "object",
+                                                                                                "properties": {
+                                                                                                    "modules": {"type": "array", "items": {"type": "string"}},
+                                                                                                    "domain": {"type": "string", "description": "D1..D6 or 1..6"},
+                                                                                                    "primary_only": {"type": "boolean", "default": True},
+                                                                                                    "order": {"type": "string", "enum": ["sequential", "parallel"], "default": "sequential"},
+                                                                                                    "continue_on_error": {"type": "boolean", "default": True},
+                                                                                                    "limit": {"type": "integer", "default": 50},
+                                                                                                    "gene": {"type": "string"},
+                                                                                                    "symbol": {"type": "string"},
+                                                                                                    "ensembl_id": {"type": "string"},
+                                                                                                    "efo": {"type": "string"},
+                                                                                                    "condition": {"type": "string"},
+                                                                                                    "species": {"type": "integer"},
+                                                                                                    "cutoff": {"type": "number"},
+                                                                                                    "extra": {"type": "object", "additionalProperties": True}},
+                                                                                               },
+                                                                     "example": {"modules": ["genetics-l2g", "genetics-coloc", "expr-baseline"],
+                                                                                 "symbol": "IL6", "efo": "EFO_0003767", "order": "sequential",
+                                                                                 "continue_on_error": True, "limit": 50}}}},
+                                    "responses": {"200": {"description": "OK",
+                                                          "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}}}}}},
+            "/domain/{domain_id}/run": {"post": {"operationId": "runDomainV1",
+                                                 "summary": "Run all modules of a domain sequentially; continue on errors",
+                                                 "parameters": [{"in": "path", "name": "domain_id", "required": True,
+                                                                 "schema": {"type": "integer", "minimum": 1, "maximum": 6}}],
+                                                 "requestBody": {"required": False,
+                                                                 "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True},
+                                                                                                  "example": {"symbol": "IL6", "condition": "ulcerative colitis", "limit": 50}}}},
+                                                 "responses": {"200": {"description": "OK",
+                                                                       "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}}}}}},
+            "/lit/meta": {"get": {"operationId": "litMetaV1", "summary": "Literature meta/search",
+                                  "parameters": [{"in": "query", "name": "query", "schema": {"type": "string"}},
+                                                 {"in": "query", "name": "gene", "schema": {"type": "string"}},
+                                                 {"in": "query", "name": "symbol", "schema": {"type": "string"}},
+                                                 {"in": "query", "name": "efo", "schema": {"type": "string"}},
+                                                 {"in": "query", "name": "condition", "schema": {"type": "string"}},
+                                                 {"in": "query", "name": "limit", "schema": {"type": "integer", "default": 50}}],
+                                  "responses": {"200": {"description": "OK",
+                                                        "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}}}}}},
+            "/synth/integrate": {"post": {"operationId": "synthIntegrateV1", "summary": "Synthesis across modules",
+                                          "requestBody": {"required": True,
+                                                          "content": {"application/json": {"schema": {"type": "object",
+                                                                                                      "properties": {"gene": {"type": "string"},
+                                                                                                                     "symbol": {"type": "string"},
+                                                                                                                     "efo": {"type": "string"},
+                                                                                                                     "condition": {"type": "string"},
+                                                                                                                     "modules": {"type": "array", "items": {"type": "string"}},
+                                                                                                                     "method": {"type": "string", "enum": ["math", "vote", "rank", "bayes", "hybrid"], "default": "math"},
+                                                                                                                     "extra": {"type": "object", "additionalProperties": True}},
+                                                                                                     },
+                                                                                     "example": {"symbol": "IL6", "condition": "ulcerative colitis",
+                                                                                                 "modules": ["genetics-l2g", "expr-baseline", "mech-ppi"], "method": "math"}}}},
+                                          "responses": {"200": {"description": "OK",
+                                                                "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}}}}}},
+            "/synth/bucket": {"get": {"operationId": "synthBucketV1", "summary": "Math synthesis per bucket",
+                                      "parameters": [{"in": "query", "name": "name", "required": True, "schema": {"type": "string"}},
+                                                     {"in": "query", "name": "gene", "schema": {"type": "string"}},
+                                                     {"in": "query", "name": "symbol", "schema": {"type": "string"}},
+                                                     {"in": "query", "name": "efo", "schema": {"type": "string"}},
+                                                     {"in": "query", "name": "condition", "schema": {"type": "string"}},
+                                                     {"in": "query", "name": "limit", "schema": {"type": "integer", "default": 50}},
+                                                     {"in": "query", "name": "mode", "schema": {"type": "string", "enum": ["auto", "live", "snapshot"]}}],
+                                      "responses": {"200": {"description": "OK",
+                                                            "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}}}}}}
+        },
+        "components": {}
+    }
+
+    @app.get("/v1/actions-openapi.json", include_in_schema=False)
+    def serve_actions_openapi():
+        return JSONResponse(ACTIONS_OPENAPI)
 
     return app
 
