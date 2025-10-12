@@ -688,3 +688,33 @@ if __name__ == "__main__":
         sys.exit(1)
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
+# Serve a ChatGPT-compatible OpenAPI (fewer fields)
+from fastapi.responses import JSONResponse
+
+@app.get("/v1/actions-openapi.json", include_in_schema=False)
+def serve_actions_openapi():
+    schema = {
+        "openapi": "3.0.0",
+        "info": {
+            "title": "TargetVal Gateway Actions",
+            "version": "1.0.0",
+            "description": (
+                "Minimal schema for ChatGPT Actions.\n"
+                "Run any of 55 modules (dynamic keys) via /v1/module or /v1/aggregate.\n"
+                "Includes /v1/domain/{id}/run (sequential by domain), /v1/lit/meta, "
+                "and /v1/synth/* synthesis endpoints."
+            ),
+        },
+        "servers": [{"url": "https://targetval-gateway.onrender.com/v1"}],
+        "paths": {
+            "/healthz": {"get": {"summary": "Health", "responses": {"200": {"description": "OK"}}}},
+            "/modules": {"get": {"summary": "List 55 modules", "responses": {"200": {"description": "OK"}}}},
+            "/module": {"post": {"summary": "Run one module", "responses": {"200": {"description": "OK"}}}},
+            "/aggregate": {"post": {"summary": "Aggregate modules", "responses": {"200": {"description": "OK"}}}},
+            "/domain/{domain_id}/run": {"post": {"summary": "Run domain sequentially", "responses": {"200": {"description": "OK"}}}},
+            "/lit/meta": {"get": {"summary": "Literature meta", "responses": {"200": {"description": "OK"}}}},
+            "/synth/integrate": {"post": {"summary": "Synthesis integrate", "responses": {"200": {"description": "OK"}}}},
+            "/synth/bucket": {"get": {"summary": "Synthesis bucket", "responses": {"200": {"description": "OK"}}}},
+        },
+    }
+    return JSONResponse(schema)
