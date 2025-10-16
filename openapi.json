@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "TargetVal Gateway (ChatGPT Action Surface)",
-    "version": "2025.10.3",
-    "description": "Compact surface for ChatGPT Actions. It enables live access to all 55 modules via dynamic keys, literature search/meta, and synthesis (math/iteration). The server mounts at /v1 and reads module keys from targetval_modules.yaml."
+    "title": "TargetVal Gateway (Actions Surface) \u2014 Revised",
+    "version": "2025.10",
+    "description": "ChatGPT Actions surface for TargetVal Gateway. Aligned with dynamic module registry and router parameters. Use /modules to list the 55 canonical keys; call /module (POST) or /module/{name} (GET) with symbol/ensembl_id/uniprot_id/efo/condition/tissue/cell_type/species as needed. Evidence objects carry status, source, fetched_n, data, citations, fetched_at, debug."
   },
   "servers": [
     {
@@ -53,7 +53,7 @@
     "/module": {
       "post": {
         "operationId": "runModuleV1",
-        "summary": "Run one module by key",
+        "summary": "Run a single module by key",
         "requestBody": {
           "required": true,
           "content": {
@@ -64,8 +64,8 @@
               "example": {
                 "module_key": "genetics-l2g",
                 "symbol": "IL6",
-                "efo": "EFO_0003767",
-                "limit": 50
+                "efo": "EFO:0003767",
+                "limit": 100
               }
             }
           }
@@ -87,7 +87,7 @@
     "/module/{name}": {
       "get": {
         "operationId": "runModuleByNameV1",
-        "summary": "Run one module by key (GET flavor with query params)",
+        "summary": "Run a single module by key (GET)",
         "parameters": [
           {
             "in": "path",
@@ -102,7 +102,8 @@
             "name": "gene",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Alias of 'symbol'."
           },
           {
             "in": "query",
@@ -113,7 +114,14 @@
           },
           {
             "in": "query",
-            "name": "ensembl",
+            "name": "ensembl_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "uniprot_id",
             "schema": {
               "type": "string"
             }
@@ -134,12 +142,51 @@
           },
           {
             "in": "query",
+            "name": "tissue",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cell_type",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "species",
+            "schema": {
+              "type": "string"
+            },
+            "description": "e.g., 'human'."
+          },
+          {
+            "in": "query",
             "name": "limit",
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 1000,
-              "default": 50
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "in": "query",
+            "name": "strict",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           }
         ],
@@ -160,7 +207,7 @@
     "/aggregate": {
       "post": {
         "operationId": "aggregateModulesV1",
-        "summary": "Run many modules; supports sequential or parallel order; optional domain filter",
+        "summary": "Run many modules; sequential or parallel; optional domain filter",
         "requestBody": {
           "required": true,
           "content": {
@@ -175,10 +222,10 @@
                   "expr-baseline"
                 ],
                 "symbol": "IL6",
-                "efo": "EFO_0003767",
+                "efo": "EFO:0003767",
                 "order": "sequential",
                 "continue_on_error": true,
-                "limit": 50
+                "limit": 100
               }
             }
           }
@@ -200,7 +247,7 @@
     "/domain/{domain_id}/run": {
       "post": {
         "operationId": "runDomainV1",
-        "summary": "Run all modules of a domain (D1..D6) sequentially and continue on errors",
+        "summary": "Run all modules of a domain sequentially",
         "parameters": [
           {
             "in": "path",
@@ -223,7 +270,7 @@
               "example": {
                 "symbol": "IL6",
                 "condition": "ulcerative colitis",
-                "limit": 50
+                "limit": 100
               }
             }
           }
@@ -242,35 +289,66 @@
         }
       }
     },
-    "/lit/meta": {
+    "/lit/search": {
       "get": {
-        "operationId": "litMetaV1",
-        "summary": "Literature meta/search",
+        "operationId": "litSearchV1",
+        "summary": "Europe PMC search (5y default window)",
         "parameters": [
           {
             "in": "query",
-            "name": "query",
+            "name": "symbol",
+            "required": true,
             "schema": {
               "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "gene",
+            "name": "condition",
             "schema": {
               "type": "string"
             }
           },
+          {
+            "in": "query",
+            "name": "window_days",
+            "schema": {
+              "type": "integer",
+              "default": 1825
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lit/claims": {
+      "get": {
+        "operationId": "litClaimsV1",
+        "summary": "PubTator3 relations proxy",
+        "parameters": [
           {
             "in": "query",
             "name": "symbol",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "efo",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -287,8 +365,6 @@
             "name": "limit",
             "schema": {
               "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
               "default": 50
             }
           }
@@ -299,7 +375,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
+                  "$ref": "#/components/schemas/Evidence"
                 }
               }
             }
@@ -307,10 +383,59 @@
         }
       }
     },
-    "/synth/integrate": {
+    "/lit/score": {
       "post": {
-        "operationId": "synthIntegrateV1",
-        "summary": "Synthesis/integration layer across modules",
+        "operationId": "litScoreV1",
+        "summary": "Score literature items (objective rubric)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "required": [
+                  "items"
+                ]
+              },
+              "example": {
+                "items": [
+                  {
+                    "design": "rct",
+                    "n": 200,
+                    "year": 2024,
+                    "venue_indexed": true
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/synth/targetcard": {
+      "post": {
+        "operationId": "synthTargetcardV1",
+        "summary": "Assemble a target card (modules + literature)",
         "requestBody": {
           "required": true,
           "content": {
@@ -327,6 +452,34 @@
                   "mech-ppi"
                 ],
                 "method": "math"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Evidence"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/synth/integrate": {
+      "post": {
+        "operationId": "synthIntegrateV1",
+        "summary": "Synthesis/integration across modules",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SynthIntegrateRequest"
               }
             }
           }
@@ -363,7 +516,8 @@
             "name": "gene",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Alias of 'symbol'."
           },
           {
             "in": "query",
@@ -422,127 +576,6 @@
           }
         }
       }
-    },
-    "/health": {
-      "get": {
-        "operationId": "healthzV1",
-        "summary": "Health check",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/lit/search": {
-      "get": {
-        "operationId": "litSearchV1",
-        "summary": "Literature search (alias of /lit/meta)",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "gene",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "symbol",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "efo",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
-              "default": 50
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/synth/targetcard": {
-      "post": {
-        "operationId": "synthTargetcardV1",
-        "summary": "Assemble a target card (alias of /synth/integrate)",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SynthIntegrateRequest"
-              },
-              "example": {
-                "symbol": "IL6",
-                "condition": "ulcerative colitis",
-                "modules": [
-                  "genetics-l2g",
-                  "expr-baseline",
-                  "mech-ppi"
-                ],
-                "method": "math"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
     }
   },
   "components": {
@@ -582,12 +615,18 @@
             "type": "string",
             "format": "date-time"
           },
-          "error": {
-            "type": "string"
+          "debug": {
+            "type": "object",
+            "additionalProperties": true
           }
         },
         "required": [
-          "status"
+          "status",
+          "source",
+          "fetched_n",
+          "data",
+          "citations",
+          "fetched_at"
         ]
       },
       "ModuleRunRequest": {
@@ -598,33 +637,55 @@
             "description": "One of the 55 keys from /v1/modules"
           },
           "gene": {
-            "type": "string"
+            "type": "string",
+            "description": "Alias of 'symbol'."
           },
           "symbol": {
             "type": "string"
           },
-          "ensembl": {
-            "type": "string"
+          "ensembl_id": {
+            "type": "string",
+            "description": "Ensembl gene ID (ENSG...)."
+          },
+          "uniprot_id": {
+            "type": "string",
+            "description": "UniProt accession (e.g., P05231)."
           },
           "efo": {
-            "type": "string"
+            "type": "string",
+            "description": "EFO/MONDO ID or label."
           },
           "condition": {
             "type": "string"
           },
+          "tissue": {
+            "type": "string"
+          },
+          "cell_type": {
+            "type": "string"
+          },
+          "species": {
+            "type": "string",
+            "description": "e.g., 'human'."
+          },
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1000,
-            "default": 50
+            "maximum": 500,
+            "default": 100
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "strict": {
+            "type": "boolean",
+            "default": false
           },
           "extra": {
             "type": "object",
             "additionalProperties": true
-          },
-          "ensembl_id": {
-            "type": "string",
-            "description": "Ensembl gene ID (ENSG...); alias of 'ensembl'."
           }
         },
         "required": [
@@ -642,7 +703,7 @@
           },
           "domain": {
             "type": "string",
-            "description": "Accepts 'D1'..'D6' or '1'..'6'"
+            "description": "Accepts 'D1'..'D6' or '1'..'6'."
           },
           "primary_only": {
             "type": "boolean",
@@ -664,15 +725,24 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 1000,
-            "default": 50
+            "default": 100
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
           },
           "gene": {
-            "type": "string"
+            "type": "string",
+            "description": "Alias of 'symbol'."
           },
           "symbol": {
             "type": "string"
           },
           "ensembl_id": {
+            "type": "string"
+          },
+          "uniprot_id": {
             "type": "string"
           },
           "efo": {
@@ -681,9 +751,15 @@
           "condition": {
             "type": "string"
           },
+          "tissue": {
+            "type": "string"
+          },
+          "cell_type": {
+            "type": "string"
+          },
           "species": {
             "type": "string",
-            "description": "Species (e.g., 'human', 'mouse')."
+            "description": "e.g., 'human'."
           },
           "cutoff": {
             "type": "number"
@@ -705,15 +781,24 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 1000,
-            "default": 50
+            "default": 100
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
           },
           "gene": {
-            "type": "string"
+            "type": "string",
+            "description": "Alias of 'symbol'."
           },
           "symbol": {
             "type": "string"
           },
           "ensembl_id": {
+            "type": "string"
+          },
+          "uniprot_id": {
             "type": "string"
           },
           "efo": {
@@ -722,9 +807,15 @@
           "condition": {
             "type": "string"
           },
+          "tissue": {
+            "type": "string"
+          },
+          "cell_type": {
+            "type": "string"
+          },
           "species": {
             "type": "string",
-            "description": "Species (e.g., 'human', 'mouse')."
+            "description": "e.g., 'human'."
           },
           "cutoff": {
             "type": "number"
@@ -739,7 +830,8 @@
         "type": "object",
         "properties": {
           "gene": {
-            "type": "string"
+            "type": "string",
+            "description": "Alias of 'symbol'."
           },
           "symbol": {
             "type": "string"
