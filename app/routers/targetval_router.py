@@ -1156,13 +1156,13 @@ def build_eupmc_query(symbol: str, condition: Optional[str] = None,
                       study_types: Optional[List[str]] = None,
                       article_types: Optional[List[str]] = None,
                       strict: bool = False) -> str:
-    \"\"\"Construct a conservative Europe PMC Lucene query.
+    """Construct a conservative Europe PMC Lucene query.
 
     Notes:
       - FIRST_PDATE range is supported per Europe PMC search syntax.
       - For study/species/article filters, we conservatively inject phrases as tokens to avoid brittle field names.
         (You can upgrade this to fielded filters like PUB_TYPE or MeSH-specific clauses later.)
-    \"\"\"
+    """
     clauses = []
     base = f"({symbol})"
     if condition:
@@ -1333,11 +1333,11 @@ async def safety_penalty(
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD; defaults to today"),
     scale: int = Query(2000, ge=100, le=100000, description="Reports for penalty=~1.0 (rough scale)")
 ) -> Evidence:
-    \"\"\"Returns a unitless penalty in [0,1], plus supporting counts.
+    """Returns a unitless penalty in [0,1], plus supporting counts.
     Penalty is based on:
       - total reports: count(receivedate) over time window
       - death reports: count(receivedate) with seriousnessdeath:1
-    \"\"\"
+    """
     drug_list = [d.strip() for d in drugs.split(",") if d.strip()]
     if not drug_list:
         return _ev_error("openFDA FAERS", "No drugs provided", ["https://open.fda.gov/apis/drug/event/"])
