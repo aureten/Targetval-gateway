@@ -44,8 +44,8 @@
             }
           },
           "fetched_at": {
-            "type": "string",
-            "format": "date-time"
+            "type": "number",
+            "format": "double"
           },
           "debug": {
             "type": "object",
@@ -251,45 +251,6 @@
             "additionalProperties": true
           }
         }
-      },
-      "SynthIntegrateRequest": {
-        "type": "object",
-        "properties": {
-          "gene": {
-            "type": "string",
-            "description": "Alias of 'symbol'."
-          },
-          "symbol": {
-            "type": "string"
-          },
-          "efo": {
-            "type": "string"
-          },
-          "condition": {
-            "type": "string"
-          },
-          "modules": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "method": {
-            "type": "string",
-            "enum": [
-              "math",
-              "vote",
-              "rank",
-              "bayes",
-              "hybrid"
-            ],
-            "default": "math"
-          },
-          "extra": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        }
       }
     }
   },
@@ -361,14 +322,14 @@
         }
       }
     },
-    "/module/{name}": {
+    "/module/{module_key}": {
       "get": {
         "operationId": "runModuleByNameV1",
-        "summary": "Run a single module by key (GET) (supports perturb-* keys)",
+        "summary": "Run a single module by key (GET)",
         "parameters": [
           {
             "in": "path",
-            "name": "name",
+            "name": "module_key",
             "required": true,
             "schema": {
               "type": "string"
@@ -464,46 +425,6 @@
               "type": "boolean",
               "default": false
             }
-          },
-          {
-            "in": "query",
-            "name": "up",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Comma-separated up genes (for connectivity/enrichment)"
-          },
-          {
-            "in": "query",
-            "name": "down",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Comma-separated down genes (for connectivity/enrichment)"
-          },
-          {
-            "in": "query",
-            "name": "database",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Signature DB (e.g., l1000_xpr)"
-          },
-          {
-            "in": "query",
-            "name": "drug",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Drug/compound name (for perturb-drug-response)"
-          },
-          {
-            "in": "query",
-            "name": "cell_line",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Cell line name (for perturb-drug-response)"
           }
         ],
         "responses": {
@@ -577,6 +498,54 @@
         "responses": {
           "200": {
             "description": "Domain aggregate output",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/domains": {
+      "get": {
+        "operationId": "listDomainsV1",
+        "summary": "List domain IDs, names, and module keys (single source: router)",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/domains/{domain_id}": {
+      "get": {
+        "operationId": "getDomainV1",
+        "summary": "Get one domain (ID, name, module keys)",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "domain_id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -696,7 +665,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "$ref": "#/components/schemas/GenericObject"
                 }
               }
             }
@@ -707,7 +676,7 @@
     "/lit/claims": {
       "get": {
         "operationId": "litClaimsV1",
-        "summary": "PubTator3 relations proxy",
+        "summary": "Relations proxy via Europe PMC",
         "parameters": [
           {
             "in": "query",
@@ -739,7 +708,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "$ref": "#/components/schemas/GenericObject"
                 }
               }
             }
@@ -750,7 +719,7 @@
     "/lit/score": {
       "post": {
         "operationId": "litScoreV1",
-        "summary": "Score literature items (objective rubric)",
+        "summary": "Flag literature items (objective rubric)",
         "requestBody": {
           "required": true,
           "content": {
@@ -778,182 +747,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/synth/targetcard": {
-      "post": {
-        "operationId": "synthTargetcardV1",
-        "summary": "Assemble a target card (modules + literature)",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SynthIntegrateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/synth/integrate": {
-      "post": {
-        "operationId": "synthIntegrateV1",
-        "summary": "Synthesis/integration across modules (qualitative; no per-module scores)",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SynthIntegrateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
                   "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/synth/bucket": {
-      "get": {
-        "operationId": "synthBucketV1",
-        "summary": "Mathematical synthesis per bucket",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "gene",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Alias of 'symbol'."
-          },
-          {
-            "in": "query",
-            "name": "symbol",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "efo",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1000,
-              "default": 50
-            }
-          },
-          {
-            "in": "query",
-            "name": "mode",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/domains": {
-      "get": {
-        "operationId": "listDomainsV1",
-        "summary": "List domain IDs, names, and module keys",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "id": {
-                        "type": "integer"
-                      },
-                      "name": {
-                        "type": "string"
-                      },
-                      "modules": {
-                        "type": "array",
-                        "items": {
-                          "type": "string"
-                        }
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "name",
-                      "modules"
-                    ]
-                  }
                 }
               }
             }
@@ -964,7 +758,7 @@
     "/synth/therapeutic-index": {
       "get": {
         "operationId": "synthTherapeuticIndexV1",
-        "summary": "Assemble the Therapeutic Index & Safety Translation bundle (Domain 5) with lit overlay",
+        "summary": "Assemble Domain 5: Therapeutic index & safety translation (modules + literature overlay)",
         "parameters": [
           {
             "in": "query",
