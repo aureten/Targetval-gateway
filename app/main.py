@@ -1,14 +1,3 @@
-# main.py
-from fastapi import FastAPI
-from app.routers.router_10_enhanced import router
-import uvicorn
-
-app = FastAPI(title="Targetval Gateway", version="1.0")
-app.include_router(router, prefix="/api/v1")
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-from __future__ import annotations
 
 import asyncio
 import inspect
