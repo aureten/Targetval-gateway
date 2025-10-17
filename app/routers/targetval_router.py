@@ -1,5 +1,5 @@
 
-# router.py — Full (64 modules) with live fetch (approach aligned to router-revised.py)
+# router.py — Advanced (64 modules) with live fetch (approach aligned to router-revised.py)
 """
 TARGETVAL Gateway — Router (Advanced, full registry)
 
@@ -32,8 +32,150 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+# ------------------------ Domains (explicit, per spec) ------------------------
+from typing import Dict, List
+
+DOMAINS_META: Dict[int, Dict[str, str]] = {
+    1: {"name": "Genetic causality & human validation"},
+    2: {"name": "Functional & mechanistic validation"},
+    3: {"name": "Expression, selectivity & cell-state context"},
+    4: {"name": "Druggability & modality tractability"},
+    5: {"name": "Therapeutic index & safety translation"},
+    6: {"name": "Clinical & translational evidence"},
+}
+
+DOMAIN_MODULES: Dict[int, List[str]] = {
+    1: [
+        "genetics-l2g",
+        "genetics-coloc",
+        "genetics-mr",
+        "genetics-chromatin-contacts",
+        "genetics-3d-maps",
+        "genetics-regulatory",
+        "genetics-sqtl",
+        "genetics-pqtl",
+        "genetics-annotation",
+        "genetics-pathogenicity-priors",
+        "genetics-intolerance",
+        "genetics-rare",
+        "genetics-mendelian",
+        "genetics-phewas-human-knockout",
+        "genetics-functional",
+        "genetics-mavedb",
+        "genetics-consortia-summary",
+    ],
+    2: [
+        "mech-pathways",
+        "biology-causal-pathways",
+        "mech-ppi",
+        "mech-ligrec",
+        "assoc-proteomics",
+        "assoc-metabolomics",
+        "assoc-bulk-rna",
+        "assoc-perturb",
+        "perturb-lincs-signatures",
+        "perturb-connectivity",
+        "perturb-signature-enrichment",
+        "perturb-perturbseq-encode",
+        "perturb-crispr-screens",
+        "genetics-lncrna",
+        "genetics-mirna",
+        "perturb-qc (internal)",
+        "perturb-scrna-summary (internal)",
+    ],
+    3: [
+        "expr-baseline",
+        "expr-inducibility",
+        "assoc-sc",
+        "assoc-spatial",
+        "sc-hubmap",
+        "expr-localization",
+        "assoc-hpa-pathology",
+        "tract-ligandability-ab",
+        "tract-surfaceome",
+    ],
+    4: [
+        "mech-structure",
+        "tract-ligandability-sm",
+        "tract-ligandability-oligo",
+        "tract-modality",
+        "tract-drugs",
+        "perturb-drug-response",
+    ],
+    5: [
+        "function-dependency",
+        "immuno/hla-coverage",
+        "tract-immunogenicity",
+        "tract-mhc-binding",
+        "tract-iedb-epitopes",
+        "clin-safety",
+        "clin-rwe",
+        "clin-on-target-ae-prior",
+        "perturb-depmap-dependency",
+    ],
+    6: [
+        "clin-endpoints",
+        "clin-biomarker-fit",
+        "clin-pipeline",
+        "clin-feasibility",
+        "comp-intensity",
+        "comp-freedom",
+    ],
+}
+
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query
+
+# ----------------------- Domain naming & registry (authoritative) -----------------------
+DOMAIN_LABELS = {
+    "1": "Genetic causality & human validation",
+    "2": "Functional & mechanistic validation",
+    "3": "Expression, selectivity & cell-state context",
+    "4": "Druggability & modality tractability",
+    "5": "Therapeutic index & safety translation",
+    "6": "Clinical & translational evidence",
+}
+# alias keys "D1".."D6"
+DOMAIN_LABELS.update({f"D{k}": v for k, v in list(DOMAIN_LABELS.items()) if len(k)==1})
+
+def _domain_modules_spec() -> dict:
+    # E) Module Order by Domain (display) — mirrored from config
+    D1 = [
+        "genetics-l2g","genetics-coloc","genetics-mr",
+        "genetics-chromatin-contacts","genetics-3d-maps",
+        "genetics-regulatory","genetics-sqtl","genetics-pqtl",
+        "genetics-annotation","genetics-pathogenicity-priors",
+        "genetics-intolerance","genetics-rare","genetics-mendelian",
+        "genetics-phewas-human-knockout","genetics-functional",
+        "genetics-mavedb","genetics-consortia-summary"
+    ]
+    D2 = [
+        "mech-pathways","biology-causal-pathways","mech-ppi","mech-ligrec",
+        "assoc-proteomics","assoc-metabolomics","assoc-bulk-rna","assoc-perturb",
+        "perturb-lincs-signatures","perturb-connectivity","perturb-signature-enrichment",
+        "perturb-perturbseq-encode","perturb-crispr-screens",
+        "genetics-lncrna","genetics-mirna","perturb-qc (internal)","perturb-scrna-summary (internal)"
+    ]
+    D3 = [
+        "expr-baseline","expr-inducibility","assoc-sc","assoc-spatial","sc-hubmap",
+        "expr-localization","assoc-hpa-pathology","tract-ligandability-ab","tract-surfaceome"
+    ]
+    D4 = [
+        "mech-structure","tract-ligandability-sm","tract-ligandability-oligo",
+        "tract-modality","tract-drugs","perturb-drug-response"
+    ]
+    D5 = [
+        "function-dependency","immuno/hla-coverage","tract-immunogenicity",
+        "tract-mhc-binding","tract-iedb-epitopes","clin-safety","clin-rwe",
+        "clin-on-target-ae-prior","perturb-depmap-dependency"
+    ]
+    D6 = [
+        "clin-endpoints","clin-biomarker-fit","clin-pipeline","clin-feasibility",
+        "comp-intensity","comp-freedom"
+    ]
+    return {"1": D1, "2": D2, "3": D3, "4": D4, "5": D5, "6": D6,
+            "D1": D1, "D2": D2, "D3": D3, "D4": D4, "D5": D5, "D6": D6}
+, Body
 from pydantic import BaseModel, Field
 
 # ------------------------------ Utilities ------------------------------------
@@ -176,7 +318,7 @@ def _sym_or_gene(symbol: Optional[str], gene: Optional[str]) -> str:
         raise HTTPException(status_code=422, detail="Provide 'symbol' or 'gene'")
     return s
 
-# ------------------------ Registry (58 modules) -------------------------------
+# ------------------------ Registry (64 modules) -------------------------------
 
 class Module(BaseModel):
     route: str
@@ -189,68 +331,156 @@ class Registry(BaseModel):
     counts: Dict[str, int]
 
 MODULES: List[Module] = [
-    Module(route="/expr/baseline", name="expr-baseline", sources=["GTEx API","EBI Expression Atlas API"], bucket="IDENTITY"),
-    Module(route="/expr/localization", name="expr-localization", sources=["UniProtKB API"], bucket="IDENTITY"),
-    Module(route="/expr/inducibility", name="expr-inducibility", sources=["EBI Expression Atlas API","NCBI GEO E-utilities","ArrayExpress/BioStudies API"], bucket="IDENTITY"),
-    Module(route="/assoc/bulk-rna", name="assoc-bulk-rna", sources=["NCBI GEO E-utilities","ArrayExpress/BioStudies API","EBI Expression Atlas API"], bucket="ASSOCIATION"),
-    Module(route="/assoc/sc", name="assoc-sc", sources=["HCA Azul APIs","Single-Cell Expression Atlas API","CELLxGENE Discover API"], bucket="ASSOCIATION"),
-    Module(route="/assoc/spatial", name="assoc-spatial", sources=["Europe PMC API"], bucket="ASSOCIATION"),
-    Module(route="/sc/hubmap", name="sc-hubmap", sources=["HuBMAP Search API","HCA Azul APIs"], bucket="ASSOCIATION"),
+    Module(route="/expr/baseline", name="expr-baseline", sources=["GTEx API","EBI Expression Atlas API"], bucket="Expression, selectivity & cell-state context"),
+    Module(route="/expr/localization", name="expr-localization", sources=["UniProtKB API"], bucket="Expression, selectivity & cell-state context"),
+    Module(route="/expr/inducibility", name="expr-inducibility", sources=["EBI Expression Atlas API","NCBI GEO E-utilities","ArrayExpress/BioStudies API"], bucket="Expression, selectivity & cell-state context"),
+    Module(route="/assoc/bulk-rna", name="assoc-bulk-rna", sources=["NCBI GEO E-utilities","ArrayExpress/BioStudies API","EBI Expression Atlas API"], bucket="Functional & mechanistic validation"),
+    Module(route="/assoc/sc", name="assoc-sc", sources=["HCA Azul APIs","Single-Cell Expression Atlas API","CELLxGENE Discover API"], bucket="Expression, selectivity & cell-state context"),
+    Module(route="/assoc/spatial", name="assoc-spatial", sources=["Europe PMC API"], bucket="Expression, selectivity & cell-state context"),
+    Module(route="/sc/hubmap", name="sc-hubmap", sources=["HuBMAP Search API","HCA Azul APIs"], bucket="Expression, selectivity & cell-state context"),
     Module(route="/assoc/proteomics", name="assoc-proteomics", sources=["ProteomicsDB API","PRIDE Archive API","PDC (CPTAC) GraphQL"], bucket="ASSOCIATION"),
-    Module(route="/assoc/metabolomics", name="assoc-metabolomics", sources=["MetaboLights API","Metabolomics Workbench API"], bucket="ASSOCIATION"),
-    Module(route="/assoc/hpa-pathology", name="assoc-hpa-pathology", sources=["Europe PMC API"], bucket="ASSOCIATION"),
-    Module(route="/assoc/perturb", name="assoc-perturb", sources=["LINCS LDP APIs","CLUE.io API","PubChem PUG-REST"], bucket="ASSOCIATION"),
+    Module(route="/assoc/metabolomics", name="assoc-metabolomics", sources=["MetaboLights API","Metabolomics Workbench API"], bucket="Functional & mechanistic validation"),
+    Module(route="/assoc/hpa-pathology", name="assoc-hpa-pathology", sources=["Europe PMC API"], bucket="Expression, selectivity & cell-state context"),
+    Module(route="/assoc/perturb", name="assoc-perturb", sources=["LINCS LDP APIs","CLUE.io API","PubChem PUG-REST"], bucket="Functional & mechanistic validation"),
     Module(route="/genetics/l2g", name="genetics-l2g", sources=["OpenTargets GraphQL (L2G)","GWAS Catalog REST API"], bucket="GENETIC_CAUSALITY"),
     Module(route="/genetics/coloc", name="genetics-coloc", sources=["OpenTargets GraphQL (colocalisations)","eQTL Catalogue API","OpenGWAS API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/mr", name="genetics-mr", sources=["IEU OpenGWAS API","PhenoScanner v2 API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/rare", name="genetics-rare", sources=["ClinVar via NCBI E-utilities","MyVariant.info","Ensembl VEP REST"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/mendelian", name="genetics-mendelian", sources=["ClinGen GeneGraph/GraphQL"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/phewas-human-knockout", name="genetics-phewas-human-knockout", sources=["PhenoScanner v2 API","OpenGWAS PheWAS","HPO/Monarch APIs"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/sqtl", name="genetics-sqtl", sources=["GTEx sQTL API","eQTL Catalogue API"], bucket="GENETIC_CAUSALITY"),
+    Module(route="/genetics/mr", name="genetics-mr", sources=["IEU OpenGWAS API","PhenoScanner v2 API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/rare", name="genetics-rare", sources=["ClinVar via NCBI E-utilities","MyVariant.info","Ensembl VEP REST"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/mendelian", name="genetics-mendelian", sources=["ClinGen GeneGraph/GraphQL"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/phewas-human-knockout", name="genetics-phewas-human-knockout", sources=["PhenoScanner v2 API","OpenGWAS PheWAS","HPO/Monarch APIs"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/sqtl", name="genetics-sqtl", sources=["GTEx sQTL API","eQTL Catalogue API"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/pqtl", name="genetics-pqtl", sources=["OpenTargets GraphQL (pQTL colocs)","OpenGWAS (protein traits)"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/chromatin-contacts", name="genetics-chromatin-contacts", sources=["ENCODE REST API","UCSC Genome Browser track APIs","4D Nucleome API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/3d-maps", name="genetics-3d-maps", sources=["4D Nucleome API","UCSC loop/interaction tracks"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/regulatory", name="genetics-regulatory", sources=["ENCODE REST API","eQTL Catalogue API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/annotation", name="genetics-annotation", sources=["Ensembl VEP REST","MyVariant.info","CADD API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/consortia-summary", name="genetics-consortia-summary", sources=["IEU OpenGWAS API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/functional", name="genetics-functional", sources=["DepMap API","BioGRID ORCS REST","Europe PMC API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/mavedb", name="genetics-mavedb", sources=["MaveDB API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/lncrna", name="genetics-lncrna", sources=["RNAcentral API","Europe PMC API"], bucket="ASSOCIATION"),
-    Module(route="/genetics/mirna", name="genetics-mirna", sources=["RNAcentral API","Europe PMC API"], bucket="ASSOCIATION"),
-    Module(route="/genetics/pathogenicity-priors", name="genetics-pathogenicity-priors", sources=["gnomAD GraphQL API","CADD API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/intolerance", name="genetics-intolerance", sources=["gnomAD GraphQL API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/mech/structure", name="mech-structure", sources=["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API"], bucket="MECHANISM"),
-    Module(route="/mech/ppi", name="mech-ppi", sources=["STRING API","IntAct via PSICQUIC","OmniPath API"], bucket="MECHANISM"),
-    Module(route="/mech/pathways", name="mech-pathways", sources=["Reactome Content/Analysis APIs","Pathway Commons API","SIGNOR API","QuickGO API"], bucket="MECHANISM"),
+    Module(route="/genetics/chromatin-contacts", name="genetics-chromatin-contacts", sources=["ENCODE REST API","UCSC Genome Browser track APIs","4D Nucleome API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/3d-maps", name="genetics-3d-maps", sources=["4D Nucleome API","UCSC loop/interaction tracks"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/regulatory", name="genetics-regulatory", sources=["ENCODE REST API","eQTL Catalogue API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/annotation", name="genetics-annotation", sources=["Ensembl VEP REST","MyVariant.info","CADD API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/consortia-summary", name="genetics-consortia-summary", sources=["IEU OpenGWAS API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/functional", name="genetics-functional", sources=["DepMap API","BioGRID ORCS REST","Europe PMC API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/mavedb", name="genetics-mavedb", sources=["MaveDB API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/lncrna", name="genetics-lncrna", sources=["RNAcentral API","Europe PMC API"], bucket="Functional & mechanistic validation"),
+    Module(route="/genetics/mirna", name="genetics-mirna", sources=["RNAcentral API","Europe PMC API"], bucket="Functional & mechanistic validation"),
+    Module(route="/genetics/pathogenicity-priors", name="genetics-pathogenicity-priors", sources=["gnomAD GraphQL API","CADD API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/intolerance", name="genetics-intolerance", sources=["gnomAD GraphQL API"], bucket="Genetic causality & human validation"),
+    Module(route="/mech/structure", name="mech-structure", sources=["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API"], bucket="Druggability & modality tractability"),
+    Module(route="/mech/ppi", name="mech-ppi", sources=["STRING API","IntAct via PSICQUIC","OmniPath API"], bucket="Functional & mechanistic validation"),
+    Module(route="/mech/pathways", name="mech-pathways", sources=["Reactome Content/Analysis APIs","Pathway Commons API","SIGNOR API","QuickGO API"], bucket="Functional & mechanistic validation"),
     Module(route="/mech/ligrec", name="mech-ligrec", sources=["OmniPath (ligand–receptor)","IUPHAR/Guide to Pharmacology API","Reactome interactors"], bucket="MECHANISM"),
-    Module(route="/biology/causal-pathways", name="biology-causal-pathways", sources=["SIGNOR API","Reactome Analysis Service","Pathway Commons API"], bucket="MECHANISM"),
-    Module(route="/tract/drugs", name="tract-drugs", sources=["ChEMBL API","DGIdb GraphQL","DrugCentral API","BindingDB API","PubChem PUG-REST","STITCH API","Pharos GraphQL"], bucket="TRACTABILITY"),
-    Module(route="/tract/ligandability-sm", name="tract-ligandability-sm", sources=["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API","BindingDB API"], bucket="TRACTABILITY"),
-    Module(route="/tract/ligandability-ab", name="tract-ligandability-ab", sources=["UniProtKB API","GlyGen API"], bucket="TRACTABILITY"),
-    Module(route="/tract/ligandability-oligo", name="tract-ligandability-oligo", sources=["Ensembl VEP REST","RNAcentral API","Europe PMC API"], bucket="TRACTABILITY"),
-    Module(route="/tract/modality", name="tract-modality", sources=["UniProtKB API","AlphaFold DB API","Pharos GraphQL","IUPHAR/Guide to Pharmacology API"], bucket="TRACTABILITY"),
-    Module(route="/tract/immunogenicity", name="tract-immunogenicity", sources=["IEDB IQ-API","IPD-IMGT/HLA API","Europe PMC API"], bucket="TRACTABILITY"),
+    Module(route="/biology/causal-pathways", name="biology-causal-pathways", sources=["SIGNOR API","Reactome Analysis Service","Pathway Commons API"], bucket="Functional & mechanistic validation"),
+    Module(route="/tract/drugs", name="tract-drugs", sources=["ChEMBL API","DGIdb GraphQL","DrugCentral API","BindingDB API","PubChem PUG-REST","STITCH API","Pharos GraphQL"], bucket="Druggability & modality tractability"),
+    Module(route="/tract/ligandability-sm", name="tract-ligandability-sm", sources=["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API","BindingDB API"], bucket="Druggability & modality tractability"),
+    Module(route="/tract/ligandability-ab", name="tract-ligandability-ab", sources=["UniProtKB API","GlyGen API"], bucket="Expression, selectivity & cell-state context"),
+    Module(route="/tract/ligandability-oligo", name="tract-ligandability-oligo", sources=["Ensembl VEP REST","RNAcentral API","Europe PMC API"], bucket="Druggability & modality tractability"),
+    Module(route="/tract/modality", name="tract-modality", sources=["UniProtKB API","AlphaFold DB API","Pharos GraphQL","IUPHAR/Guide to Pharmacology API"], bucket="Druggability & modality tractability"),
+    Module(route="/tract/immunogenicity", name="tract-immunogenicity", sources=["IEDB IQ-API","IPD-IMGT/HLA API","Europe PMC API"], bucket="Therapeutic index & safety translation"),
     Module(route="/tract/mhc-binding", name="tract-mhc-binding", sources=["IEDB Tools API (prediction)","IPD-IMGT/HLA API"], bucket="TRACTABILITY"),
-    Module(route="/tract/iedb-epitopes", name="tract-iedb-epitopes", sources=["IEDB IQ-API","IEDB Tools API"], bucket="TRACTABILITY"),
-    Module(route="/tract/surfaceome", name="tract-surfaceome", sources=["UniProtKB API","GlyGen API"], bucket="TRACTABILITY"),
-    Module(route="/function/dependency", name="function-dependency", sources=["DepMap API","BioGRID ORCS REST"], bucket="MECHANISM"),
-    Module(route="/immuno/hla-coverage", name="immuno-hla-coverage", sources=["IEDB population coverage/Tools API","IPD-IMGT/HLA API"], bucket="TRACTABILITY"),
-    Module(route="/clin/endpoints", name="clin-endpoints", sources=["ClinicalTrials.gov v2 API","WHO ICTRP web service"], bucket="CLINICAL_FIT"),
+    Module(route="/tract/iedb-epitopes", name="tract-iedb-epitopes", sources=["IEDB IQ-API","IEDB Tools API"], bucket="Therapeutic index & safety translation"),
+    Module(route="/tract/surfaceome", name="tract-surfaceome", sources=["UniProtKB API","GlyGen API"], bucket="Expression, selectivity & cell-state context"),
+    Module(route="/function/dependency", name="function-dependency", sources=["DepMap API","BioGRID ORCS REST"], bucket="Therapeutic index & safety translation"),
+    Module(route="/immuno/hla-coverage", name="immuno/hla-coverage", sources=["IEDB population coverage/Tools API","IPD-IMGT/HLA API"], bucket="Therapeutic index & safety translation"),
+    Module(route="/clin/endpoints", name="clin-endpoints", sources=["ClinicalTrials.gov v2 API","WHO ICTRP web service"], bucket="Clinical & translational evidence"),
     Module(route="/clin/biomarker-fit", name="clin-biomarker-fit", sources=["OpenTargets GraphQL (evidence)","PharmGKB API","HPO/Monarch APIs"], bucket="CLINICAL_FIT"),
-    Module(route="/clin/pipeline", name="clin-pipeline", sources=["Inxight Drugs API","ChEMBL API","DrugCentral API"], bucket="CLINICAL_FIT"),
-    Module(route="/clin/safety", name="clin-safety", sources=["openFDA FAERS API","DrugCentral API","CTDbase API","DGIdb GraphQL","IMPC API"], bucket="CLINICAL_FIT"),
-    Module(route="/clin/rwe", name="clin-rwe", sources=["openFDA FAERS API"], bucket="CLINICAL_FIT"),
-    Module(route="/clin/on-target-ae-prior", name="clin-on-target-ae-prior", sources=["DrugCentral API","DGIdb GraphQL","openFDA FAERS API"], bucket="CLINICAL_FIT"),
-    Module(route="/clin/feasibility", name="clin-feasibility", sources=["ClinicalTrials.gov v2 API","WHO ICTRP web service"], bucket="CLINICAL_FIT"),
-    Module(route="/comp/intensity", name="comp-intensity", sources=["PatentsView API"], bucket="CLINICAL_FIT"),
-    Module(route="/comp/freedom", name="comp-freedom", sources=["PatentsView API"], bucket="CLINICAL_FIT"),
+    Module(route="/clin/pipeline", name="clin-pipeline", sources=["Inxight Drugs API","ChEMBL API","DrugCentral API"], bucket="Clinical & translational evidence"),
+    Module(route="/clin/safety", name="clin-safety", sources=["openFDA FAERS API","DrugCentral API","CTDbase API","DGIdb GraphQL","IMPC API"], bucket="Therapeutic index & safety translation"),
+    Module(route="/clin/rwe", name="clin-rwe", sources=["openFDA FAERS API"], bucket="Therapeutic index & safety translation"),
+    Module(route="/clin/on-target-ae-prior", name="clin-on-target-ae-prior", sources=["DrugCentral API","DGIdb GraphQL","openFDA FAERS API"], bucket="Therapeutic index & safety translation"),
+    Module(route="/clin/feasibility", name="clin-feasibility", sources=["ClinicalTrials.gov v2 API","WHO ICTRP web service"], bucket="Clinical & translational evidence"),
+    Module(route="/comp/intensity", name="comp-intensity", sources=["PatentsView API"], bucket="Clinical & translational evidence"),
+    Module(route="/comp/freedom", name="comp-freedom", sources=["PatentsView API"], bucket="Clinical & translational evidence"),
 ]
 
-BUCKETS = ["IDENTITY","ASSOCIATION","GENETIC_CAUSALITY","MECHANISM","TRACTABILITY","CLINICAL_FIT"]
+BUCKETS = ["Genetic causality & human validation", "Functional & mechanistic validation", "Expression, selectivity & cell-state context", "Druggability & modality tractability", "Therapeutic index & safety translation", "Clinical & translational evidence"]
 
 # ------------------------ Router & registry endpoints -------------------------
 
 router = APIRouter()
+
+# ---------------------------- Domain label helpers ----------------------------
+@router.get("/synth/domain/{domain_id}/label")
+async def synth_domain_label(domain_id: str = Query(..., description="1..6 or D1..D6")):
+    key = domain_id if domain_id in DOMAIN_LABELS else domain_id.upper()
+    if key not in DOMAIN_LABELS:
+        raise HTTPException(status_code=404, detail=f"Unknown domain: {domain_id}")
+    return {"domain_id": key, "label": DOMAIN_LABELS[key]}
+
+# Internal: call our own mounted endpoints via ASGI (no external hop)
+async def _self_get(path: str, params: dict) -> dict:
+    import httpx, asyncio
+    # Ensure path begins with '/'
+    if not path.startswith('/'):
+        path = '/' + path
+    # This router is mounted under some prefix by main (usually '/v1'); however we can call the raw path
+    # because FastAPI resolves router paths relative to app root here.
+    async with httpx.AsyncClient(app=app, base_url="http://router.internal") as client:  # 'app' is defined below in most files; fallback handled
+        resp = await client.get(path, params={k:v for k,v in params.items() if v is not None}, headers={"Accept": "application/json"})
+        resp.raise_for_status()
+        return resp.json()
+
+# ---------------------------- Therapeutic index synth ----------------------------
+@router.get("/synth/therapeutic-index")
+async def synth_therapeutic_index(
+    gene: str = Query(None, description="Alias of 'symbol'."),
+    symbol: str = Query(None),
+    condition: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Domain 5 synthesis ("Therapeutic index & safety translation").
+    This orchestrates a live pull from Domain 5 modules and returns a stitched view:
+    - dependency (function-dependency)
+    - immunogenicity & MHC binding (tract-* + immuno/hla-coverage)
+    - clinical safety signals (clin-safety, clin-rwe, on-target AE prior)
+    - DepMap dependency (perturb-depmap-dependency) as supporting context
+    """
+    dkey = "5"
+    modules = _domain_modules_spec()[dkey]
+    # Keep execution bounded but live; selectively call the core D5 modules first
+    core = [
+        "function-dependency",
+        "immuno/hla-coverage",
+        "tract-immunogenicity",
+        "tract-mhc-binding",
+        "tract-iedb-epitopes",
+        "clin-safety",
+        "clin-rwe",
+        "clin-on-target-ae-prior",
+        "perturb-depmap-dependency",
+    ]
+    params = dict(symbol=symbol or gene, condition=condition, limit=limit, offset=offset)
+    results = {}
+    errors = {}
+
+    # Map registry keys to router paths via MODULES if available; else synthesize
+    _map = {}
+    try:
+        for m in MODULES:
+            _map[getattr(m, "name", getattr(m, "key", None))] = getattr(m, "route", None)
+    except Exception:
+        pass
+    # Fallback guessing
+    def _guess_path(k: str) -> str:
+        if k.startswith("immuno/"):
+            return f"/{k}"
+        fam, mod = (k.split("-", 1) + [""])[:2]
+        return f"/{fam}/{mod}"
+    # Run core set sequentially (router has its own parallelism where needed)
+    for k in core:
+        path = _map.get(k) or _guess_path(k)
+        try:
+            results[k] = await _self_get(path, params)
+        except Exception as e:
+            errors[k] = str(e)
+
+    return {
+        "ok": True,
+        "domain_id": dkey,
+        "domain_label": DOMAIN_LABELS[dkey],
+        "modules": core,
+        "n_modules": len(core),
+        "results": results,
+        "errors": errors,
+    }
+
 
 @router.get("/health")
 def health() -> Dict[str, Any]:
@@ -62873,8 +63103,8 @@ extended_knowledge:
 def modules55() -> Dict[str, Any]:
     return {"modules": [{"route": m.route, "name": m.name, "sources": m.sources, "bucket": m.bucket} for m in MODULES], "total": len(MODULES)}
 
-@router.get("/registry/active55")
-def registry_active55() -> Dict[str, Any]:
+@router.get("/registry/active")
+def registry_active() -> Dict[str, Any]:
     return {"buckets": BUCKETS, "counts": {b: sum(1 for m in MODULES if m.bucket == b) for b in BUCKETS}, "routes": [m.route for m in MODULES]}
 
 
@@ -63140,16 +63370,15 @@ try:
         Module(route="/perturb/qc", name="perturb-qc (internal)", sources=["(internal only)"], bucket="MECHANISM"),
         Module(route="/perturb/scrna-summary", name="perturb-scrna-summary (internal)", sources=["(internal only)"], bucket="MECHANISM"),
         Module(route="/perturb/lincs-signatures", name="perturb-lincs-signatures", sources=["LINCS Data Portal (LDP3) Signature API","iLINCS API"], bucket="ASSOCIATION"),
-        Module(route="/perturb/connectivity", name="perturb-connectivity", sources=["iLINCS API","LDP3 Data API"], bucket="ASSOCIATION"),
-        Module(route="/perturb/perturbseq", name="perturb-perturbseq-encode", sources=["ENCODE REST API","EBI ENA"], bucket="ASSOCIATION"),
-        Module(route="/perturb/crispr-screens", name="perturb-crispr-screens", sources=["BioGRID ORCS REST"], bucket="ASSOCIATION"),
-        Module(route="/perturb/depmap-dependency", name="perturb-depmap-dependency", sources=["Broad DepMap Portal/figshare","Sanger Cell Model Passports JSON:API"], bucket="SAFETY"),
-        Module(route="/perturb/drug-response", name="perturb-drug-response", sources=["PharmacoDB API","NCI-60 CellMiner API"], bucket="MECHANISM"),
+        Module(route="/perturb/connectivity", name="perturb-connectivity", sources=["iLINCS API","LDP3 Data API"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/perturbseq", name="perturb-perturbseq-encode", sources=["ENCODE REST API","EBI ENA"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/crispr-screens", name="perturb-crispr-screens", sources=["BioGRID ORCS REST"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/depmap-dependency", name="perturb-depmap-dependency", sources=["Broad DepMap Portal/figshare","Sanger Cell Model Passports JSON:API"], bucket="Therapeutic index & safety translation"),
+        Module(route="/perturb/drug-response", name="perturb-drug-response", sources=["PharmacoDB API","NCI-60 CellMiner API"], bucket="Druggability & modality tractability"),
         Module(route="/perturb/signature-enrichment", name="perturb-signature-enrichment", sources=["iLINCS API","LINCS Data Portal (LDP3)"], bucket="ASSOCIATION"),
     ]
 except Exception:
     pass
-
 
 
 # ------------------------ Added endpoints: PERTURBATION (per new config) -------
@@ -63389,3 +63618,39 @@ async def perturb_signature_enrichment(up: str = Query(..., description="comma-s
                     data=res or {},
                     citations=cites,
                     fetched_at=_now())
+
+
+from fastapi import FastAPI
+app = FastAPI(title="TargetVal Router (embedded)")
+app.include_router(router)
+
+@router.get("/domains")
+async def list_domains_router() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "domains": [
+            {"id": i, "name": DOMAINS_META[i]["name"], "modules": DOMAIN_MODULES[i]}
+            for i in sorted(DOMAINS_META.keys())
+        ],
+    }
+
+@router.get("/domains/{domain_id}")
+async def get_domain_router(domain_id: int) -> Dict[str, Any]:
+    if domain_id not in DOMAIN_MODULES:
+        raise HTTPException(status_code=404, detail="Unknown domain")
+    return {"ok": True, "id": domain_id, "name": DOMAINS_META[domain_id]["name"], "modules": DOMAIN_MODULES[domain_id]}
+
+
+# ------------------------ Domain mapping validation (fail-fast) ---------------
+def _validate_domain_mapping_against_modules() -> None:
+    name_set = {getattr(m, "name", "") for m in MODULES}
+    missing = []
+    for did, keys in DOMAIN_MODULES.items():
+        for k in keys:
+            if k not in name_set:
+                missing.append((did, k))
+    if missing:
+        # Fail fast with a clear message
+        raise RuntimeError(f"DOMAIN_MODULES contains names not present in MODULES: {missing}")
+
+_validate_domain_mapping_against_modules()
