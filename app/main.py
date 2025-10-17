@@ -1,4 +1,6 @@
 
+from __future__ import annotations
+
 import asyncio
 import inspect
 import logging
@@ -53,7 +55,10 @@ DEFAULT_CONCURRENCY = int(os.getenv("AGG_CONCURRENCY", "8"))
 DEFAULT_CONTINUE = os.getenv("AGG_CONTINUE_ON_ERROR", "true").lower() in {"1","true","yes"}
 
 # YAML registry path (module keys/paths and domain mapping 1..6)
-REGISTRY_PATH = os.getenv("TARGETVAL_MODULE_CONFIG", "app/routers/targetval_modules.yaml")
+REGISTRY_PATH = os.getenv(
+    "TARGETVAL_MODULE_CONFIG",
+    os.path.join(os.path.dirname(__file__), "targetval_modules.yaml")
+)
 
 
 # -----------------------------------------------------------------------------
