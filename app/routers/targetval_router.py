@@ -1006,22 +1006,83 @@ async def dispatch_module(key: str, p: ModuleParams) -> Evidence:
 
         # 55 comp-freedom
         if key == "comp-freedom":
-            return await dispatch_module("comp-intensity", p)
+            return _ev_empty("PatentsView API", ["https://patentsview.org/"], debug={"reason": "not implemented"})
 
         return _ev_error("router", f"Unhandled module key: {key}", [])
     except Exception as e:
         return _ev_error("router", str(e), [])
 
 # -------------------------------------------------------------------------------------
-# Dynamic registration from YAML
+
+# -------------------------------------------------------------------------------------
+# Dynamic registration — inline registry (55 modules; YAML removed)
 # -------------------------------------------------------------------------------------
 
-CONFIG_PATH = os.getenv("TARGETVAL_MODULE_CONFIG", os.path.join(os.path.dirname(__file__), "targetval_modules.yaml"))
-with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-    MODCFG = yaml.safe_load(fh)
+# Inline module registry (exactly the 55 core modules). Source: user-provided targetval_modules.yaml (trimmed to IDs 1–55).
+# Keeping the same structure the old YAML loader produced so downstream code stays the same.
+MODCFG = {
+    "modules": [
+        {"id":1, "key":"expr-baseline", "path":"/expr/baseline", "domains":{"primary":[3], "secondary":[2,5]}, "live_sources":["GTEx API","EBI Expression Atlas API"]},
+        {"id":2, "key":"expr-localization", "path":"/expr/localization", "domains":{"primary":[3,4], "secondary":[5]}, "live_sources":["UniProtKB API"]},
+        {"id":3, "key":"expr-inducibility", "path":"/expr/inducibility", "domains":{"primary":[3], "secondary":[2,5]}, "live_sources":["EBI Expression Atlas API","NCBI GEO E-utilities","ArrayExpress/BioStudies API"]},
+        {"id":4, "key":"assoc-bulk-rna", "path":"/assoc/bulk-rna", "domains":{"primary":[2], "secondary":[1]}, "live_sources":["NCBI GEO E-utilities","ArrayExpress/BioStudies API","EBI Expression Atlas API"]},
+        {"id":5, "key":"assoc-sc", "path":"/assoc/sc", "domains":{"primary":[3], "secondary":[2]}, "live_sources":["HCA Azul APIs","Single-Cell Expression Atlas API","CELLxGENE Discover API"]},
+        {"id":6, "key":"assoc-spatial", "path":"/assoc/spatial", "domains":{"primary":[3], "secondary":[2,5]}, "live_sources":["Europe PMC API"]},
+        {"id":7, "key":"sc-hubmap", "path":"/sc/hubmap", "domains":{"primary":[3], "secondary":[2]}, "live_sources":["HuBMAP Search API","HCA Azul APIs"]},
+        {"id":8, "key":"assoc-proteomics", "path":"/assoc/proteomics", "domains":{"primary":[2], "secondary":[1,5,6]}, "live_sources":["ProteomicsDB API","PRIDE Archive API","PDC (CPTAC) GraphQL"]},
+        {"id":9, "key":"assoc-metabolomics", "path":"/assoc/metabolomics", "domains":{"primary":[2], "secondary":[1,6]}, "live_sources":["MetaboLights API","Metabolomics Workbench API"]},
+        {"id":10, "key":"assoc-hpa-pathology", "path":"/assoc/hpa-pathology", "domains":{"primary":[3], "secondary":[2,5]}, "live_sources":["Europe PMC API"]},
+        {"id":11, "key":"assoc-perturb", "path":"/assoc/perturb", "domains":{"primary":[2], "secondary":[4]}, "live_sources":["LINCS LDP APIs","CLUE.io API","PubChem PUG-REST"]},
+        {"id":12, "key":"genetics-l2g", "path":"/genetics/l2g", "domains":{"primary":[1], "secondary":[6]}, "live_sources":["OpenTargets GraphQL (L2G)","GWAS Catalog REST API"]},
+        {"id":13, "key":"genetics-coloc", "path":"/genetics/coloc", "domains":{"primary":[1], "secondary":[2]}, "live_sources":["OpenTargets GraphQL (colocalisations)","eQTL Catalogue API","OpenGWAS API"]},
+        {"id":14, "key":"genetics-mr", "path":"/genetics/mr", "domains":{"primary":[1]}, "live_sources":["IEU OpenGWAS API","PhenoScanner v2 API"]},
+        {"id":15, "key":"genetics-rare", "path":"/genetics/rare", "domains":{"primary":[1], "secondary":[5]}, "live_sources":["ClinVar via NCBI E-utilities","MyVariant.info","Ensembl VEP REST"]},
+        {"id":16, "key":"genetics-mendelian", "path":"/genetics/mendelian", "domains":{"primary":[1], "secondary":[5]}, "live_sources":["ClinGen GeneGraph/GraphQL"]},
+        {"id":17, "key":"genetics-phewas-human-knockout", "path":"/genetics/phewas-human-knockout", "domains":{"primary":[1], "secondary":[5]}, "live_sources":["PhenoScanner v2 API","OpenGWAS PheWAS","HPO/Monarch APIs"]},
+        {"id":18, "key":"genetics-sqtl", "path":"/genetics/sqtl", "domains":{"primary":[1,3]}, "live_sources":["GTEx sQTL API","eQTL Catalogue API"]},
+        {"id":19, "key":"genetics-pqtl", "path":"/genetics/pqtl", "domains":{"primary":[1,3]}, "live_sources":["OpenTargets GraphQL (pQTL colocs)","OpenGWAS (protein traits when available)"]},
+        {"id":20, "key":"genetics-chromatin-contacts", "path":"/genetics/chromatin-contacts", "domains":{"primary":[1], "secondary":[2]}, "live_sources":["ENCODE REST API","UCSC Genome Browser track APIs","4D Nucleome API"]},
+        {"id":21, "key":"genetics-3d-maps", "path":"/genetics/3d-maps", "domains":{"primary":[1], "secondary":[2]}, "live_sources":["4D Nucleome API","UCSC loop/interaction tracks"]},
+        {"id":22, "key":"genetics-regulatory", "path":"/genetics/regulatory", "domains":{"primary":[1], "secondary":[2,3]}, "live_sources":["ENCODE REST API","eQTL Catalogue API"]},
+        {"id":23, "key":"genetics-annotation", "path":"/genetics/annotation", "domains":{"primary":[1], "secondary":[5]}, "live_sources":["Ensembl VEP REST","MyVariant.info","CADD API"]},
+        {"id":24, "key":"genetics-consortia-summary", "path":"/genetics/consortia-summary", "domains":{"primary":[1], "secondary":[6]}, "live_sources":["IEU OpenGWAS API"]},
+        {"id":25, "key":"genetics-functional", "path":"/genetics/functional", "domains":{"primary":[1], "secondary":[2]}, "live_sources":["DepMap API","BioGRID ORCS REST","Europe PMC API"]},
+        {"id":26, "key":"genetics-mavedb", "path":"/genetics/mavedb", "domains":{"primary":[1], "secondary":[2]}, "live_sources":["MaveDB API"]},
+        {"id":27, "key":"genetics-lncrna", "path":"/genetics/lncrna", "domains":{"primary":[2], "secondary":[1]}, "live_sources":["RNAcentral API","Europe PMC API"]},
+        {"id":28, "key":"genetics-mirna", "path":"/genetics/mirna", "domains":{"primary":[2], "secondary":[1]}, "live_sources":["RNAcentral API","Europe PMC API"]},
+        {"id":29, "key":"genetics-pathogenicity-priors", "path":"/genetics/pathogenicity-priors", "domains":{"primary":[1], "secondary":[5]}, "live_sources":["gnomAD GraphQL API","CADD API"]},
+        {"id":30, "key":"genetics-intolerance", "path":"/genetics/intolerance", "domains":{"primary":[1], "secondary":[5]}, "live_sources":["gnomAD GraphQL API"]},
+        {"id":31, "key":"mech-structure", "path":"/mech/structure", "domains":{"primary":[4], "secondary":[2]}, "live_sources":["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API"]},
+        {"id":32, "key":"mech-ppi", "path":"/mech/ppi", "domains":{"primary":[2], "secondary":[4,5]}, "live_sources":["STRING API","IntAct via PSICQUIC","OmniPath API"]},
+        {"id":33, "key":"mech-pathways", "path":"/mech/pathways", "domains":{"primary":[2], "secondary":[5]}, "live_sources":["Reactome Content/Analysis APIs","Pathway Commons API","SIGNOR API","QuickGO API"]},
+        {"id":34, "key":"mech-ligrec", "path":"/mech/ligrec", "domains":{"primary":[2,4], "secondary":[3]}, "live_sources":["OmniPath (ligand–receptor)","IUPHAR/Guide to Pharmacology API","Reactome interactors"]},
+        {"id":35, "key":"biology-causal-pathways", "path":"/biology/causal-pathways", "domains":{"primary":[2], "secondary":[5]}, "live_sources":["SIGNOR API","Reactome Analysis Service","Pathway Commons API"]},
+        {"id":36, "key":"tract-drugs", "path":"/tract/drugs", "domains":{"primary":[4,6], "secondary":[1]}, "live_sources":["ChEMBL API","DGIdb GraphQL","DrugCentral API","BindingDB API","PubChem PUG-REST","STITCH API","Pharos GraphQL"]},
+        {"id":37, "key":"tract-ligandability-sm", "path":"/tract/ligandability-sm", "domains":{"primary":[4], "secondary":[2]}, "live_sources":["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API","BindingDB API"]},
+        {"id":38, "key":"tract-ligandability-ab", "path":"/tract/ligandability-ab", "domains":{"primary":[4,3], "secondary":[5]}, "live_sources":["UniProtKB API","GlyGen API"]},
+        {"id":39, "key":"tract-ligandability-oligo", "path":"/tract/ligandability-oligo", "domains":{"primary":[4], "secondary":[2]}, "live_sources":["Ensembl VEP REST","RNAcentral API","Europe PMC API"]},
+        {"id":40, "key":"tract-modality", "path":"/tract/modality", "domains":{"primary":[4], "secondary":[6]}, "live_sources":["UniProtKB API","AlphaFold DB API","Pharos GraphQL","IUPHAR/Guide to Pharmacology API"]},
+        {"id":41, "key":"tract-immunogenicity", "path":"/tract/immunogenicity", "domains":{"primary":[5], "secondary":[4]}, "live_sources":["IEDB IQ-API","IPD-IMGT/HLA API","Europe PMC API"]},
+        {"id":42, "key":"tract-mhc-binding", "path":"/tract/mhc-binding", "domains":{"primary":[5], "secondary":[4]}, "live_sources":["IEDB Tools API (prediction)","IPD-IMGT/HLA API"]},
+        {"id":43, "key":"tract-iedb-epitopes", "path":"/tract/iedb-epitopes", "domains":{"primary":[5], "secondary":[4]}, "live_sources":["IEDB IQ-API","IEDB Tools API"]},
+        {"id":44, "key":"tract-surfaceome", "path":"/tract/surfaceome", "domains":{"primary":[4,3], "secondary":[6]}, "live_sources":["UniProtKB API","GlyGen API"]},
+        {"id":45, "key":"function-dependency", "path":"/function/dependency", "domains":{"primary":[5], "secondary":[2,3]}, "live_sources":["DepMap API","BioGRID ORCS REST"]},
+        {"id":46, "key":"immuno-hla-coverage", "path":"/immuno/hla-coverage", "domains":{"primary":[5], "secondary":[6]}, "live_sources":["IEDB population coverage/Tools API","IPD-IMGT/HLA API"]},
+        {"id":47, "key":"clin-endpoints", "path":"/clin/endpoints", "domains":{"primary":[6], "secondary":[1]}, "live_sources":["ClinicalTrials.gov v2 API","WHO ICTRP web service"]},
+        {"id":48, "key":"clin-biomarker-fit", "path":"/clin/biomarker-fit", "domains":{"primary":[6], "secondary":[1]}, "live_sources":["OpenTargets GraphQL (evidence)","PharmGKB API","HPO/Monarch APIs"]},
+        {"id":49, "key":"clin-pipeline", "path":"/clin/pipeline", "domains":{"primary":[6], "secondary":[4]}, "live_sources":["Inxight Drugs API","ChEMBL API","DrugCentral API"]},
+        {"id":50, "key":"clin-safety", "path":"/clin/safety", "domains":{"primary":[5]}, "live_sources":["openFDA FAERS API","DrugCentral API","CTDbase API","DGIdb GraphQL","IMPC API"]},
+        {"id":51, "key":"clin-rwe", "path":"/clin/rwe", "domains":{"primary":[5]}, "live_sources":["openFDA FAERS API"]},
+        {"id":52, "key":"clin-on-target-ae-prior", "path":"/clin/on-target-ae-prior", "domains":{"primary":[5], "secondary":[3]}, "live_sources":["DrugCentral API","DGIdb GraphQL","openFDA FAERS API"]},
+        {"id":53, "key":"clin-feasibility", "path":"/clin/feasibility", "domains":{"primary":[6]}, "live_sources":["ClinicalTrials.gov v2 API","WHO ICTRP web service"]},
+        {"id":54, "key":"comp-intensity", "path":"/comp/intensity", "domains":{"primary":[6]}, "live_sources":["PatentsView API"]},
+        {"id":55, "key":"comp-freedom", "path":"/comp/freedom", "domains":{"primary":[6]}, "live_sources":["PatentsView API"]}
+    ]
+}
+
 MOD_BY_KEY = {m["key"]: m for m in MODCFG["modules"]}
 
-def _register(mod: Dict[str, Any]) -> None:
+def _register(mod: dict) -> None:
     path = mod["path"]; key = mod["key"]
     desc = f"{key} | domains: {mod['domains']} | live_sources: {', '.join(mod.get('live_sources', []))}"
     @router.get(path, summary=key, description=desc, response_model=Evidence)
@@ -1042,6 +1103,7 @@ def _register(mod: Dict[str, Any]) -> None:
 
 for m in MODCFG["modules"]:
     _register(m)
+
 
 # -------------------------------------------------------------------------------------
 # Literature & synthesis endpoints (unchanged API, improved debug)
