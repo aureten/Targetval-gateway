@@ -13,48 +13,45 @@ from pydantic import BaseModel, Field
 # -----------------------------------------------------------------------------
 # Imports (robust): support root-level router.py or packaged app/router.py
 # -----------------------------------------------------------------------------
-try:
-    from router import router as tv_router  # root-level
+def _load_router_module():
+    import os, sys, importlib.util
+    # 1) Try package imports first
     try:
-        from router import MODULES  # registry of Module(route, name, primary, fallbacks)
-    except Exception:
-        MODULES = None
+        import router as _router_mod  # type: ignore
+        return _router_mod
+    except Exception as e1:
+        err1 = e1
     try:
-        from router import DOMAINS_META as ROUTER_DOMAINS_META  # single source of truth
-        from router import DOMAIN_MODULES as ROUTER_DOMAIN_MODULES
-    except Exception:
-        ROUTER_DOMAINS_META = None
-        ROUTER_DOMAIN_MODULES = None
-except Exception:
-    try:
-        from app.router import router as tv_router  # packaged under app/
-        try:
-            from app.router import MODULES
-        except Exception:
-            MODULES = None
-        try:
-            from app.router import DOMAINS_META as ROUTER_DOMAINS_META
-            from app.router import DOMAIN_MODULES as ROUTER_DOMAIN_MODULES
-        except Exception:
-            ROUTER_DOMAINS_META = None
-            ROUTER_DOMAIN_MODULES = None
-    except Exception as e:
-        # last resort: load router.py from same dir as this file
-        import importlib.util, sys
-        here = os.path.dirname(os.path.abspath(__file__))
-        cand = os.path.join(here, "router.py")
+        import app.router as _router_mod  # type: ignore
+        return _router_mod
+    except Exception as e2:
+        err2 = e2
+    # 2) Try file-based imports in common locations (Render uses /opt/render/project/src)
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "router.py"),
+        os.path.join(here, "app", "router.py"),
+        os.path.join(os.path.dirname(here), "router.py"),
+        os.path.join(os.path.dirname(here), "app", "router.py"),
+        "/opt/render/project/src/router.py",
+        "/opt/render/project/src/app/router.py",
+    ]
+    for cand in candidates:
         if os.path.exists(cand):
             spec = importlib.util.spec_from_file_location("router", cand)
             mod = importlib.util.module_from_spec(spec)  # type: ignore
             sys.modules["router"] = mod
             assert spec.loader is not None
             spec.loader.exec_module(mod)  # type: ignore
-            tv_router = getattr(mod, "router")
-            MODULES = getattr(mod, "MODULES", None)
-            ROUTER_DOMAINS_META = getattr(mod, "DOMAINS_META", None)
-            ROUTER_DOMAIN_MODULES = getattr(mod, "DOMAIN_MODULES", None)
-        else:
-            raise RuntimeError(f"Failed to import router module from any known location: {e!s}")
+            return mod
+    raise RuntimeError(f"Failed to import router module from any known location. "
+                       f"Errors: import router -> {err1!s}; import app.router -> {err2!s}")
+
+_router_mod = _load_router_module()
+tv_router = getattr(_router_mod, "router")
+MODULES = getattr(_router_mod, "MODULES", None)
+ROUTER_DOMAINS_META = getattr(_router_mod, "DOMAINS_META", None)
+ROUTER_DOMAIN_MODULES = getattr(_router_mod, "DOMAIN_MODULES", None)
 
 APP_TITLE = os.getenv("APP_TITLE", "TargetVal Gateway (Actions Surface) â Full")
 APP_VERSION = os.getenv("APP_VERSION", "2025.10")
@@ -91,7 +88,6 @@ class Evidence(BaseModel):
     fetched_n: int
     data: Dict[str, Any]
     citations: List[str]
-    # router uses UNIX epoch seconds (float) â keep type numeric
     fetched_at: float
     debug: Optional[Dict[str, Any]] = None
 
@@ -150,7 +146,6 @@ class DomainRunRequest(BaseModel):
 
 # ----------------------------- Domain mapping (from router) ------------------
 
-# Prefer router's constants to avoid drift; provide identical fallback if missing
 DOMAINS_META = ROUTER_DOMAINS_META or {
     1: {"name": "Genetic causality & human validation"},
     2: {"name": "Functional & mechanistic validation"},
@@ -165,7 +160,6 @@ def _domain_modules() -> Dict[str, List[str]]:
         D = {str(k): v for k, v in ROUTER_DOMAIN_MODULES.items()}
         D.update({f"D{k}": v for k, v in ROUTER_DOMAIN_MODULES.items()})
         return D
-    # Fallback (identical to router)
     D1 = [
         "genetics-l2g","genetics-coloc","genetics-mr","genetics-chromatin-contacts","genetics-3d-maps",
         "genetics-regulatory","genetics-sqtl","genetics-pqtl","genetics-annotation","genetics-pathogenicity-priors",
@@ -213,9 +207,6 @@ async def readyz():
 # ----------------------------- Registry actions ------------------------------
 
 def _module_map() -> Dict[str, str]:
-    """
-    Return {module_key -> route}. Prefer router.MODULES to avoid derivation errors.
-    """
     mapping: Dict[str, str] = {}
     if MODULES:
         for m in MODULES:
@@ -224,7 +215,6 @@ def _module_map() -> Dict[str, str]:
             if name and route:
                 mapping[str(name)] = str(route)
         return mapping
-    # Fallback (infer from router routes) â best effort only
     for r in getattr(tv_router, "routes", []):
         p = getattr(r, "path", "")
         if not p or p.count("/") < 2:
@@ -240,11 +230,7 @@ def _normalize_symbol(symbol: Optional[str], gene: Optional[str]) -> Optional[st
     return (symbol or gene or None)
 
 async def _invoke_module_via_asgi(route_path: str, params: Dict[str, Any]) -> Any:
-    """
-    Call the mounted router endpoint via ASGI without an external network hop.
-    """
     import httpx
-    # Build /v1-prefixed path
     path = "/v1" + (route_path if route_path.startswith("/") else "/" + route_path)
     q = {k: v for k, v in params.items() if v is not None}
     async with httpx.AsyncClient(app=app, base_url="http://app.internal") as client:
@@ -255,7 +241,6 @@ async def _invoke_module_via_asgi(route_path: str, params: Dict[str, Any]) -> An
 
 @app.get("/v1/modules")
 async def list_modules() -> List[str]:
-    # Preserve router order when available
     if MODULES:
         return [getattr(m, "name") for m in MODULES]
     return sorted(_module_map().keys())
@@ -317,8 +302,6 @@ async def run_module_by_name(
 @app.post("/v1/aggregate")
 async def aggregate_modules(req: AggregateRequest = Body(...)) -> Dict[str, Any]:
     modmap = _module_map()
-    # Determine module list
-    modules: List[str] = []
     if req.modules:
         missing = [m for m in req.modules if m not in modmap]
         if missing:
@@ -332,7 +315,6 @@ async def aggregate_modules(req: AggregateRequest = Body(...)) -> Dict[str, Any]
     else:
         raise HTTPException(status_code=400, detail="Provide 'modules' or 'domain'.")
 
-    # Prepare params for each module
     base_params = dict(
         symbol=_normalize_symbol(req.symbol, req.gene),
         ensembl_id=req.ensembl_id,
@@ -370,12 +352,13 @@ async def aggregate_modules(req: AggregateRequest = Body(...)) -> Dict[str, Any]
         for k in modules:
             await run_one(k)
 
-    # Optional literature overlay when a domain is used
+    # optional literature overlay for domains
     overlay = None
     try:
         if req.domain:
             dnum = int(str(req.domain).lstrip("D"))
             q = _build_domain_query(dnum, _normalize_symbol(req.symbol, req.gene), req.condition, req.efo)
+            from httpx import AsyncClient
             ojs = await _epmc_search(q, size=min(100, req.limit or 100))
             overlay = {"query": q, "hits": _gate_items_epmc(ojs)}
     except Exception:
@@ -401,7 +384,6 @@ async def run_domain(
     dmods = _domain_modules().get(dkey) or []
     if not dmods:
         raise HTTPException(status_code=400, detail=f"Unknown domain: {domain_id}")
-    # Convert to AggregateRequest and reuse logic
     agg_req = AggregateRequest(
         modules=dmods,
         domain=dkey,
@@ -498,7 +480,7 @@ async def lit_meta(
     condition: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
 ) -> Dict[str, Any]:
-    q = query or _build_domain_query(2, symbol or gene, condition, efo)  # default to D2-ish signal
+    q = query or _build_domain_query(2, symbol or gene, condition, efo)
     js = await _epmc_search(q, size=limit)
     items = _gate_items_epmc(js)
     return {"ok": True, "query": q, "hits": items[:limit]}
