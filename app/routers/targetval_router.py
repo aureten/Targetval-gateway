@@ -124,7 +124,7 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
 }
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 
 # ----------------------- Domain naming & registry (authoritative) -----------------------
 DOMAIN_LABELS = {
@@ -175,7 +175,6 @@ def _domain_modules_spec() -> dict:
     ]
     return {"1": D1, "2": D2, "3": D3, "4": D4, "5": D5, "6": D6,
             "D1": D1, "D2": D2, "D3": D3, "D4": D4, "D5": D5, "D6": D6}
-, Body
 from pydantic import BaseModel, Field
 
 # ------------------------------ Utilities ------------------------------------
