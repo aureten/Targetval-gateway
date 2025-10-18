@@ -1,55 +1,64 @@
-# app/main.py
+
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
-import sys
+import time
 from typing import Any, Dict, List, Optional
 
-import httpx
-from fastapi import Body, FastAPI, HTTPException, Path, Query
+from fastapi import FastAPI, HTTPException, Body, Query, Path as FPath
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-# ------------------------------------------------------------------------------
-# Logging
-# ------------------------------------------------------------------------------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
-    stream=sys.stdout,
-)
-log = logging.getLogger("targetval.main")
+# -----------------------------------------------------------------------------
+# Imports (robust): support root-level router.py or packaged app/router.py
+# -----------------------------------------------------------------------------
+def _load_router_module():
+    import os, sys, importlib.util
+    # 1) Try package imports first
+    try:
+        import router as _router_mod  # type: ignore
+        return _router_mod
+    except Exception as e1:
+        err1 = e1
+    try:
+        import app.router as _router_mod  # type: ignore
+        return _router_mod
+    except Exception as e2:
+        err2 = e2
+    # 2) Try file-based imports in common locations (Render uses /opt/render/project/src)
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "router.py"),
+        os.path.join(here, "app", "router.py"),
+        os.path.join(os.path.dirname(here), "router.py"),
+        os.path.join(os.path.dirname(here), "app", "router.py"),
+        "/opt/render/project/src/router.py",
+        "/opt/render/project/src/app/router.py",
+    ]
+    for cand in candidates:
+        if os.path.exists(cand):
+            spec = importlib.util.spec_from_file_location("router", cand)
+            mod = importlib.util.module_from_spec(spec)  # type: ignore
+            sys.modules["router"] = mod
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)  # type: ignore
+            return mod
+    raise RuntimeError(f"Failed to import router module from any known location. "
+                       f"Errors: import router -> {err1!s}; import app.router -> {err2!s}")
 
-# ------------------------------------------------------------------------------
-# Import your router implementation
-# ------------------------------------------------------------------------------
-try:
-    from app.routers import targetval_router as _router_mod
-except Exception as e:
-    # Fail fast — without the primary router, there is no API.
-    log.error(f"Failed to import app.routers.targetval_router: {e}")
-    raise
-
-tv_router = _router_mod.router
+_router_mod = _load_router_module()
+tv_router = getattr(_router_mod, "router")
 MODULES = getattr(_router_mod, "MODULES", None)
 ROUTER_DOMAINS_META = getattr(_router_mod, "DOMAINS_META", None)
 ROUTER_DOMAIN_MODULES = getattr(_router_mod, "DOMAIN_MODULES", None)
 
-# ------------------------------------------------------------------------------
-# App metadata / env
-# ------------------------------------------------------------------------------
-APP_TITLE = os.getenv("APP_TITLE", "TargetVal Gateway (Actions Surface) — Full")
+APP_TITLE = os.getenv("APP_TITLE", "TargetVal Gateway (Actions Surface) â Full")
 APP_VERSION = os.getenv("APP_VERSION", "2025.10")
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 DOCS_URL = os.getenv("DOCS_URL", "/docs")
 OPENAPI_URL = os.getenv("OPENAPI_URL", "/openapi.json")
 
-# ------------------------------------------------------------------------------
-# FastAPI app
-# ------------------------------------------------------------------------------
 app = FastAPI(
     title=APP_TITLE,
     version=APP_VERSION,
@@ -58,7 +67,7 @@ app = FastAPI(
     root_path=ROOT_PATH,
 )
 
-# CORS (default permissive; tighten in prod with CORS_ALLOW_ORIGINS)
+# CORS: permissive by default; tighten via env if needed
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
@@ -67,12 +76,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount the full router under /v1 (this carries all 64 modules)
+# Mount router at /v1 (this carries all 64 module routes and /domains endpoints)
 app.include_router(tv_router, prefix="/v1")
 
-# ------------------------------------------------------------------------------
-# Schemas for wrapper endpoints
-# ------------------------------------------------------------------------------
+
+# ----------------------------- Schemas (public) -----------------------------
+
 class Evidence(BaseModel):
     status: str
     source: str
@@ -83,7 +92,7 @@ class Evidence(BaseModel):
     debug: Optional[Dict[str, Any]] = None
 
 class ModuleRunRequest(BaseModel):
-    module_key: str = Field(..., description="One of the 64 keys from /modules")
+    module_key: str = Field(..., description="One of the 64 keys from /v1/modules")
     gene: Optional[str] = Field(None, description="Alias of 'symbol'.")
     symbol: Optional[str] = None
     ensembl_id: Optional[str] = None
@@ -134,9 +143,9 @@ class DomainRunRequest(BaseModel):
     cutoff: Optional[float] = None
     extra: Optional[Dict[str, Any]] = None
 
-# ------------------------------------------------------------------------------
-# Domain metadata fallbacks (if router didn't export them)
-# ------------------------------------------------------------------------------
+
+# ----------------------------- Domain mapping (from router) ------------------
+
 DOMAINS_META = ROUTER_DOMAINS_META or {
     1: {"name": "Genetic causality & human validation"},
     2: {"name": "Functional & mechanistic validation"},
@@ -151,84 +160,115 @@ def _domain_modules() -> Dict[str, List[str]]:
         D = {str(k): v for k, v in ROUTER_DOMAIN_MODULES.items()}
         D.update({f"D{k}": v for k, v in ROUTER_DOMAIN_MODULES.items()})
         return D
-    # Fallback to empty lists if not exported by router
-    return {str(i): [] for i in range(1, 7)} | {f"D{i}": [] for i in range(1, 7)}
-
-# ------------------------------------------------------------------------------
-# Internals
-# ------------------------------------------------------------------------------
-def _module_map() -> Dict[str, str]:
-    """
-    Build {module_key -> route_path} from router.MODULES
-    """
-    mapping: Dict[str, str] = {}
-    try:
-        for m in (MODULES or []):
-            name = getattr(m, "name", None) or getattr(m, "key", None)
-            route = getattr(m, "route", None)
-            if name and route:
-                mapping[str(name)] = str(route)
-    except Exception:
-        pass
+    D1 = [
+        "genetics-l2g","genetics-coloc","genetics-mr","genetics-chromatin-contacts","genetics-3d-maps",
+        "genetics-regulatory","genetics-sqtl","genetics-pqtl","genetics-annotation","genetics-pathogenicity-priors",
+        "genetics-intolerance","genetics-rare","genetics-mendelian","genetics-phewas-human-knockout",
+        "genetics-functional","genetics-mavedb","genetics-consortia-summary"
+    ]
+    D2 = [
+        "mech-pathways","biology-causal-pathways","mech-ppi","mech-ligrec",
+        "assoc-proteomics","assoc-metabolomics","assoc-bulk-rna","assoc-perturb",
+        "perturb-lincs-signatures","perturb-connectivity","perturb-signature-enrichment",
+        "perturb-perturbseq-encode","perturb-crispr-screens","genetics-lncrna","genetics-mirna",
+        "perturb-qc (internal)","perturb-scrna-summary (internal)"
+    ]
+    D3 = [
+        "expr-baseline","expr-inducibility","assoc-sc","assoc-spatial","sc-hubmap",
+        "expr-localization","assoc-hpa-pathology","tract-ligandability-ab","tract-surfaceome"
+    ]
+    D4 = [
+        "mech-structure","tract-ligandability-sm","tract-ligandability-oligo","tract-modality",
+        "tract-drugs","perturb-drug-response"
+    ]
+    D5 = [
+        "function-dependency","immuno/hla-coverage","tract-immunogenicity","tract-mhc-binding",
+        "tract-iedb-epitopes","clin-safety","clin-rwe","clin-on-target-ae-prior","perturb-depmap-dependency"
+    ]
+    D6 = [
+        "clin-endpoints","clin-biomarker-fit","clin-pipeline","clin-feasibility","comp-intensity","comp-freedom"
+    ]
+    mapping = {"1": D1, "2": D2, "3": D3, "4": D4, "5": D5, "6": D6,
+               "D1": D1, "D2": D2, "D3": D3, "D4": D4, "D5": D5, "D6": D6}
     return mapping
 
-async def _self_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    if not path.startswith("/"):
-        path = "/" + path
-    # ASGI-internal call; no outbound network hop
-    async with httpx.AsyncClient(app=app, base_url="http://internal") as client:
-        r = await client.get("/v1" + path, params={k: v for k, v in (params or {}).items() if v is not None})
-        r.raise_for_status()
-        return r.json()
 
-# ------------------------------------------------------------------------------
-# Health / meta
-# ------------------------------------------------------------------------------
+# ----------------------------- Health / readiness ----------------------------
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "version": APP_VERSION}
 
-@app.get("/livez")
-async def livez():
-    return {"ok": True, "router": "app.routers.targetval_router", "import_ok": True}
-
 @app.get("/readyz")
 async def readyz():
-    return {
-        "ok": True,
-        "env": {
-            "CACHE_TTL_SECONDS": os.getenv("CACHE_TTL_SECONDS"),
-            "REQUEST_BUDGET_S": os.getenv("REQUEST_BUDGET_S"),
-        },
-    }
+    return {"ok": True, "root_path": ROOT_PATH, "docs": DOCS_URL, "version": APP_VERSION}
 
-# ------------------------------------------------------------------------------
-# Registry / orchestration wrappers
-# ------------------------------------------------------------------------------
-@app.get("/modules")
+
+# ----------------------------- Registry actions ------------------------------
+
+def _module_map() -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    if MODULES:
+        for m in MODULES:
+            name = getattr(m, "name", None)
+            route = getattr(m, "route", None)
+            if name and route:
+                mapping[str(name)] = str(route)
+        return mapping
+    for r in getattr(tv_router, "routes", []):
+        p = getattr(r, "path", "")
+        if not p or p.count("/") < 2:
+            continue
+        parts = [x for x in p.split("/") if x]
+        if len(parts) >= 2:
+            fam, mod = parts[0], parts[1]
+            key = f"{fam}-{mod}"
+            mapping[key] = p
+    return mapping
+
+def _normalize_symbol(symbol: Optional[str], gene: Optional[str]) -> Optional[str]:
+    return (symbol or gene or None)
+
+async def _invoke_module_via_asgi(route_path: str, params: Dict[str, Any]) -> Any:
+    import httpx
+    path = "/v1" + (route_path if route_path.startswith("/") else "/" + route_path)
+    q = {k: v for k, v in params.items() if v is not None}
+    async with httpx.AsyncClient(app=app, base_url="http://app.internal") as client:
+        resp = await client.get(path, params=q, headers={"Accept": "application/json"})
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text[:2000])
+        return resp.json()
+
+@app.get("/v1/modules")
 async def list_modules() -> List[str]:
-    mm = _module_map()
-    if mm:
-        return sorted(mm.keys())
-    # Fallback (union of domain lists)
-    seen: Dict[str, int] = {}
-    for _, mods in _domain_modules().items():
-        for k in (mods or []):
-            seen[k] = 1
-    return sorted(seen.keys())
+    if MODULES:
+        return [getattr(m, "name") for m in MODULES]
+    return sorted(_module_map().keys())
 
-@app.get("/domains")
-async def list_domains():
-    dmap = _domain_modules()
-    out = []
-    for i in range(1, 7):
-        out.append({"id": i, "name": DOMAINS_META.get(i, {}).get("name", f"Domain {i}"), "modules": dmap.get(str(i), [])})
-    return {"ok": True, "domains": out}
+@app.post("/v1/module", response_model=Evidence)
+async def run_module(req: ModuleRunRequest = Body(...)) -> Any:
+    modmap = _module_map()
+    if req.module_key not in modmap:
+        raise HTTPException(status_code=404, detail=f"Unknown module_key: {req.module_key}")
+    params = dict(
+        symbol=_normalize_symbol(req.symbol, req.gene),
+        ensembl_id=req.ensembl_id,
+        uniprot_id=req.uniprot_id,
+        efo=req.efo,
+        condition=req.condition,
+        tissue=req.tissue,
+        cell_type=req.cell_type,
+        species=req.species,
+        limit=req.limit,
+        offset=req.offset,
+        strict=req.strict,
+    )
+    return await _invoke_module_via_asgi(modmap[req.module_key], params)
 
-@app.get("/module/{name}", response_model=Evidence)
-async def run_module_get(
-    name: str,
-    gene: Optional[str] = None,
+@app.get("/v1/module/{module_key}", response_model=Evidence)
+async def run_module_by_name(
+    module_key: str = FPath(...),
+    gene: Optional[str] = Query(None, description="Alias of 'symbol'."),
     symbol: Optional[str] = None,
     ensembl_id: Optional[str] = None,
     uniprot_id: Optional[str] = None,
@@ -239,13 +279,13 @@ async def run_module_get(
     species: Optional[str] = None,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    strict: bool = False,
-):
-    mm = _module_map()
-    if name not in mm:
-        raise HTTPException(status_code=404, detail=f"Unknown module: {name}")
+    strict: bool = Query(False),
+) -> Any:
+    modmap = _module_map()
+    if module_key not in modmap:
+        raise HTTPException(status_code=404, detail=f"Unknown module_key: {module_key}")
     params = dict(
-        symbol=symbol or gene,
+        symbol=_normalize_symbol(symbol, gene),
         ensembl_id=ensembl_id,
         uniprot_id=uniprot_id,
         efo=efo,
@@ -257,49 +297,65 @@ async def run_module_get(
         offset=offset,
         strict=strict,
     )
-    return await _self_get(mm[name], params)  # type: ignore[return-value]
+    return await _invoke_module_via_asgi(modmap[module_key], params)
 
-@app.post("/module", response_model=Evidence)
-async def run_module_post(body: ModuleRunRequest) -> Any:
-    mm = _module_map()
-    key = body.module_key
-    if key not in mm:
-        raise HTTPException(status_code=404, detail=f"Unknown module: {key}")
+
+@app.get("/v1/module/{name}", response_model=Evidence)
+async def run_module_by_name(
+    name: str = FPath(..., description="Canonical module key"),
+    gene: Optional[str] = Query(None, description="Alias of 'symbol'."),
+    symbol: Optional[str] = Query(None),
+    ensembl_id: Optional[str] = Query(None),
+    uniprot_id: Optional[str] = Query(None),
+    efo: Optional[str] = Query(None),
+    condition: Optional[str] = Query(None),
+    tissue: Optional[str] = Query(None),
+    cell_type: Optional[str] = Query(None),
+    species: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    strict: bool = Query(False)
+) -> Any:
+    """
+    Run a single module by canonical key via GET.
+    Mirrors POST /v1/module but uses query parameters.
+    """
+    module_key = name
+    modmap = _module_map()
+    if module_key not in modmap:
+        raise HTTPException(status_code=404, detail=f"Unknown module_key: {module_key}")
     params = dict(
-        symbol=body.symbol or body.gene,
-        ensembl_id=body.ensembl_id,
-        uniprot_id=body.uniprot_id,
-        efo=body.efo,
-        condition=body.condition,
-        tissue=body.tissue,
-        cell_type=body.cell_type,
-        species=body.species,
-        limit=body.limit,
-        offset=body.offset,
-        strict=body.strict,
+        symbol=_normalize_symbol(symbol, gene),
+        ensembl_id=ensembl_id,
+        uniprot_id=uniprot_id,
+        efo=efo,
+        condition=condition,
+        tissue=tissue,
+        cell_type=cell_type,
+        species=species,
+        limit=limit,
+        offset=offset,
+        strict=strict,
     )
-    return await _self_get(mm[key], params)  # type: ignore[return-value]
-
-@app.post("/aggregate")
-async def aggregate_modules(req: AggregateRequest):
-    mm = _module_map()
-    dmap = _domain_modules()
-
-    # Resolve modules
-    modules: List[str] = []
+    return await _invoke_module_via_asgi(modmap[module_key], params)
+@app.post("/v1/aggregate")
+async def aggregate_modules(req: AggregateRequest = Body(...)) -> Dict[str, Any]:
+    modmap = _module_map()
     if req.modules:
-        modules = [m for m in req.modules if m in mm]
+        missing = [m for m in req.modules if m not in modmap]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Unknown modules: {missing}")
+        modules = req.modules
     elif req.domain:
-        key = req.domain.strip().upper()
-        modules = [m for m in dmap.get(key, []) if m in mm]
+        dmods = _domain_modules().get(str(req.domain).upper().lstrip("D")) or _domain_modules().get(str(req.domain).upper())
+        if not dmods:
+            raise HTTPException(status_code=400, detail=f"Unknown domain: {req.domain}")
+        modules = [m for m in dmods if m in modmap]
     else:
-        modules = sorted(mm.keys())
+        raise HTTPException(status_code=400, detail="Provide 'modules' or 'domain'.")
 
-    if not modules:
-        raise HTTPException(status_code=400, detail="No modules resolved from request")
-
-    params = dict(
-        symbol=req.symbol or req.gene,
+    base_params = dict(
+        symbol=_normalize_symbol(req.symbol, req.gene),
         ensembl_id=req.ensembl_id,
         uniprot_id=req.uniprot_id,
         efo=req.efo,
@@ -312,63 +368,469 @@ async def aggregate_modules(req: AggregateRequest):
     )
 
     results: Dict[str, Any] = {}
-    errors: Dict[str, str] = {}
+    t0 = time.time()
 
-    async def _run_one(k: str):
+    async def run_one(key: str):
         try:
-            results[k] = await _self_get(mm[k], params)
+            route = modmap[key]
+            res = await _invoke_module_via_asgi(route, base_params)
+            results[key] = res
         except Exception as e:
             if req.continue_on_error:
-                errors[k] = str(e)
+                results[key] = {"status": "ERROR", "detail": str(e)}
             else:
                 raise
 
     if req.order == "parallel":
-        sem = asyncio.Semaphore(int(os.getenv("AGGREGATE_MAX_CONCURRENCY", "8")))
-        async def _guarded(k: str):
+        sem = asyncio.Semaphore(int(os.getenv("AGG_CONCURRENCY", "6")))
+        async def run_one_bounded(k: str):
             async with sem:
-                await _run_one(k)
-        await asyncio.gather(*[_guarded(k) for k in modules])
+                await run_one(k)
+        await asyncio.gather(*[run_one_bounded(k) for k in modules])
     else:
         for k in modules:
-            await _run_one(k)
+            await run_one(k)
 
-    return {"ok": True, "requested": {"modules": modules, "domain": req.domain}, "results": results, "errors": errors}
+    # optional literature overlay for domains
+    overlay = None
+    try:
+        if req.domain:
+            dnum = int(str(req.domain).lstrip("D"))
+            q = _build_domain_query(dnum, _normalize_symbol(req.symbol, req.gene), req.condition, req.efo)
+            from httpx import AsyncClient
+            ojs = await _epmc_search(q, size=min(100, req.limit or 100))
+            overlay = {"query": q, "hits": _gate_items_epmc(ojs)}
+    except Exception:
+        overlay = None
 
-@app.post("/domain/{domain_id}/run")
+    return {
+        "ok": True,
+        "domain": req.domain,
+        "domain_name": DOMAINS_META.get(int(str(req.domain).lstrip("D")), {}).get("name") if req.domain else None,
+        "modules": modules,
+        "n_modules": len(modules),
+        "elapsed_s": round(time.time() - t0, 3),
+        "results": results,
+        "literature_overlay": overlay,
+    }
+
+
+@app.get("/v1/domains")
+async def list_domains() -> Dict[str, Any]:
+    """
+    List domain IDs, names, and module keys.
+    """
+    mapping = _domain_modules()
+    out = []
+    for i in range(1, 7):
+        key = f"{i}"
+        out.append({"id": i, "name": DOMAINS_META[i]["name"], "modules": mapping.get(key, [])})
+    return {"ok": True, "domains": out}
+@app.post("/v1/domain/{domain_id}/run")
 async def run_domain(
-    domain_id: int = Path(..., ge=1, le=6, description="Domain id 1..6"),  # <- MUST be Path, not Query
-    body: Optional[DomainRunRequest] = Body(None),
-):
-    req = body or DomainRunRequest()
-    dmap = _domain_modules()
-    mods = dmap.get(str(domain_id), [])
-    agg = AggregateRequest(
-        modules=mods,
-        domain=str(domain_id),
-        primary_only=req.primary_only,
+    domain_id: int = FPath(..., ge=1, le=6),
+    req: DomainRunRequest = Body(None)
+) -> Dict[str, Any]:
+    dkey = f"{domain_id}"
+    dmods = _domain_modules().get(dkey) or []
+    if not dmods:
+        raise HTTPException(status_code=400, detail=f"Unknown domain: {domain_id}")
+    agg_req = AggregateRequest(
+        modules=dmods,
+        domain=dkey,
+        primary_only=req.primary_only if req else True,
         order="sequential",
         continue_on_error=True,
-        limit=req.limit,
-        offset=req.offset,
-        gene=req.gene,
-        symbol=req.symbol,
-        ensembl_id=req.ensembl_id,
-        uniprot_id=req.uniprot_id,
-        efo=req.efo,
-        condition=req.condition,
-        tissue=req.tissue,
-        cell_type=req.cell_type,
-        species=req.species,
-        cutoff=req.cutoff,
-        extra=req.extra,
+        limit=req.limit if req else 100,
+        offset=req.offset if req else 0,
+        gene=req.gene if req else None,
+        symbol=req.symbol if req else None,
+        ensembl_id=req.ensembl_id if req else None,
+        uniprot_id=req.uniprot_id if req else None,
+        efo=req.efo if req else None,
+        condition=req.condition if req else None,
+        tissue=req.tissue if req else None,
+        cell_type=req.cell_type if req else None,
+        species=req.species if req else None,
+        cutoff=req.cutoff if req else None,
+        extra=req.extra if req else None,
     )
-    return await aggregate_modules(agg)
+    return await aggregate_modules(agg_req)
 
-@app.get("/", include_in_schema=False)
-async def root():
-    return {"ok": True, "service": APP_TITLE, "docs": "/docs", "api": "/v1"}
 
+# ----------------------------- Literature layer ------------------------------
+
+import httpx
+
+async def _epmc_search(query: str, size: int = 50) -> Dict[str, Any]:
+    url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    params = {"query": query, "format": "json", "pageSize": str(size)}
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        r = await client.get(url, params=params, headers={"Accept": "application/json"})
+        r.raise_for_status()
+        return r.json()
+
+async def _crossref(doi: str) -> Dict[str, Any]:
+    if not doi:
+        return {}
+    url = f"https://api.crossref.org/works/{doi}"
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        r = await client.get(url, headers={"Accept": "application/json"})
+        if r.status_code != 200:
+            return {}
+        return r.json()
+
+def _build_domain_query(domain_id: int, symbol: Optional[str], condition: Optional[str], efo: Optional[str]) -> str:
+    sym = (symbol or "").strip()
+    cond = (condition or "").strip()
+    trait = (efo or "").strip()
+    tail = ""
+    if cond: tail += f' AND ("{cond}")'
+    if trait: tail += f' AND ({trait})'
+    if domain_id == 1:
+        core = f'{sym} AND (GWAS OR "Mendelian" OR colocalization OR "Mendelian randomization")'
+    elif domain_id == 2:
+        core = f'{sym} AND (pathway OR "protein interaction" OR causal OR perturbation OR "gene network")'
+    elif domain_id == 3:
+        core = f'{sym} AND (expression OR "single cell" OR "cell type" OR localization OR IHC OR pathology)'
+    elif domain_id == 4:
+        core = f'{sym} AND (drug OR antibody OR small molecule OR ligandability OR pocket OR modality)'
+    elif domain_id == 5:
+        core = f'{sym} AND (toxicity OR "adverse event" OR safety OR immunogenicity OR essentiality)'
+    else:
+        core = f'{sym} AND (clinical trial OR endpoint OR biomarker OR NCT)'
+    return f"{core}{tail}"
+
+def _gate_items_epmc(js: Dict[str, Any]) -> List[Dict[str, Any]]:
+    recs = ((js or {}).get("resultList") or {}).get("result") or []
+    out = []
+    for it in recs:
+        src = (it.get("source") or "").upper()
+        pubtypes = " ".join([p.get("name", "") for p in (it.get("pubTypeList") or {}).get("pubType", [])])
+        is_preprint = (src == "PPR")
+        is_retracted = ("Retracted" in pubtypes) or ("retraction" in (it.get("title", "") or "").lower())
+        out.append({
+            "id": it.get("id"),
+            "title": it.get("title"),
+            "authorString": it.get("authorString"),
+            "journalTitle": it.get("journalTitle"),
+            "pubYear": it.get("pubYear"),
+            "doi": it.get("doi"),
+            "source": it.get("source"),
+            "is_preprint": is_preprint,
+            "is_retracted": is_retracted,
+        })
+    return out
+
+@app.get("/v1/lit/meta")
+async def lit_meta(
+    query: Optional[str] = Query(None),
+    gene: Optional[str] = Query(None),
+    symbol: Optional[str] = Query(None),
+    efo: Optional[str] = Query(None),
+    condition: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+) -> Dict[str, Any]:
+    q = query or _build_domain_query(2, symbol or gene, condition, efo)
+    js = await _epmc_search(q, size=limit)
+    items = _gate_items_epmc(js)
+    return {"ok": True, "query": q, "hits": items[:limit]}
+
+@app.get("/v1/lit/search")
+async def lit_search(
+    symbol: str = Query(...),
+    condition: Optional[str] = Query(None),
+    window_days: int = Query(1825),
+    page_size: int = Query(50),
+) -> Dict[str, Any]:
+    q = f'{symbol} AND ("{condition}")' if condition else symbol
+    js = await _epmc_search(q, size=page_size)
+    items = _gate_items_epmc(js)
+    return {"ok": True, "query": q, "hits": items[:page_size]}
+
+@app.get("/v1/lit/claims")
+async def lit_claims(
+    symbol: str = Query(...),
+    condition: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+) -> Dict[str, Any]:
+    base_q = f'{symbol} AND (causes OR regulates OR "adverse event" OR toxicity OR improves OR inhibits)'
+    q = f'{base_q} AND ("{condition}")' if condition else base_q
+    js = await _epmc_search(q, size=limit)
+    items = _gate_items_epmc(js)
+    return {"ok": True, "query": q, "claims": items[:limit]}
+
+@app.post("/v1/lit/score")
+async def lit_score(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    items = payload.get("items") or []
+    scored = []
+    for it in items:
+        src = (it.get("source") or "").upper()
+        is_preprint = (src == "PPR") or ("bioRxiv" in (it.get("journalTitle") or ""))
+        title = (it.get("title") or "").lower()
+        flags = {
+            "preprint": is_preprint,
+            "human_hint": any(k in title for k in ["human", "patient", "clinical"]),
+            "trial_hint": "nct" in title or "randomized" in title,
+            "retraction_hint": "retract" in title,
+        }
+        scored.append({"id": it.get("id") or it.get("doi"), "flags": flags})
+    return {"ok": True, "items": scored}
+
+# Domain 5 convenience bundle with literature overlay
+
+# Synthesis (bucket-level, integration, target card)
+
+def _pick_domain_from_name(name: str) -> int:
+    n = (name or "").strip()
+    if not n:
+        raise HTTPException(status_code=400, detail="Provide 'name' for the bucket/domain.")
+    # Allow "1".."6", "D1".."D6", or label substring match
+    if n.upper().startswith("D") and n[1:].isdigit():
+        i = int(n[1:])
+        if 1 <= i <= 6:
+            return i
+    if n.isdigit():
+        i = int(n)
+        if 1 <= i <= 6:
+            return i
+    # fallback: substring match on label
+    for i in range(1, 7):
+        if n.lower() in DOMAINS_META[i]["name"].lower():
+            return i
+    raise HTTPException(status_code=400, detail=f"Unknown bucket/domain name: {name}")
+
+def _score_module_evidence(ev: Dict[str, Any]) -> float:
+    try:
+        if not isinstance(ev, dict):
+            return 0.0
+        if ev.get("status") != "OK":
+            return 0.0
+        fn = ev.get("fetched_n")
+        if isinstance(fn, (int, float)) and fn > 0:
+            return 1.0
+        # fall back to data heuristics
+        data = ev.get("data")
+        if isinstance(data, dict) and data:
+            return 0.8
+        if isinstance(data, list) and len(data) > 0:
+            return 0.8
+        return 0.4
+    except Exception:
+        return 0.0
+
+@app.get("/v1/synth/bucket")
+async def synth_bucket(
+    name: str = Query(..., description="Domain identifier: '1'..'6', 'D1'..'D6', or label substring."),
+    gene: Optional[str] = Query(None, description="Alias of 'symbol'."),
+    symbol: Optional[str] = Query(None),
+    efo: Optional[str] = Query(None),
+    condition: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=1000),
+    mode: Optional[str] = Query("auto", regex="^(auto|live|snapshot)$"),
+) -> Dict[str, Any]:
+    """
+    Compute a simple mathematical synthesis per bucket using module outputs.
+    'mode' is accepted for compatibility; 'snapshot' is not implemented and behaves like 'live'.
+    """
+    domain_id = _pick_domain_from_name(name)
+    # Run domain modules live
+    agg_req = AggregateRequest(
+        modules=None, domain=str(domain_id), primary_only=True, order="sequential",
+        continue_on_error=True, limit=limit, offset=0,
+        gene=None, symbol=_normalize_symbol(symbol, gene), efo=efo, condition=condition,
+        tissue=None, cell_type=None, species=None, cutoff=None, extra=None
+    )
+    agg = await aggregate_modules(agg_req)
+    results = agg.get("results") or {}
+    # Score
+    module_scores = {k: _score_module_evidence(v) for k, v in results.items()}
+    n = len(module_scores)
+    avg = (sum(module_scores.values()) / n) if n else 0.0
+    ok = sum(1 for v in results.values() if isinstance(v, dict) and v.get("status") == "OK")
+    no = sum(1 for v in results.values() if isinstance(v, dict) and v.get("status") == "NO_DATA")
+    err = sum(1 for v in results.values() if isinstance(v, dict) and v.get("status") == "ERROR")
+    # Pull a few citations
+    citations = []
+    for v in results.values():
+        if isinstance(v, dict):
+            cites = v.get("citations") or []
+            for c in cites:
+                if c not in citations:
+                    citations.append(c)
+                if len(citations) >= 12:
+                    break
+        if len(citations) >= 12:
+            break
+    return {
+        "ok": True,
+        "domain": domain_id,
+        "domain_name": DOMAINS_META[domain_id]["name"],
+        "modules": agg.get("modules"),
+        "counts": {"ok": ok, "no_data": no, "error": err},
+        "score": round(avg, 3),
+        "module_scores": module_scores,
+        "literature_overlay": agg.get("literature_overlay"),
+        "citations": citations[:12],
+        "note": "Snapshot mode not yet implemented; returning live aggregation."
+    }
+
+class SynthIntegrateRequest(BaseModel):
+    gene: Optional[str] = Field(None, description="Alias of 'symbol'.")
+    symbol: Optional[str] = None
+    efo: Optional[str] = None
+    condition: Optional[str] = None
+    modules: Optional[List[str]] = None
+    method: str = Field("math", pattern="^(math|vote|rank|bayes|hybrid)$")
+    extra: Optional[Dict[str, Any]] = None
+
+def _integrate_math(res: Dict[str, Any]) -> Dict[str, Any]:
+    scores = {k: _score_module_evidence(v) for k, v in res.items()}
+    n = len(scores) or 1
+    return {"score": sum(scores.values())/n, "module_scores": scores}
+
+def _integrate_vote(res: Dict[str, Any]) -> Dict[str, Any]:
+    pos = sum(1 for v in res.values() if isinstance(v, dict) and v.get("status") == "OK")
+    neg = sum(1 for v in res.values() if isinstance(v, dict) and v.get("status") == "ERROR")
+    tot = max(1, pos + neg)
+    return {"support": pos/tot, "oppose": neg/tot, "votes": {"ok": pos, "error": neg}}
+
+def _integrate_rank(res: Dict[str, Any]) -> Dict[str, Any]:
+    items = []
+    for k, v in res.items():
+        fn = (isinstance(v, dict) and v.get("fetched_n")) or 0
+        items.append((k, float(fn)))
+    items.sort(key=lambda x: x[1], reverse=True)
+    return {"ranking": items}
+
+def _integrate_bayes(res: Dict[str, Any]) -> Dict[str, Any]:
+    # Naive log-odds update using module scores as weak likelihood ratios
+    import math
+    logodds = 0.0  # prior 0.5
+    for v in res.values():
+        s = _score_module_evidence(v)
+        # Map score in [0,1] to weak LR in [0.67, 1.5]
+        lr = 0.67 + 0.83 * s
+        logodds += math.log(lr)
+    p = 1.0 / (1.0 + math.exp(-logodds))
+    return {"posterior": p, "logodds": logodds}
+
+@app.post("/v1/synth/integrate")
+async def synth_integrate(req: SynthIntegrateRequest = Body(...)) -> Dict[str, Any]:
+    modules = req.modules
+    if not modules:
+        # choose a lightweight default: first 3 modules from each domain
+        mapping = _domain_modules()
+        modules = []
+        for i in range(1, 7):
+            mods = mapping.get(f"{i}", [])
+            modules.extend(mods[:3])
+    agg_req = AggregateRequest(
+        modules=modules, domain=None, primary_only=True, order="sequential",
+        continue_on_error=True, limit=100, offset=0,
+        gene=req.gene, symbol=_normalize_symbol(req.symbol, req.gene),
+        efo=req.efo, condition=req.condition, tissue=None, cell_type=None,
+        species=None, cutoff=None, extra=None
+    )
+    agg = await aggregate_modules(agg_req)
+    results = agg.get("results") or {}
+    method = req.method or "math"
+    if method == "math":
+        integ = _integrate_math(results)
+    elif method == "vote":
+        integ = _integrate_vote(results)
+    elif method == "rank":
+        integ = _integrate_rank(results)
+    elif method == "bayes":
+        integ = _integrate_bayes(results)
+    else:
+        # hybrid: mix math and vote
+        m = _integrate_math(results)
+        v = _integrate_vote(results)
+        integ = {"score": m["score"], "support": v["support"], "module_scores": m["module_scores"]}
+    return {"ok": True, "method": method, "modules": modules, "integration": integ, "raw": results}
+
+@app.post("/v1/synth/targetcard", response_model=Evidence)
+async def synth_targetcard(req: SynthIntegrateRequest = Body(...)) -> Evidence:
+    """
+    Assemble a lightweight target card: selected module outputs + lit overlay in a uniform Evidence envelope.
+    """
+    # choose representative modules
+    modules = req.modules
+    if not modules:
+        mapping = _domain_modules()
+        modules = []
+        for i in range(1, 7):
+            mods = mapping.get(f"{i}", [])
+            modules.extend(mods[:3])
+    agg_req = AggregateRequest(
+        modules=modules, domain=None, primary_only=True, order="sequential",
+        continue_on_error=True, limit=100, offset=0,
+        gene=req.gene, symbol=_normalize_symbol(req.symbol, req.gene),
+        efo=req.efo, condition=req.condition, tissue=None, cell_type=None,
+        species=None, cutoff=None, extra=None
+    )
+    agg = await aggregate_modules(agg_req)
+    # literature meta
+    q = _build_domain_query(2, _normalize_symbol(req.symbol, req.gene), req.condition, req.efo)
+    lit = {}
+    try:
+        js = await _epmc_search(q, size=50)
+        lit = {"query": q, "hits": _gate_items_epmc(js)[:50]}
+    except Exception as e:
+        lit = {"query": q, "error": str(e)}
+    citations = []
+    for v in (agg.get("results") or {}).values():
+        if isinstance(v, dict):
+            for c in (v.get("citations") or []):
+                if c not in citations:
+                    citations.append(c)
+                if len(citations) >= 20:
+                    break
+        if len(citations) >= 20:
+            break
+    ev = dict(
+        status="OK",
+        source="TargetVal Gateway â aggregate modules + Europe PMC",
+        fetched_n=len(agg.get("results") or {}),
+        data={"aggregation": agg, "literature": lit},
+        citations=citations[:20],
+        fetched_at=time.time(),
+    )
+    return Evidence(**ev)
+@app.get("/v1/synth/therapeutic-index")
+async def synth_therapeutic_index(
+    gene: Optional[str] = Query(None, description="Alias of 'symbol'."),
+    symbol: Optional[str] = Query(None),
+    condition: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+) -> Dict[str, Any]:
+    d5 = _domain_modules()["5"]
+    base_params = dict(symbol=_normalize_symbol(symbol, gene), condition=condition, limit=limit, offset=0)
+    results: Dict[str, Any] = {}
+    async def call_one(key: str):
+        route = _module_map()[key]
+        res = await _invoke_module_via_asgi(route, base_params)
+        results[key] = res
+    for key in d5:
+        try:
+            await call_one(key)
+        except Exception as e:
+            results[key] = {"status": "ERROR", "detail": str(e)}
+    q = _build_domain_query(5, _normalize_symbol(symbol, gene), condition, None)
+    overlay = await _epmc_search(q, size=min(100, limit))
+    hits = _gate_items_epmc(overlay)
+    return {
+        "ok": True,
+        "domain": 5,
+        "domain_name": DOMAINS_META[5]["name"],
+        "modules": d5,
+        "results": results,
+        "literature": {"query": q, "hits": hits},
+    }
+
+
+# Entrypoint for local runs ---------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
