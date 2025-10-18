@@ -124,7 +124,9 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
 }
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Body
+from urllib.parse import urlparse
+from fnmatch import fnmatch
+from fastapi import APIRouter, HTTPException, Query, Body, Path
 
 # ----------------------- Domain naming & registry (authoritative) -----------------------
 DOMAIN_LABELS = {
@@ -205,6 +207,38 @@ DEFAULT_HEADERS: Dict[str, str] = {
     "Accept": "application/json",
 }
 OUTBOUND_TRIES: int = int(os.getenv("OUTBOUND_TRIES", "5"))
+
+# Per-source retry/backoff/timeout overrides (reliability-first)
+PROFILE_OVERRIDES = [
+    {"hosts": ["api.platform.opentargets.org","api.opentargets.io"], "tries": 6, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 5.0, "budget": 120.0},
+    {"hosts": ["europepmc.org","www.ebi.ac.uk"], "path_contains": ["/europepmc","/europepmc/webservices"], "tries": 6, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 5.0, "budget": 120.0},
+    {"hosts": ["string-db.org","string-db.org"], "tries": 6, "timeout_total": 45.0, "connect": 10.0, "backoff_base": 1.0, "backoff_cap": 6.0, "budget": 120.0},
+    {"hosts": ["gwas.mrcieu.ac.uk"], "tries": 6, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 5.0, "budget": 120.0},
+    {"hosts": ["phenoscanner.medschl.cam.ac.uk","www.phenoscanner.medschl.cam.ac.uk"], "tries": 6, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 5.0, "budget": 120.0},
+    {"hosts": ["eutils.ncbi.nlm.nih.gov","www.ncbi.nlm.nih.gov"], "tries": 6, "timeout_total": 45.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 6.0, "budget": 120.0},
+    {"hosts": ["www.ebi.ac.uk"], "path_contains": ["/pride","/gwas"], "tries": 6, "timeout_total": 60.0, "connect": 10.0, "backoff_base": 1.0, "backoff_cap": 8.0, "budget": 150.0},
+    {"hosts": ["proteomicsdb.org","www.proteomicsdb.org"], "tries": 6, "timeout_total": 60.0, "connect": 10.0, "backoff_base": 1.0, "backoff_cap": 8.0, "budget": 150.0},
+    {"hosts": ["pdc.cancer.gov","api.gdc.cancer.gov"], "tries": 6, "timeout_total": 60.0, "connect": 10.0, "backoff_base": 1.0, "backoff_cap": 8.0, "budget": 150.0},
+    {"hosts": ["webservice.thebiogrid.org","thebiogrid.org"], "tries": 6, "timeout_total": 45.0, "connect": 10.0, "backoff_base": 1.0, "backoff_cap": 6.0, "budget": 120.0},
+    {"hosts": ["dgidb.org","www.dgidb.org","api.dgidb.org"], "tries": 5, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 5.0, "budget": 120.0},
+    {"hosts": ["api.clinicaltrials.gov"], "tries": 5, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.7, "backoff_cap": 5.0, "budget": 120.0},
+    {"hosts": ["api.patentsview.org"], "tries": 5, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.7, "backoff_cap": 5.0, "budget": 120.0},
+]
+
+def _select_profile(url: str):
+    try:
+        u = urlparse(url)
+        host = (u.netloc or "").lower()
+        path = (u.path or "").lower()
+        for prof in PROFILE_OVERRIDES:
+            for h in prof.get("hosts", []):
+                if fnmatch(host, h):
+                    pcs = prof.get("path_contains")
+                    if not pcs or any(pc in path for pc in pcs):
+                        return prof
+        return None
+    except Exception:
+        return None
 BACKOFF_BASE_S: float = float(os.getenv("BACKOFF_BASE_S", "0.6"))
 OUTBOUND_MAX_CONCURRENCY: int = int(os.getenv("OUTBOUND_MAX_CONCURRENCY", "3"))
 REQUEST_BUDGET_S: float = float(os.getenv("REQUEST_BUDGET_S", "90.0"))
@@ -212,22 +246,29 @@ REQUEST_BUDGET_S: float = float(os.getenv("REQUEST_BUDGET_S", "90.0"))
 _semaphore = asyncio.Semaphore(OUTBOUND_MAX_CONCURRENCY)
 
 async def _get_json(url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None) -> Any:
+    # Per-URL retry/backoff/timeout overrides
+    prof = _select_profile(url)
+    tries_local = int(prof.get("tries", tries)) if prof else tries
+    timeout_local = httpx.Timeout(float(prof.get("timeout_total", os.getenv("OUTBOUND_TIMEOUT_S", "12.0"))), connect=float(prof.get("connect", 6.0))) if prof else DEFAULT_TIMEOUT
+    budget_local = float(prof.get("budget", REQUEST_BUDGET_S)) if prof else REQUEST_BUDGET_S
+    backoff_base_local = float(prof.get("backoff_base", BACKOFF_BASE_S)) if prof else BACKOFF_BASE_S
+    backoff_cap_local = float(prof.get("backoff_cap", 3.0)) if prof else 3.0
     cached = CACHE.get(url)
     if cached and (_now() - cached.get("timestamp", 0) < CACHE_TTL):
         return cached["data"]
     last_err: Optional[Exception] = None
     t0 = _now()
     async with _semaphore:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            for attempt in range(1, tries + 1):
-                remaining = REQUEST_BUDGET_S - (_now() - t0)
+        async with httpx.AsyncClient(timeout=timeout_local) as client:
+            for attempt in range(1, tries_local + 1):
+                remaining = budget_local - (_now() - t0)
                 if remaining <= 0: break
                 try:
                     merged = {**DEFAULT_HEADERS, **(headers or {})}
                     resp = await asyncio.wait_for(client.get(url, headers=merged), timeout=remaining)
                     if resp.status_code in (429, 500, 502, 503, 504):
                         last_err = HTTPException(status_code=resp.status_code, detail=resp.text[:500])
-                        backoff = min((2**(attempt-1))*BACKOFF_BASE_S, 3.0) + random.random()*0.25
+                        backoff = min((2**(attempt-1))*backoff_base_local, backoff_cap_local) + random.random()*0.25
                         await asyncio.sleep(backoff); continue
                     resp.raise_for_status()
                     try:
@@ -243,30 +284,37 @@ async def _get_json(url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dic
                     return data
                 except Exception as e:
                     last_err = e
-                    backoff = min((2**(attempt-1))*BACKOFF_BASE_S, 3.0) + random.random()*0.25
+                    backoff = min((2**(attempt-1))*backoff_base_local, backoff_cap_local) + random.random()*0.25
                     await asyncio.sleep(backoff)
     raise HTTPException(status_code=502, detail=f"GET failed for {url}: {last_err}")
 
 async def _post_json(url: str, payload: Any, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None) -> Any:
+    # Per-URL retry/backoff/timeout overrides
+    prof = _select_profile(url)
+    tries_local = int(prof.get("tries", tries)) if prof else tries
+    timeout_local = httpx.Timeout(float(prof.get("timeout_total", os.getenv("OUTBOUND_TIMEOUT_S", "12.0"))), connect=float(prof.get("connect", 6.0))) if prof else DEFAULT_TIMEOUT
+    budget_local = float(prof.get("budget", REQUEST_BUDGET_S)) if prof else REQUEST_BUDGET_S
+    backoff_base_local = float(prof.get("backoff_base", BACKOFF_BASE_S)) if prof else BACKOFF_BASE_S
+    backoff_cap_local = float(prof.get("backoff_cap", 3.0)) if prof else 3.0
     last_err: Optional[Exception] = None
     t0 = _now()
     async with _semaphore:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            for attempt in range(1, tries + 1):
-                remaining = REQUEST_BUDGET_S - (_now() - t0)
+        async with httpx.AsyncClient(timeout=timeout_local) as client:
+            for attempt in range(1, tries_local + 1):
+                remaining = budget_local - (_now() - t0)
                 if remaining <= 0: break
                 try:
                     merged = {**DEFAULT_HEADERS, "Content-Type": "application/json", **(headers or {})}
                     resp = await asyncio.wait_for(client.post(url, headers=merged, json=payload), timeout=remaining)
                     if resp.status_code in (429, 500, 502, 503, 504):
                         last_err = HTTPException(status_code=resp.status_code, detail=resp.text[:500])
-                        backoff = min((2**(attempt-1))*BACKOFF_BASE_S, 3.0) + random.random()*0.25
+                        backoff = min((2**(attempt-1))*backoff_base_local, backoff_cap_local) + random.random()*0.25
                         await asyncio.sleep(backoff); continue
                     resp.raise_for_status()
                     return resp.json()
                 except Exception as e:
                     last_err = e
-                    backoff = min((2**(attempt-1))*BACKOFF_BASE_S, 3.0) + random.random()*0.25
+                    backoff = min((2**(attempt-1))*backoff_base_local, backoff_cap_local) + random.random()*0.25
                     await asyncio.sleep(backoff)
     raise HTTPException(status_code=502, detail=f"POST failed for {url}: {last_err}")
 
@@ -395,7 +443,7 @@ router = APIRouter()
 
 # ---------------------------- Domain label helpers ----------------------------
 @router.get("/synth/domain/{domain_id}/label")
-async def synth_domain_label(domain_id: str = Query(..., description="1..6 or D1..D6")):
+async def synth_domain_label(domain_id: str = Path(..., description="1..6 or D1..D6")):
     key = domain_id if domain_id in DOMAIN_LABELS else domain_id.upper()
     if key not in DOMAIN_LABELS:
         raise HTTPException(status_code=404, detail=f"Unknown domain: {domain_id}")
@@ -403,7 +451,9 @@ async def synth_domain_label(domain_id: str = Query(..., description="1..6 or D1
 
 # Internal: call our own mounted endpoints via ASGI (no external hop)
 async def _self_get(path: str, params: dict) -> dict:
-    import httpx, asyncio
+    import httpx
+from urllib.parse import urlparse
+from fnmatch import fnmatch, asyncio
     # Ensure path begins with '/'
     if not path.startswith('/'):
         path = '/' + path
