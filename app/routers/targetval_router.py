@@ -126,7 +126,7 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
 import httpx
 from urllib.parse import urlparse
 from fnmatch import fnmatch
-from fastapi import APIRouter, HTTPException, Query, Body, Path
+from fastapi import APIRouter, HTTPException, Query, Body, Path as PathParam
 
 # ----------------------- Domain naming & registry (authoritative) -----------------------
 DOMAIN_LABELS = {
@@ -208,11 +208,11 @@ DEFAULT_HEADERS: Dict[str, str] = {
 }
 OUTBOUND_TRIES: int = int(os.getenv("OUTBOUND_TRIES", "5"))
 
-# Per-source retry/backoff/timeout overrides (reliability-first)
+# ------------------------ Per-source reliability profiles ---------------------
 PROFILE_OVERRIDES = [
     {"hosts": ["api.platform.opentargets.org","api.opentargets.io"], "tries": 6, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 5.0, "budget": 120.0},
     {"hosts": ["europepmc.org","www.ebi.ac.uk"], "path_contains": ["/europepmc","/europepmc/webservices"], "tries": 6, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 5.0, "budget": 120.0},
-    {"hosts": ["string-db.org","string-db.org"], "tries": 6, "timeout_total": 45.0, "connect": 10.0, "backoff_base": 1.0, "backoff_cap": 6.0, "budget": 120.0},
+    {"hosts": ["string-db.org"], "tries": 6, "timeout_total": 45.0, "connect": 10.0, "backoff_base": 1.0, "backoff_cap": 6.0, "budget": 120.0},
     {"hosts": ["gwas.mrcieu.ac.uk"], "tries": 6, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 5.0, "budget": 120.0},
     {"hosts": ["phenoscanner.medschl.cam.ac.uk","www.phenoscanner.medschl.cam.ac.uk"], "tries": 6, "timeout_total": 40.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 5.0, "budget": 120.0},
     {"hosts": ["eutils.ncbi.nlm.nih.gov","www.ncbi.nlm.nih.gov"], "tries": 6, "timeout_total": 45.0, "connect": 10.0, "backoff_base": 0.8, "backoff_cap": 6.0, "budget": 120.0},
@@ -246,7 +246,6 @@ REQUEST_BUDGET_S: float = float(os.getenv("REQUEST_BUDGET_S", "90.0"))
 _semaphore = asyncio.Semaphore(OUTBOUND_MAX_CONCURRENCY)
 
 async def _get_json(url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None) -> Any:
-    # Per-URL retry/backoff/timeout overrides
     prof = _select_profile(url)
     tries_local = int(prof.get("tries", tries)) if prof else tries
     timeout_local = httpx.Timeout(float(prof.get("timeout_total", os.getenv("OUTBOUND_TIMEOUT_S", "12.0"))), connect=float(prof.get("connect", 6.0))) if prof else DEFAULT_TIMEOUT
@@ -289,7 +288,6 @@ async def _get_json(url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dic
     raise HTTPException(status_code=502, detail=f"GET failed for {url}: {last_err}")
 
 async def _post_json(url: str, payload: Any, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None) -> Any:
-    # Per-URL retry/backoff/timeout overrides
     prof = _select_profile(url)
     tries_local = int(prof.get("tries", tries)) if prof else tries
     timeout_local = httpx.Timeout(float(prof.get("timeout_total", os.getenv("OUTBOUND_TIMEOUT_S", "12.0"))), connect=float(prof.get("connect", 6.0))) if prof else DEFAULT_TIMEOUT
@@ -443,24 +441,24 @@ router = APIRouter()
 
 # ---------------------------- Domain label helpers ----------------------------
 @router.get("/synth/domain/{domain_id}/label")
-async def synth_domain_label(domain_id: str = Path(..., description="1..6 or D1..D6")):
+async def synth_domain_label(domain_id: str = PathParam(..., description="1..6 or D1..D6")):
     key = domain_id if domain_id in DOMAIN_LABELS else domain_id.upper()
     if key not in DOMAIN_LABELS:
         raise HTTPException(status_code=404, detail=f"Unknown domain: {domain_id}")
     return {"domain_id": key, "label": DOMAIN_LABELS[key]}
 
 # Internal: call our own mounted endpoints via ASGI (no external hop)
+
 async def _self_get(path: str, params: dict) -> dict:
-    import httpx
-from urllib.parse import urlparse
-from fnmatch import fnmatch, asyncio
-    # Ensure path begins with '/'
+    import httpx, asyncio
     if not path.startswith('/'):
         path = '/' + path
-    # This router is mounted under some prefix by main (usually '/v1'); however we can call the raw path
-    # because FastAPI resolves router paths relative to app root here.
-    async with httpx.AsyncClient(app=app, base_url="http://router.internal") as client:  # 'app' is defined below in most files; fallback handled
-        resp = await client.get(path, params={k:v for k,v in params.items() if v is not None}, headers={"Accept": "application/json"})
+    async with httpx.AsyncClient(app=app, base_url="http://router.internal") as client:
+        resp = await client.get(
+            path,
+            params={k: v for k, v in (params or {}).items() if v is not None},
+            headers={"Accept": "application/json"}
+        )
         resp.raise_for_status()
         return resp.json()
 
