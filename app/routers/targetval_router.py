@@ -204,10 +204,10 @@ DEFAULT_HEADERS: Dict[str, str] = {
     "User-Agent": os.getenv("OUTBOUND_USER_AGENT", "TargetVal/2.0 (+https://github.com/aureten/Targetval-gateway)"),
     "Accept": "application/json",
 }
-OUTBOUND_TRIES: int = int(os.getenv("OUTBOUND_TRIES", "2"))
-BACKOFF_BASE_S: float = float(os.getenv("BACKOFF_BASE_S", "0.35"))
-OUTBOUND_MAX_CONCURRENCY: int = int(os.getenv("OUTBOUND_MAX_CONCURRENCY", "8"))
-REQUEST_BUDGET_S: float = float(os.getenv("REQUEST_BUDGET_S", "25.0"))
+OUTBOUND_TRIES: int = int(os.getenv("OUTBOUND_TRIES", "5"))
+BACKOFF_BASE_S: float = float(os.getenv("BACKOFF_BASE_S", "0.6"))
+OUTBOUND_MAX_CONCURRENCY: int = int(os.getenv("OUTBOUND_MAX_CONCURRENCY", "3"))
+REQUEST_BUDGET_S: float = float(os.getenv("REQUEST_BUDGET_S", "90.0"))
 
 _semaphore = asyncio.Semaphore(OUTBOUND_MAX_CONCURRENCY)
 
@@ -337,18 +337,18 @@ MODULES: List[Module] = [
     Module(route="/assoc/sc", name="assoc-sc", sources=["HCA Azul APIs","Single-Cell Expression Atlas API","CELLxGENE Discover API"], bucket="Expression, selectivity & cell-state context"),
     Module(route="/assoc/spatial", name="assoc-spatial", sources=["Europe PMC API"], bucket="Expression, selectivity & cell-state context"),
     Module(route="/sc/hubmap", name="sc-hubmap", sources=["HuBMAP Search API","HCA Azul APIs"], bucket="Expression, selectivity & cell-state context"),
-    Module(route="/assoc/proteomics", name="assoc-proteomics", sources=["ProteomicsDB API","PRIDE Archive API","PDC (CPTAC) GraphQL"], bucket="ASSOCIATION"),
+    Module(route="/assoc/proteomics", name="assoc-proteomics", sources=["ProteomicsDB API","PRIDE Archive API","PDC (CPTAC) GraphQL"], bucket="Functional & mechanistic validation"),
     Module(route="/assoc/metabolomics", name="assoc-metabolomics", sources=["MetaboLights API","Metabolomics Workbench API"], bucket="Functional & mechanistic validation"),
     Module(route="/assoc/hpa-pathology", name="assoc-hpa-pathology", sources=["Europe PMC API"], bucket="Expression, selectivity & cell-state context"),
     Module(route="/assoc/perturb", name="assoc-perturb", sources=["LINCS LDP APIs","CLUE.io API","PubChem PUG-REST"], bucket="Functional & mechanistic validation"),
-    Module(route="/genetics/l2g", name="genetics-l2g", sources=["OpenTargets GraphQL (L2G)","GWAS Catalog REST API"], bucket="GENETIC_CAUSALITY"),
-    Module(route="/genetics/coloc", name="genetics-coloc", sources=["OpenTargets GraphQL (colocalisations)","eQTL Catalogue API","OpenGWAS API"], bucket="GENETIC_CAUSALITY"),
+    Module(route="/genetics/l2g", name="genetics-l2g", sources=["OpenTargets GraphQL (L2G)","GWAS Catalog REST API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/coloc", name="genetics-coloc", sources=["OpenTargets GraphQL (colocalisations)","eQTL Catalogue API","OpenGWAS API"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/mr", name="genetics-mr", sources=["IEU OpenGWAS API","PhenoScanner v2 API"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/rare", name="genetics-rare", sources=["ClinVar via NCBI E-utilities","MyVariant.info","Ensembl VEP REST"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/mendelian", name="genetics-mendelian", sources=["ClinGen GeneGraph/GraphQL"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/phewas-human-knockout", name="genetics-phewas-human-knockout", sources=["PhenoScanner v2 API","OpenGWAS PheWAS","HPO/Monarch APIs"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/sqtl", name="genetics-sqtl", sources=["GTEx sQTL API","eQTL Catalogue API"], bucket="Genetic causality & human validation"),
-    Module(route="/genetics/pqtl", name="genetics-pqtl", sources=["OpenTargets GraphQL (pQTL colocs)","OpenGWAS (protein traits)"], bucket="GENETIC_CAUSALITY"),
+    Module(route="/genetics/pqtl", name="genetics-pqtl", sources=["OpenTargets GraphQL (pQTL colocs)","OpenGWAS (protein traits)"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/chromatin-contacts", name="genetics-chromatin-contacts", sources=["ENCODE REST API","UCSC Genome Browser track APIs","4D Nucleome API"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/3d-maps", name="genetics-3d-maps", sources=["4D Nucleome API","UCSC loop/interaction tracks"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/regulatory", name="genetics-regulatory", sources=["ENCODE REST API","eQTL Catalogue API"], bucket="Genetic causality & human validation"),
@@ -363,7 +363,7 @@ MODULES: List[Module] = [
     Module(route="/mech/structure", name="mech-structure", sources=["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API"], bucket="Druggability & modality tractability"),
     Module(route="/mech/ppi", name="mech-ppi", sources=["STRING API","IntAct via PSICQUIC","OmniPath API"], bucket="Functional & mechanistic validation"),
     Module(route="/mech/pathways", name="mech-pathways", sources=["Reactome Content/Analysis APIs","Pathway Commons API","SIGNOR API","QuickGO API"], bucket="Functional & mechanistic validation"),
-    Module(route="/mech/ligrec", name="mech-ligrec", sources=["OmniPath (ligand–receptor)","IUPHAR/Guide to Pharmacology API","Reactome interactors"], bucket="MECHANISM"),
+    Module(route="/mech/ligrec", name="mech-ligrec", sources=["OmniPath (ligand–receptor)","IUPHAR/Guide to Pharmacology API","Reactome interactors"], bucket="Functional & mechanistic validation"),
     Module(route="/biology/causal-pathways", name="biology-causal-pathways", sources=["SIGNOR API","Reactome Analysis Service","Pathway Commons API"], bucket="Functional & mechanistic validation"),
     Module(route="/tract/drugs", name="tract-drugs", sources=["ChEMBL API","DGIdb GraphQL","DrugCentral API","BindingDB API","PubChem PUG-REST","STITCH API","Pharos GraphQL"], bucket="Druggability & modality tractability"),
     Module(route="/tract/ligandability-sm", name="tract-ligandability-sm", sources=["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API","BindingDB API"], bucket="Druggability & modality tractability"),
@@ -371,13 +371,13 @@ MODULES: List[Module] = [
     Module(route="/tract/ligandability-oligo", name="tract-ligandability-oligo", sources=["Ensembl VEP REST","RNAcentral API","Europe PMC API"], bucket="Druggability & modality tractability"),
     Module(route="/tract/modality", name="tract-modality", sources=["UniProtKB API","AlphaFold DB API","Pharos GraphQL","IUPHAR/Guide to Pharmacology API"], bucket="Druggability & modality tractability"),
     Module(route="/tract/immunogenicity", name="tract-immunogenicity", sources=["IEDB IQ-API","IPD-IMGT/HLA API","Europe PMC API"], bucket="Therapeutic index & safety translation"),
-    Module(route="/tract/mhc-binding", name="tract-mhc-binding", sources=["IEDB Tools API (prediction)","IPD-IMGT/HLA API"], bucket="TRACTABILITY"),
+    Module(route="/tract/mhc-binding", name="tract-mhc-binding", sources=["IEDB Tools API (prediction)","IPD-IMGT/HLA API"], bucket="Druggability & modality tractability"),
     Module(route="/tract/iedb-epitopes", name="tract-iedb-epitopes", sources=["IEDB IQ-API","IEDB Tools API"], bucket="Therapeutic index & safety translation"),
     Module(route="/tract/surfaceome", name="tract-surfaceome", sources=["UniProtKB API","GlyGen API"], bucket="Expression, selectivity & cell-state context"),
     Module(route="/function/dependency", name="function-dependency", sources=["DepMap API","BioGRID ORCS REST"], bucket="Therapeutic index & safety translation"),
     Module(route="/immuno/hla-coverage", name="immuno/hla-coverage", sources=["IEDB population coverage/Tools API","IPD-IMGT/HLA API"], bucket="Therapeutic index & safety translation"),
     Module(route="/clin/endpoints", name="clin-endpoints", sources=["ClinicalTrials.gov v2 API","WHO ICTRP web service"], bucket="Clinical & translational evidence"),
-    Module(route="/clin/biomarker-fit", name="clin-biomarker-fit", sources=["OpenTargets GraphQL (evidence)","PharmGKB API","HPO/Monarch APIs"], bucket="CLINICAL_FIT"),
+    Module(route="/clin/biomarker-fit", name="clin-biomarker-fit", sources=["OpenTargets GraphQL (evidence)","PharmGKB API","HPO/Monarch APIs"], bucket="Clinical & translational evidence"),
     Module(route="/clin/pipeline", name="clin-pipeline", sources=["Inxight Drugs API","ChEMBL API","DrugCentral API"], bucket="Clinical & translational evidence"),
     Module(route="/clin/safety", name="clin-safety", sources=["openFDA FAERS API","DrugCentral API","CTDbase API","DGIdb GraphQL","IMPC API"], bucket="Therapeutic index & safety translation"),
     Module(route="/clin/rwe", name="clin-rwe", sources=["openFDA FAERS API"], bucket="Therapeutic index & safety translation"),
@@ -615,14 +615,14 @@ async def assoc_sc(symbol: Optional[str] = Query(None), gene: Optional[str] = Qu
     hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="HCA Azul, Tabula Sapiens (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/assoc/spatial-expression", response_model=Evidence)
+@router.get("/assoc/spatial-expression", response_model=Evidence)
 async def assoc_spatial_expression(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} spatial transcriptomics OR MERFISH OR Visium OR Xenium"
     hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/assoc/spatial-neighborhoods", response_model=Evidence)
+@router.get("/assoc/spatial-neighborhoods", response_model=Evidence)
 async def assoc_spatial_neighborhoods(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} neighborhood OR ligand-receptor OR cell-cell communication OR NicheNet"
@@ -643,14 +643,14 @@ async def assoc_bulk_prot(symbol: Optional[str] = Query(None), gene: Optional[st
         pass
     return Evidence(status="OK", source="ProteomicsDB, PRIDE, ProteomeXchange", fetched_n=len(entries), data={"entries": entries}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/assoc/omics-phosphoproteomics", response_model=Evidence)
+@router.get("/assoc/omics-phosphoproteomics", response_model=Evidence)
 async def assoc_omics_phosphoproteomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} phosphoproteomics OR phosphorylation site"
     hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="PRIDE (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/assoc/omics-metabolites", response_model=Evidence)
+@router.get("/assoc/omics-metabolites", response_model=Evidence)
 async def assoc_omics_metabolites(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} metabolomics OR metabolite OR HMDB OR Nightingale"
@@ -678,21 +678,21 @@ async def assoc_hpa_pathology(symbol: Optional[str] = Query(None), gene: Optiona
     n = len(data.get("hpa") or [])
     return Evidence(status="OK", source="Human Protein Atlas (HPA), UniProtKB", fetched_n=n, data=data, citations=cites, fetched_at=_now())
 
-@router.get("/retired/assoc/bulk-prot-pdc", response_model=Evidence)
+@router.get("/assoc/bulk-prot-pdc", response_model=Evidence)
 async def assoc_bulk_prot_pdc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} CPTAC proteomics"
     hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="PDC GraphQL (CPTAC) (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/assoc/metabolomics-ukb-nightingale", response_model=Evidence)
+@router.get("/assoc/metabolomics-ukb-nightingale", response_model=Evidence)
 async def assoc_metabolomics_ukb_nightingale(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} Nightingale biomarker"
     hits, cites = await _epmc_search(q, size=30)
     return Evidence(status="OK", source="Nightingale Biomarker Atlas", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/sc/bican", response_model=Evidence)
+@router.get("/sc/bican", response_model=Evidence)
 async def sc_bican(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     link = "https://biccn.org"
@@ -820,12 +820,12 @@ async def genetics_pathogenicity_priors(symbol: Optional[str] = Query(None), gen
     hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/genetics/finngen-summary", response_model=Evidence)
+@router.get("/genetics/finngen-summary", response_model=Evidence)
 async def genetics_finngen_summary(condition: Optional[str] = None) -> Evidence:
     portal = "https://r8.finngen.fi"
     return Evidence(status="OK", source="FinnGen", fetched_n=0, data={"condition": condition, "portal": portal}, citations=[portal], fetched_at=_now())
 
-@router.get("/retired/genetics/gbmi-summary", response_model=Evidence)
+@router.get("/genetics/gbmi-summary", response_model=Evidence)
 async def genetics_gbmi_summary(condition: Optional[str] = None) -> Evidence:
     portal = "https://globalbiobankmeta.org"
     return Evidence(status="OK", source="GBMI portal", fetched_n=0, data={"condition": condition, "portal": portal}, citations=[portal], fetched_at=_now())
@@ -875,7 +875,7 @@ async def assoc_perturb(symbol: Optional[str] = Query(None), gene: Optional[str]
     hits, cites = await _epmc_search(q, size=100)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/assoc/perturbatlas", response_model=Evidence)
+@router.get("/assoc/perturbatlas", response_model=Evidence)
 async def assoc_perturbatlas(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} PerturbAtlas OUP perturb-seq"
@@ -981,7 +981,7 @@ async def tract_iedb_epitopes(symbol: Optional[str] = Query(None), gene: Optiona
     hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="IEDB IQ-API, Europe PMC (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/tract/surfaceome-hpa", response_model=Evidence)
+@router.get("/tract/surfaceome-hpa", response_model=Evidence)
 async def tract_surfaceome_hpa(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     url = ("https://www.proteinatlas.org/api/search_download.php"
@@ -989,7 +989,7 @@ async def tract_surfaceome_hpa(symbol: Optional[str] = Query(None), gene: Option
     out = await _get_json(url, tries=2)
     return Evidence(status="OK", source="Human Protein Atlas (HPA)", fetched_n=len(out or []), data={"hpa": out}, citations=[url], fetched_at=_now())
 
-@router.get("/retired/tract/tsca", response_model=Evidence)
+@router.get("/tract/tsca", response_model=Evidence)
 async def tract_tsca(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} Cancer Surfaceome Atlas"
@@ -1047,7 +1047,7 @@ async def clin_safety(symbol: Optional[str] = Query(None), gene: Optional[str] =
             faers = {}
     return Evidence(status="OK", source="openFDA FAERS, DGIdb", fetched_n=len(faers.get("results") or []), data={"drugs": drugs, "faers": faers}, citations=cites, fetched_at=_now())
 
-@router.get("/retired/clin/safety-pgx", response_model=Evidence)
+@router.get("/clin/safety-pgx", response_model=Evidence)
 async def clin_safety_pgx(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} pharmacogenomics site:pharmgkb.org"
@@ -1090,7 +1090,7 @@ async def comp_freedom(symbol: Optional[str] = Query(None), gene: Optional[str] 
     data = await _get_json(url, tries=1)
     return Evidence(status="OK", source="PatentsView", fetched_n=len((data or {}).get('patents') or []), data=data, citations=[url], fetched_at=_now())
 
-@router.get("/retired/clin/eu-ctr-linkouts", response_model=Evidence)
+@router.get("/clin/eu-ctr-linkouts", response_model=Evidence)
 async def clin_eu_ctr_linkouts(condition: Optional[str] = None) -> Evidence:
     link = "https://www.clinicaltrialsregister.eu/ctr-search/search"
     return Evidence(status="OK", source="EU CTR/CTIS", fetched_n=0, data={"condition": condition, "linkouts": True}, citations=[link], fetched_at=_now())
@@ -63366,15 +63366,15 @@ except Exception as _e:
 # ---------- Added modules to reach 64 per Targetval Config (2025-10-17) ----------
 try:
     MODULES += [
-        Module(route="/perturb/qc", name="perturb-qc (internal)", sources=["(internal only)"], bucket="MECHANISM"),
-        Module(route="/perturb/scrna-summary", name="perturb-scrna-summary (internal)", sources=["(internal only)"], bucket="MECHANISM"),
-        Module(route="/perturb/lincs-signatures", name="perturb-lincs-signatures", sources=["LINCS Data Portal (LDP3) Signature API","iLINCS API"], bucket="ASSOCIATION"),
+        Module(route="/perturb/qc", name="perturb-qc (internal)", sources=["(internal only)"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/scrna-summary", name="perturb-scrna-summary (internal)", sources=["(internal only)"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/lincs-signatures", name="perturb-lincs-signatures", sources=["LINCS Data Portal (LDP3) Signature API","iLINCS API"], bucket="Functional & mechanistic validation"),
         Module(route="/perturb/connectivity", name="perturb-connectivity", sources=["iLINCS API","LDP3 Data API"], bucket="Functional & mechanistic validation"),
         Module(route="/perturb/perturbseq", name="perturb-perturbseq-encode", sources=["ENCODE REST API","EBI ENA"], bucket="Functional & mechanistic validation"),
         Module(route="/perturb/crispr-screens", name="perturb-crispr-screens", sources=["BioGRID ORCS REST"], bucket="Functional & mechanistic validation"),
         Module(route="/perturb/depmap-dependency", name="perturb-depmap-dependency", sources=["Broad DepMap Portal/figshare","Sanger Cell Model Passports JSON:API"], bucket="Therapeutic index & safety translation"),
         Module(route="/perturb/drug-response", name="perturb-drug-response", sources=["PharmacoDB API","NCI-60 CellMiner API"], bucket="Druggability & modality tractability"),
-        Module(route="/perturb/signature-enrichment", name="perturb-signature-enrichment", sources=["iLINCS API","LINCS Data Portal (LDP3)"], bucket="ASSOCIATION"),
+        Module(route="/perturb/signature-enrichment", name="perturb-signature-enrichment", sources=["iLINCS API","LINCS Data Portal (LDP3)"], bucket="Functional & mechanistic validation"),
     ]
 except Exception:
     pass
@@ -63619,6 +63619,28 @@ async def perturb_signature_enrichment(up: str = Query(..., description="comma-s
                     fetched_at=_now())
 
 
+
+from collections import OrderedDict
+class LruTtlCache:
+    def __init__(self, maxsize=2048, ttl=24*60*60):
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._data = OrderedDict()
+    def get(self, key):
+        now = time.time()
+        if key in self._data:
+            ts, value = self._data.pop(key)
+            if now - ts < self.ttl:
+                self._data[key] = (ts, value)
+                return value
+        return None
+    def set(self, key, value):
+        now = time.time()
+        if key in self._data:
+            self._data.pop(key)
+        elif len(self._data) >= self.maxsize:
+            self._data.popitem(last=False)
+        self._data[key] = (now, value)
 from fastapi import FastAPI
 app = FastAPI(title="TargetVal Router (embedded)")
 app.include_router(router)
