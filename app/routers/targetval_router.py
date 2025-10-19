@@ -126,7 +126,7 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
 import httpx
 from urllib.parse import urlparse
 from fnmatch import fnmatch
-from fastapi import APIRouter, HTTPException, Query, Body, Path as PathParam
+from fastapi import APIRouter, HTTPException, Query, Body, Path as PathParam, Request
 
 # ----------------------- Domain naming & registry (authoritative) -----------------------
 DOMAIN_LABELS = {
@@ -448,6 +448,25 @@ async def synth_domain_label(domain_id: str = PathParam(..., description="1..6 o
     return {"domain_id": key, "label": DOMAIN_LABELS[key]}
 
 # Internal: call our own mounted endpoints via ASGI (no external hop)
+
+
+# -- helper: resilient internal call (uses request.app) --
+async def _internal_get(request, path: str, params: dict) -> dict:
+    import httpx
+    if not path.startswith('/'):
+        path = '/' + path
+    async with httpx.AsyncClient(app=request.app, base_url="http://internal") as client:
+        r = await client.get(path, params={k: v for k,v in (params or {}).items() if v is not None})
+        if r.status_code == 404 and not path.startswith("/v1/"):
+            r = await client.get("/v1" + path, params={k: v for k,v in (params or {}).items() if v is not None})
+        r.raise_for_status()
+        return r.json()
+
+async def _module_evidence(request, key: str, params: dict) -> dict | None:
+    try:
+        return await _internal_get(request, f"/module/{key}", params)
+    except Exception:
+        return None
 
 async def _self_get(path: str, params: dict) -> dict:
     import httpx, asyncio
@@ -1369,9 +1388,23 @@ class TargetGraph(BaseModel):
     fetched_at: str = Field(default_factory=_iso)
 
 @router.post("/synth/targetcard", response_model=TargetCard)
-async def synth_targetcard(gene: str = Body(...), condition: Optional[str] = Body(None), bucket_payloads: Dict[str, Dict[str, Any]] = Body(default_factory=dict)) -> TargetCard:
+async def synth_targetcard(
+    gene: str = Body(...),
+    condition: Optional[str] = Body(None),
+    bucket_payloads: Dict[str, Dict[str, Any]] = Body(default_factory=dict),
+    request: Request = None
+) -> TargetCard:
+    if not bucket_payloads:
+        bucket_payloads = {}
+        for b in ["GENETIC_CAUSALITY", "ASSOCIATION", "TRACTABILITY"]:
+            try:
+                bn = await synth_bucket_get(name=b, gene=gene, condition=condition, mode="live", request=request)
+                bucket_payloads[b] = {"module_outputs": getattr(bn, "module_outputs", {}) if hasattr(bn, "module_outputs") else {},
+                                      "lit_summary": getattr(bn, "lit_summary", {}) if hasattr(bn, "lit_summary") else {}}
+            except Exception:
+                bucket_payloads[b] = {"module_outputs": {}, "lit_summary": {}}
     bucket_narratives: Dict[str, BucketNarrative] = {}
-    for b in BUCKETS:
+    for b in ["GENETIC_CAUSALITY", "ASSOCIATION", "TRACTABILITY"]:
         payload = bucket_payloads.get(b) or {}
         bn = await synth_bucket(BucketSynthRequest(
             gene=gene, condition=condition, bucket=b,
@@ -1381,7 +1414,6 @@ async def synth_targetcard(gene: str = Body(...), condition: Optional[str] = Bod
         bucket_narratives[b] = bn
     reg = {"modules": len(MODULES), "by_bucket": {b: sum(1 for m in MODULES if m.bucket==b) for b in BUCKETS}}
     return TargetCard(target=gene, disease=condition, bucket_summaries=bucket_narratives, registry_snapshot=reg)
-
 @router.post("/synth/graph", response_model=TargetGraph)
 async def synth_graph(gene: str = Body(...), condition: Optional[str] = Body(None), bucket_payloads: Dict[str, Dict[str, Any]] = Body(default_factory=dict)) -> TargetGraph:
     nodes: Dict[str, Dict[str, Any]] = {}
@@ -1429,82 +1461,90 @@ async def assoc_cptac(symbol: Optional[str] = Body(None), gene: Optional[str] = 
     return await assoc_bulk_prot_pdc(symbol=symbol, gene=gene)
 
 @router.get("/synth/bucket", response_model=BucketNarrative)
-async def synth_bucket_get(gene: str, bucket: str, condition: Optional[str] = None):
-    return await synth_bucket(BucketSynthRequest(gene=gene, condition=condition, bucket=bucket, module_outputs={}, lit_summary={}))
-
-# ------------------------ Extended knowledge (inflate file; used for QA) -----
-# These large blocks are meaningful for future synonym-aware expansion and available via /debug/extended-size
-
-extended_tissues = [
-    "adipose tissue","adrenal gland","appendix","bone marrow","breast","bronchus","cerebellum","cerebral cortex",
-    "colon","duodenum","endometrium","epididymis","esophagus","fallopian tube","gallbladder","heart muscle","hippocampus",
-    "kidney","liver","lung","lymph node","ovary","pancreas","placenta","prostate","rectum","salivary gland","skeletal muscle",
-    "skin","small intestine","smooth muscle","spleen","stomach","testis","thyroid gland","tonsil","urinary bladder"
-] * 6
-
-extended_celltypes = [
-    "neuronal","glutamatergic neuron","gabaergic neuron","dopaminergic neuron","cholinergic neuron","serotonergic neuron",
-    "microglia","astrocyte","oligodendrocyte","opc","endothelial cell","pericyte","fibroblast","smooth muscle cell","cardiomyocyte",
-    "hepatocyte","cholangiocyte","kupffer cell","stellate cell","alpha cell","beta cell","delta cell","acinar cell","ductal cell",
-    "enterocyte","goblet cell","paneth cell","tuft cell","colonocyte","pneumocyte type I","pneumocyte type II","alveolar macrophage",
-    "monocyte","dendritic cell","plasmacytoid dendritic cell","naive b cell","memory b cell","plasmablast","nk cell","cd4 t cell",
-    "cd8 t cell","treg","th1 cell","th2 cell","th17 cell","megakaryocyte","erythroblast","hematopoietic stem cell",
-] * 8
-
-extended_pathways = [
-    "NF-kB signaling","JAK-STAT signaling","TGF-beta signaling","PI3K-AKT-mTOR signaling","MAPK signaling","Apoptosis","Autophagy",
-    "WNT signaling","NOTCH signaling","HIPPO signaling","GPCR signaling","Integrin signaling","Calcium signaling","cAMP signaling",
-    "Oxidative phosphorylation","Glycolysis","Fatty acid oxidation","Urea cycle","DNA damage response","Spliceosome","Proteasome",
-    "Ubiquitination","Endocytosis","Exocytosis","ER stress response","Unfolded protein response","Lysosome","Peroxisome",
-    "Innate immune signaling","Adaptive immune signaling","TCR signaling","BCR signaling","Complement cascade","Coagulation",
-    "Angiogenesis","EMT","Cell cycle","Senescence","Hypoxia response","mTORC1 signaling","p53 pathway","KRAS signaling","MYC targets"
-] * 8
-
-def _mk_aliases(base_term: str, k: int = 10) -> List[str]:
-    aliases = set()
-    base = base_term.lower()
-    aliases.add(base); aliases.add(base.replace(" ","_")); aliases.add(base.replace(" ","-")); aliases.add(base.replace(" ",""))
-    aliases.add(base.upper())
-    if "disease" in base: aliases.add(base.replace(" disease","")); aliases.add(base.replace(" disease","")+"'s disease")
-    if "cancer" in base: aliases.add(base.replace(" cancer"," carcinoma")); aliases.add(base.replace(" carcinoma"," cancer"))
-    for suf in ["", " (human)", " (Homo sapiens)"]:
-        aliases.add(base+suf)
-    while len(aliases) < k:
-        aliases.add(base + " alias" + str(len(aliases)))
-    return sorted(list(aliases))
-
-extended_diseases = [
-    "coronary artery disease","type 2 diabetes","type 1 diabetes","alzheimer disease","parkinson disease","multiple sclerosis",
-    "inflammatory bowel disease","ulcerative colitis","crohn disease","asthma","copd","psoriasis","rheumatoid arthritis",
-    "systemic lupus erythematosus","atrial fibrillation","heart failure","hypertension","nonalcoholic fatty liver disease",
-    "nonalcoholic steatohepatitis","hepatocellular carcinoma","breast cancer","prostate cancer","colorectal cancer","pancreatic cancer",
-    "ovarian cancer","endometrial cancer","renal cell carcinoma","glioblastoma","acute myeloid leukemia","acute lymphoblastic leukemia",
-    "chronic lymphocytic leukemia","multiple myeloma","myelodysplastic syndrome","myelofibrosis","polycythemia vera","essential thrombocythemia",
-    "schizophrenia","bipolar disorder","major depressive disorder","autism spectrum disorder","obesity","huntington disease","covid-19",
-    "cystic fibrosis","duchenne muscular dystrophy","spinal muscular atrophy","thyroid cancer","head and neck squamous cell carcinoma",
-    "bladder cancer","gastric cancer","esophageal cancer"
-]
-
-# Build a large YAML-like extended block (for QA and to keep file self-contained)
-def _build_extended_yaml(mult: int = 12) -> str:
-    lines: List[str] = []
-    lines.append("extended_knowledge:")
-    lines.append("  tissues:")
-    for t in extended_tissues: lines.append(f"    - {t}")
-    lines.append("  celltypes:")
-    for c in extended_celltypes: lines.append(f"    - {c}")
-    lines.append("  pathways:")
-    for p in extended_pathways: lines.append(f"    - {p}")
-    lines.append("  diseases:")
-    for d in extended_diseases:
-        lines.append(f"    - name: {d}"); lines.append("      aliases:")
-        for a in _mk_aliases(d, k=10): lines.append(f"        - {a}")
-    block = "\\n".join(lines)
-    parts = [f"# ---- block {i+1} ----\\n{block}" for i in range(mult)]
-    return "\\n".join(parts)
-
-EXTENDED_KNOWLEDGE_YAML = _build_extended_yaml(mult=64)
-
+async def synth_bucket_get(
+    name: str = Query(..., alias="name"),
+    gene: Optional[str] = Query(None, description="Alias of 'symbol'."),
+    symbol: Optional[str] = Query(None),
+    efo: Optional[str] = Query(None),
+    condition: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=1000),
+    mode: Optional[str] = Query("auto", pattern="^(auto|live|snapshot)$"),
+    request: Request = None,
+) -> BucketNarrative:
+    bucket = name.upper().replace(" ", "_")
+    sym = symbol or gene
+    module_outputs: Dict[str, Any] = {}
+    if mode in ("auto", "live"):
+        params = dict(symbol=sym, gene=None, condition=condition, efo=efo, limit=limit, offset=0, strict=False)
+        if bucket == "GENETIC_CAUSALITY":
+            keys = ["genetics-coloc","genetics-mr","genetics-rare","genetics-sqtl","genetics-pqtl","genetics-ase"]
+            for k in keys:
+                ev = await _module_evidence(request, k, params)
+                if ev and ev.get("status") in ("OK","NO_DATA"):
+                    module_outputs[k.replace("-","_")] = {
+                        "support": 1.0 if (ev.get("status")== "OK" and (ev.get("fetched_n") or 0) > 0) else 0.0,
+                        "tissues": (ev.get("data") or {}).get("tissues") or [],
+                        "pathways": (ev.get("data") or {}).get("pathways") or [],
+                        "raw": ev,
+                    }
+            try:
+                ca = await _internal_get(request, "/genetics/caqtl-lite", {"symbol": sym, "condition": condition, "limit": limit})
+                module_outputs["genetics_caqtl_lite"] = {
+                    "support": 1.0 if ca and ca.get("status")=="OK" and (ca.get("fetched_n") or 0)>0 else 0.0,
+                    "tissues": (ca or {}).get("data", {}).get("tissues") or [],
+                    "pathways": [],
+                    "raw": ca,
+                }
+            except Exception:
+                pass
+        elif bucket == "ASSOCIATION":
+            for k in ["assoc-sc","assoc-bulk-rna","assoc-proteomics"]:
+                ev = await _module_evidence(request, k, params)
+                if ev and ev.get("status") in ("OK","NO_DATA"):
+                    module_outputs[k.replace("-","_")] = {
+                        "support": 1.0 if (ev.get("status")== "OK" and (ev.get("fetched_n") or 0) > 0) else 0.0,
+                        "tissues": (ev.get("data") or {}).get("tissues") or [],
+                        "pathways": (ev.get("data") or {}).get("pathways") or [],
+                        'raw': ev,
+                    }
+        elif bucket == "TRACTABILITY":
+            for k in ["tract-druggable-proteome","tract-binding-sites","tract-kinase-tractability","tract-iedb-epitopes","tract-mhc-binding"]:
+                ev = await _module_evidence(request, k, params)
+                if ev and ev.get("status") in ("OK","NO_DATA"):
+                    module_outputs[k.replace("-","_")] = {
+                        "support": 1.0 if (ev.get("status")== "OK" and (ev.get("fetched_n") or 0) > 0) else 0.0,
+                        "tissues": (ev.get("data") or {}).get("tissues") or [],
+                        "pathways": (ev.get("data") or {}).get("pathways") or [],
+                        "raw": ev,
+                    }
+            try:
+                ptm = await _internal_get(request, "/genetics/ptm-signal-lite", {"symbol": sym, "limit": limit})
+                module_outputs["genetics_ptm_signal_lite"] = {
+                    "support": 1.0 if ptm and ptm.get("status")=="OK" and (ptm.get("fetched_n") or 0)>0 else 0.0,
+                    "tissues": [],
+                    "pathways": [],
+                    "raw": ptm,
+                }
+            except Exception:
+                pass
+            try:
+                pep = await _internal_get(request, "/immuno/peptidome-pride", {"symbol": sym, "limit": limit})
+                module_outputs["immuno_peptidome_pride"] = {
+                    "support": 1.0 if pep and pep.get("status")=="OK" and (pep.get("fetched_n") or 0)>0 else 0.0,
+                    "tissues": [],
+                    "pathways": [],
+                    "raw": pep,
+                }
+            except Exception:
+                pass
+    lit_summary: Dict[str, Any] = {}
+    if mode in ("auto","live"):
+        try:
+            q = await _internal_get(request, "/lit/search", {"symbol": sym, "condition": condition, "window_days": 1825, "page_size": 40})
+            lit_summary = (q or {}).get("data") or {}
+        except Exception:
+            pass
+    return await synth_bucket(BucketSynthRequest(gene=sym, condition=condition, bucket=bucket, module_outputs=module_outputs, lit_summary=lit_summary))
 @router.get("/debug/extended-size")
 def debug_extended_size() -> Dict[str, Any]:
     return {"extended_yaml_bytes": len(EXTENDED_KNOWLEDGE_YAML)}
