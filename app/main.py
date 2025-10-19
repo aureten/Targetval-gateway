@@ -1,3 +1,4 @@
+
 # app/main.py
 from __future__ import annotations
 
@@ -5,11 +6,14 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Literal
 
 import httpx
-from fastapi import Body, FastAPI, HTTPException, Path, Query
+from fastapi import Body, FastAPI, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # ------------------------------------------------------------------------------
@@ -27,10 +31,13 @@ log = logging.getLogger("targetval.main")
 # Import your router implementation
 # ------------------------------------------------------------------------------
 try:
+    try:
+    from app.routers import targetval_router_full as _router_mod
+except Exception:
     from app.routers import targetval_router as _router_mod
 except Exception as e:
-    # Fail fast — without the primary router, there is no API.
-    log.error(f"Failed to import app.routers.targetval_router: {e}")
+    # Fail fast â without the primary router, there is no API.
+    log.critical("Failed to import app.routers.targetval_router", exc_info=True)
     raise
 
 tv_router = _router_mod.router
@@ -41,11 +48,13 @@ ROUTER_DOMAIN_MODULES = getattr(_router_mod, "DOMAIN_MODULES", None)
 # ------------------------------------------------------------------------------
 # App metadata / env
 # ------------------------------------------------------------------------------
-APP_TITLE = os.getenv("APP_TITLE", "TargetVal Gateway (Actions Surface) — Full")
+APP_TITLE = os.getenv("APP_TITLE", "TargetVal Gateway (Actions Surface) â Full")
 APP_VERSION = os.getenv("APP_VERSION", "2025.10")
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 DOCS_URL = os.getenv("DOCS_URL", "/docs")
 OPENAPI_URL = os.getenv("OPENAPI_URL", "/openapi.json")
+AGGREGATE_MAX_CONCURRENCY = int(os.getenv("AGGREGATE_MAX_CONCURRENCY", "8"))
+SELF_TIMEOUT_S = float(os.getenv("SELF_TIMEOUT_S", "60.0"))
 
 # ------------------------------------------------------------------------------
 # FastAPI app
@@ -61,17 +70,34 @@ app = FastAPI(
 # CORS (default permissive; tighten in prod with CORS_ALLOW_ORIGINS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
+    allow_origins=[o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["x-request-id", "x-served-by"],
 )
 
-# Mount the full router under /v1 (this carries all 64 modules)
+# Minimal request-id middleware for traceability in logs and client correlation
+class _RequestIDMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        rid = request.headers.get("x-request-id") or f"rv-{int(time.time()*1000)}-{os.getpid()}"
+        try:
+            response = await call_next(request)
+        except Exception:
+            # Ensure a JSON error with the request id
+            log.exception("Unhandled exception")
+            return JSONResponse({"ok": False, "error": "internal", "x_request_id": rid}, status_code=500)
+        response.headers["x-request-id"] = rid
+        response.headers["x-served-by"] = "targetval-gateway"
+        return response
+
+app.add_middleware(_RequestIDMiddleware)
+
+# Mount the full router under /v1 (this carries all 64 modules and synth)
 app.include_router(tv_router, prefix="/v1")
 
 # ------------------------------------------------------------------------------
-# Schemas for wrapper endpoints
+# Schemas for wrapper endpoints (stable outward surface)
 # ------------------------------------------------------------------------------
 class Evidence(BaseModel):
     status: str
@@ -102,7 +128,8 @@ class AggregateRequest(BaseModel):
     modules: Optional[List[str]] = None
     domain: Optional[str] = Field(None, description="Accepts 'D1'..'D6' or '1'..'6'.")
     primary_only: bool = True
-    order: str = Field("sequential", pattern="^(sequential|parallel)$")
+    # Use Literal for PyDantic v1/v2 compatibility (avoid Field(pattern=...))
+    order: Literal["sequential", "parallel"] = "sequential"
     continue_on_error: bool = True
     limit: int = Field(100, ge=1, le=1000)
     offset: int = Field(0, ge=0)
@@ -154,29 +181,52 @@ def _domain_modules() -> Dict[str, List[str]]:
     # Fallback to empty lists if not exported by router
     return {str(i): [] for i in range(1, 7)} | {f"D{i}": [] for i in range(1, 7)}
 
-# ------------------------------------------------------------------------------
-# Internals
-# ------------------------------------------------------------------------------
-def _module_map() -> Dict[str, str]:
+# Cache on app.state for fast lookups
+def _build_module_map() -> Dict[str, str]:
     """
-    Build {module_key -> route_path} from router.MODULES
+    Build {module_key (lower) -> route_path} from router.MODULES
+    (lowercased for case-insensitive lookup)
     """
     mapping: Dict[str, str] = {}
     try:
         for m in (MODULES or []):
+            # support both .name and .key
             name = getattr(m, "name", None) or getattr(m, "key", None)
             route = getattr(m, "route", None)
             if name and route:
-                mapping[str(name)] = str(route)
+                mapping[str(name).lower()] = str(route)
     except Exception:
-        pass
+        log.exception("Failed to read MODULES registry from router")
     return mapping
 
+def _resolve_module_key(name: str, mm: Dict[str, str]) -> Optional[str]:
+    """Return the canonical key as present in MODULES given an input 'name' (case-insensitive)."""
+    if not name:
+        return None
+    lname = name.strip().lower()
+    if lname in mm:
+        # return the original canonical key (not lower) if we can find it
+        for m in (MODULES or []):
+            key = getattr(m, "name", None) or getattr(m, "key", None)
+            if key and key.lower() == lname:
+                return str(key)
+        return lname  # fallback
+    # try friendly alias: replace underscores with hyphens, spaces -> hyphens
+    alias = lname.replace("_", "-").replace(" ", "-")
+    if alias in mm:
+        for m in (MODULES or []):
+            key = getattr(m, "name", None) or getattr(m, "key", None)
+            if key and key.lower() == alias:
+                return str(key)
+    return None
+
 async def _self_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """ASGI-internal GET; no outbound network hop."""
     if not path.startswith("/"):
         path = "/" + path
-    # ASGI-internal call; no outbound network hop
-    async with httpx.AsyncClient(app=app, base_url="http://internal") as client:
+    timeout = httpx.Timeout(connect=10.0, read=SELF_TIMEOUT_S, write=SELF_TIMEOUT_S, pool=5.0)
+    limits = httpx.Limits(max_connections=20, max_keepalive_connections=20)
+    async with httpx.AsyncClient(app=app, base_url="http://internal", timeout=timeout, limits=limits) as client:
         r = await client.get("/v1" + path, params={k: v for k, v in (params or {}).items() if v is not None})
         r.raise_for_status()
         return r.json()
@@ -194,12 +244,15 @@ async def livez():
 
 @app.get("/readyz")
 async def readyz():
+    mm = app.state.module_map if hasattr(app.state, "module_map") else _build_module_map()
     return {
         "ok": True,
         "env": {
             "CACHE_TTL_SECONDS": os.getenv("CACHE_TTL_SECONDS"),
             "REQUEST_BUDGET_S": os.getenv("REQUEST_BUDGET_S"),
+            "AGGREGATE_MAX_CONCURRENCY": AGGREGATE_MAX_CONCURRENCY,
         },
+        "registry": {"module_count": len(mm)},
     }
 
 # ------------------------------------------------------------------------------
@@ -207,9 +260,15 @@ async def readyz():
 # ------------------------------------------------------------------------------
 @app.get("/modules")
 async def list_modules() -> List[str]:
-    mm = _module_map()
+    mm = app.state.module_map if hasattr(app.state, "module_map") else _build_module_map()
     if mm:
-        return sorted(mm.keys())
+        # recover original canonical keys
+        out: List[str] = []
+        for m in (MODULES or []):
+            key = getattr(m, "name", None) or getattr(m, "key", None)
+            if key:
+                out.append(str(key))
+        return sorted(set(out))
     # Fallback (union of domain lists)
     seen: Dict[str, int] = {}
     for _, mods in _domain_modules().items():
@@ -241,9 +300,20 @@ async def run_module_get(
     offset: int = Query(0, ge=0),
     strict: bool = False,
 ):
-    mm = _module_map()
-    if name not in mm:
-        raise HTTPException(status_code=404, detail=f"Unknown module: {name}")
+    mm = app.state.module_map if hasattr(app.state, "module_map") else _build_module_map()
+    canonical = _resolve_module_key(name, mm)
+    if not canonical:
+        # show helpful suggestion if a close key exists
+        hint = ""
+        try:
+            # naive hint: show the first 5 keys that contain the token
+            token = (name or "").strip().lower().replace("_", "-")
+            matches = [k for k in mm.keys() if token and token in k]
+            if matches:
+                hint = f" Did you mean one of: {', '.join(matches[:5])}?"
+        except Exception:
+            pass
+        raise HTTPException(status_code=404, detail=f"Unknown module: {name}.{hint}")
     params = dict(
         symbol=symbol or gene,
         ensembl_id=ensembl_id,
@@ -257,14 +327,14 @@ async def run_module_get(
         offset=offset,
         strict=strict,
     )
-    return await _self_get(mm[name], params)  # type: ignore[return-value]
+    return await _self_get(mm[canonical.lower()], params)  # type: ignore[return-value]
 
 @app.post("/module", response_model=Evidence)
 async def run_module_post(body: ModuleRunRequest) -> Any:
-    mm = _module_map()
-    key = body.module_key
-    if key not in mm:
-        raise HTTPException(status_code=404, detail=f"Unknown module: {key}")
+    mm = app.state.module_map if hasattr(app.state, "module_map") else _build_module_map()
+    canonical = _resolve_module_key(body.module_key, mm)
+    if not canonical:
+        raise HTTPException(status_code=404, detail=f"Unknown module: {body.module_key}")
     params = dict(
         symbol=body.symbol or body.gene,
         ensembl_id=body.ensembl_id,
@@ -278,22 +348,28 @@ async def run_module_post(body: ModuleRunRequest) -> Any:
         offset=body.offset,
         strict=body.strict,
     )
-    return await _self_get(mm[key], params)  # type: ignore[return-value]
+    return await _self_get(mm[canonical.lower()], params)  # type: ignore[return-value]
 
 @app.post("/aggregate")
 async def aggregate_modules(req: AggregateRequest):
-    mm = _module_map()
+    mm = app.state.module_map if hasattr(app.state, "module_map") else _build_module_map()
     dmap = _domain_modules()
 
     # Resolve modules
     modules: List[str] = []
     if req.modules:
-        modules = [m for m in req.modules if m in mm]
+        modules = []
+        for m in req.modules:
+            canon = _resolve_module_key(m, mm)
+            if canon:
+                modules.append(canon)
     elif req.domain:
         key = req.domain.strip().upper()
-        modules = [m for m in dmap.get(key, []) if m in mm]
+        modules = [m for m in dmap.get(key, []) if (_resolve_module_key(m, mm) is not None)]
     else:
-        modules = sorted(mm.keys())
+        # conservative default: run the explicit registry order if available
+        modules = [getattr(m, "name", None) or getattr(m, "key", None) for m in (MODULES or [])]
+        modules = [str(m) for m in modules if m]
 
     if not modules:
         raise HTTPException(status_code=400, detail="No modules resolved from request")
@@ -316,7 +392,8 @@ async def aggregate_modules(req: AggregateRequest):
 
     async def _run_one(k: str):
         try:
-            results[k] = await _self_get(mm[k], params)
+            route = mm[_resolve_module_key(k, mm).lower()]  # type: ignore
+            results[k] = await _self_get(route, params)
         except Exception as e:
             if req.continue_on_error:
                 errors[k] = str(e)
@@ -324,7 +401,7 @@ async def aggregate_modules(req: AggregateRequest):
                 raise
 
     if req.order == "parallel":
-        sem = asyncio.Semaphore(int(os.getenv("AGGREGATE_MAX_CONCURRENCY", "8")))
+        sem = asyncio.Semaphore(AGGREGATE_MAX_CONCURRENCY)
         async def _guarded(k: str):
             async with sem:
                 await _run_one(k)
@@ -343,6 +420,9 @@ async def run_domain(
     req = body or DomainRunRequest()
     dmap = _domain_modules()
     mods = dmap.get(str(domain_id), [])
+    if not mods:
+        # Warn but return an empty aggregate (consistent shape)
+        log.warning("Domain %s has no modules in mapping; returning empty aggregate", domain_id)
     agg = AggregateRequest(
         modules=mods,
         domain=str(domain_id),
@@ -367,7 +447,18 @@ async def run_domain(
 
 @app.get("/", include_in_schema=False)
 async def root():
-    return {"ok": True, "service": APP_TITLE, "docs": "/docs", "api": "/v1"}
+    return {"ok": True, "service": APP_TITLE, "docs": "/docs", "api_prefix": "/v1"}
+
+# ------------------------------------------------------------------------------
+# Startup checks â compute module map once and warn if registry looks odd
+# ------------------------------------------------------------------------------
+@app.on_event("startup")
+async def _startup_checks():
+    app.state.module_map = _build_module_map()
+    if not app.state.module_map:
+        log.warning("MODULES registry is empty; /modules will fall back to domain lists.")
+    else:
+        log.info("Loaded MODULES registry: %d keys", len(app.state.module_map))
 
 if __name__ == "__main__":
     import uvicorn
