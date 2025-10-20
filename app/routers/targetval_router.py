@@ -1,5 +1,86 @@
 
 # router.py — Advanced (64 modules) with live fetch (approach aligned to router-revised.py)
+
+# -------------- Live genetics helpers (OpenTargets + OpenGWAS) --------------
+from typing import Optional
+import urllib, urllib.parse
+
+_OT_GQL = "https://api.platform.opentargets.org/api/v4/graphql"
+_ENS_XREF = "https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{symbol}?content-type=application/json"
+_IEU_BASE = "https://gwas-api.mrcieu.ac.uk/"
+
+async def _httpx_json_post(url: str, payload: dict, timeout: float = 45.0):
+    # Prefer existing _post_json (budgeted/retry); fallback to raw httpx
+    try:
+        return await _post_json(url, json=payload, timeout=timeout)  # type: ignore
+    except Exception:
+        import httpx, asyncio
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+                    r = await client.post(url, json=payload)
+                    r.raise_for_status()
+                    return r.json()
+            except Exception:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(1.5 * (attempt + 1))
+
+async def _httpx_json_get(url: str, timeout: float = 45.0):
+    try:
+        return await _get_json(url, timeout=timeout)  # type: ignore
+    except Exception:
+        import httpx, asyncio
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+                    r = await client.get(url)
+                    r.raise_for_status()
+                    if "application/json" in (r.headers.get("content-type","").lower()):
+                        return r.json()
+                    return None
+            except Exception:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(1.5 * (attempt + 1))
+    return None
+
+async def _efo_lookup(condition: Optional[str]) -> Optional[str]:
+    """Free-text disease -> EFO via OpenTargets GraphQL search."""
+    if not condition:
+        return None
+    q = """
+    query($q:String!){
+      search(query:$q){ diseases{ id name score } }
+    }"""
+    js = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"q": condition}})
+    try:
+        diseases = (((js or {}).get("data") or {}).get("search") or {}).get("diseases") or []
+        diseases.sort(key=lambda d: d.get("score", 0) or 0, reverse=True)
+        return diseases[0]["id"] if diseases else None
+    except Exception:
+        return None
+
+async def _ensg_from_symbol(symbol: Optional[str]) -> Optional[str]:
+    """Approved symbol -> Ensembl gene ID via Ensembl REST, fallback to your symbol normalizer."""
+    if not symbol:
+        return None
+    try:
+        xs = await _httpx_json_get(_ENS_XREF.format(symbol=symbol))
+        if isinstance(xs, list):
+            for x in xs:
+                if x.get("type") == "gene" and str(x.get("id","")).startswith("ENSG"):
+                    return x["id"]
+    except Exception:
+        pass
+    try:
+        s = await _normalize_symbol(symbol)  # type: ignore
+        if s and str(s).upper().startswith("ENSG"):
+            return str(s).upper()
+    except Exception:
+        pass
+    return None
+# ---------------------------------------------------------------------------
 """
 TARGETVAL Gateway — Router (Advanced, full registry)
 
@@ -841,34 +922,90 @@ async def sc_hubmap(symbol: Optional[str] = Query(None), gene: Optional[str] = Q
 # ------------------------ Endpoints: GENETIC CAUSALITY ------------------------
 
 @router.get("/genetics/l2g", response_model=Evidence)
-async def genetics_l2g(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
+async def genetics_l2g(symbol: Optional[str] = Query(None),
+                       gene: Optional[str] = Query(None),
+                       condition: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    # Minimal GQL ping (public)
-    gql = "https://api.platform.opentargets.org/api/v4/graphql"
+    ensg = await _ensg_from_symbol(sym) or sym
+    efo  = await _efo_lookup(condition)
+    cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
+    if not (ensg and efo):
+        return Evidence(status="NO_DATA", source="OpenTargets",
+                        fetched_n=0,
+                        data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
+                        citations=cites, fetched_at=_now())
     q = """
-    query Target($q:String!){ target(ensemblIdOrName:$q){ id approvedSymbol } }"""
-    payload = {"query": q, "variables": {"q": sym}}
-    try:
-        js = await _post_json(gql, payload, tries=1)
-        return Evidence(status="OK", source="OpenTargets GraphQL (L2G)", fetched_n=1, data=js or {}, citations=[gql], fetched_at=_now())
-    except Exception:
-        q2 = f"{sym} OpenTargets L2G"
-        hits, cites = await _epmc_search(q2, size=20)
-        return Evidence(status="OK", source="OpenTargets GraphQL (L2G) (fallback via literature)", fetched_n=len(hits), data={"query": q2, "hits": hits}, citations=cites, fetched_at=_now())
+    query($ensg:String!, $efo:String!){
+      target(ensemblId:$ensg){ id approvedSymbol }
+      disease(efoId:$efo){ id name }
+      associationByEntity(targetId:$ensg, diseaseId:$efo){
+        overallScore
+        datasourceScores{ id score }
+      }
+    }"""
+    js = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    assoc = (((js or {}).get("data") or {}).get("associationByEntity") or {})
+    if not assoc:
+        return Evidence(status="NO_DATA", source="OpenTargets", fetched_n=0,
+                        data={"ensg": ensg, "efo": efo},
+                        citations=cites, fetched_at=_now())
+    return Evidence(status="OK", source="OpenTargets", fetched_n=1,
+                    data={"ensg": ensg, "efo": efo, **assoc},
+                    citations=cites, fetched_at=_now())
+
 
 @router.get("/genetics/coloc", response_model=Evidence)
-async def genetics_coloc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
+async def genetics_coloc(symbol: Optional[str] = Query(None),
+                         gene: Optional[str] = Query(None),
+                         condition: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} {condition or ''} colocalization OR colocalisation pQTL eQTL"
-    hits, cites = await _epmc_search(q, size=60)
-    return Evidence(status="OK", source="OpenTargets GraphQL (colocalisations) (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    ensg = await _ensg_from_symbol(sym) or sym
+    efo  = await _efo_lookup(condition)
+    cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
+    if not (ensg and efo):
+        return Evidence(status="NO_DATA", source="OpenTargets",
+                        fetched_n=0,
+                        data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
+                        citations=cites, fetched_at=_now())
+    q = """
+    query($ensg:String!, $efo:String!){
+      associationByEntity(targetId:$ensg, diseaseId:$efo){
+        datasourceScores{ id score }
+      }
+    }"""
+    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
+    coloc_keys = {"ot_genetics_portal","gwas_catalog","uk_biobank","finngen"}
+    coloc = [x for x in dss if (str(x.get("id","")).lower() in coloc_keys) and (x.get("score") or 0) > 0]
+    return Evidence(status=("OK" if coloc else "NO_DATA"), source="OpenTargets",
+                    fetched_n=len(coloc),
+                    data={"ensg": ensg, "efo": efo, "datasourceScores": dss, "coloc_like": coloc},
+                    citations=cites, fetched_at=_now())
+
 
 @router.get("/genetics/mr", response_model=Evidence)
-async def genetics_mr(exposure: Optional[str] = None, outcome: Optional[str] = None, symbol: Optional[str] = None, gene: Optional[str] = None) -> Evidence:
-    sym = await _normalize_symbol(symbol or gene or "")
-    q = f"{sym} {outcome or ''} mendelian randomization"
-    hits, cites = await _epmc_search(q, size=60)
-    return Evidence(status="OK", source="IEU OpenGWAS (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+async def genetics_mr(symbol: Optional[str] = Query(None),
+                      gene: Optional[str] = Query(None),
+                      condition: Optional[str] = Query(None)) -> Evidence:
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    cites = ["https://gwas.mrcieu.ac.uk/", "https://gwas-api.mrcieu.ac.uk/"]
+    if not condition:
+        return Evidence(status="NO_DATA", source="OpenGWAS", fetched_n=0,
+                        data={"note":"missing condition text"}, citations=cites, fetched_at=_now())
+    try:
+        outcomes   = await _httpx_json_get(f"{_IEU_BASE}v1/gwas?q={urllib.parse.quote(condition)}&p=1")
+        n_outcomes = len(outcomes or []) if isinstance(outcomes, list) else 0
+        exposures  = await _httpx_json_get(f"{_IEU_BASE}v1/gwas?q={urllib.parse.quote(sym)}&p=1")
+        n_exposures= len(exposures or []) if isinstance(exposures, list) else 0
+        status = "OK" if (n_outcomes and n_exposures) else "NO_DATA"
+        return Evidence(status=status, source="OpenGWAS",
+                        fetched_n=min(n_outcomes, n_exposures),
+                        data={"outcomes_checked": n_outcomes, "exposures_checked": n_exposures,
+                              "note": "MR-capable datasets detected" if status=="OK" else "insufficient datasets"},
+                        citations=cites, fetched_at=_now())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"OpenGWAS query failed: {e!s}")
+
 
 @router.get("/genetics/rare", response_model=Evidence)
 async def genetics_rare(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -1614,8 +1751,7 @@ def debug_extended_size() -> Dict[str, Any]:
 
 # ------------------------ EOF -------------------------------------------------
 
-# Router knowledge blob moved to external YAML to reduce module size and avoid giant literals.
-# Default filename: router_knowledge.yaml (next to this file). Override with ROUTER_KNOWLEDGE_PATH if desired.
+# ---- external knowledge moved to file (router_knowledge.yaml) ----
 import os as _os
 try:
     _here = _os.path.dirname(__file__)
@@ -1628,6 +1764,7 @@ try:
 except Exception as _e:
     print(f"Warning: failed to load router_knowledge.yaml: {_e}")
     ROUTER_KNOWLEDGE_YAML = ""
+# ------------------------------------------------------------------
 
 # /modules55 deprecated and removed by maxfixed patch.
 # maxfixed: removed stray code from legacy /modules55 block:     try:
@@ -2016,6 +2153,8 @@ from fastapi import FastAPI
 app = FastAPI(title="TargetVal Router (embedded)")
 app.include_router(router)
 
+
+
 @app.on_event("startup")
 async def _maxfixed_startup_assertions():
     # Ensure every module key has a route, and config module_set keys are valid.
@@ -2044,8 +2183,6 @@ async def _maxfixed_startup_assertions():
     except Exception as e:
         # Fail fast so we don't run a partial registry silently
         raise
-
-
 
 @router.get("/domains")
 async def list_domains_router() -> Dict[str, Any]:
@@ -3444,20 +3581,59 @@ async def debug_selftest(symbol: str = Body(...), efo: Optional[str] = Body(None
 
 
 @router.get("/genetics/consortia-summary", response_model=Evidence)
-async def genetics_consortia_summary(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    """
-    Placeholder endpoint. Module registered in registry but route not implemented yet.
-    Returns NO_DATA to avoid 404s in synthesis fan-outs.
-    """
+async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
+                                     gene: Optional[str] = Query(None),
+                                     condition: Optional[str] = Query(None)) -> Evidence:
+    """Summarise consortia evidence via OT datasourceScores for target-disease pair."""
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    return Evidence(status="NO_DATA", source="(not implemented)", fetched_n=0, data={"note": "not implemented"}, citations=[], fetched_at=_now())
+    ensg = await _ensg_from_symbol(sym) or sym
+    efo  = await _efo_lookup(condition)
+    cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
+    if not (ensg and efo):
+        return Evidence(status="NO_DATA", source="OpenTargets",
+                        fetched_n=0, data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
+                        citations=cites, fetched_at=_now())
+    q = """
+    query($ensg:String!, $efo:String!){
+      associationByEntity(targetId:$ensg, diseaseId:$efo){
+        datasourceScores{ id score }
+      }
+    }"""
+    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
+    keys  = {"uk_biobank","finngen","gwas_catalog"}
+    cons  = [x for x in dss if (str(x.get("id","")).lower() in keys) and (x.get("score") or 0) > 0]
+    return Evidence(status=("OK" if cons else "NO_DATA"), source="OpenTargets",
+                    fetched_n=len(cons),
+                    data={"ensg": ensg, "efo": efo, "consortia": cons, "datasourceScores": dss},
+                    citations=cites, fetched_at=_now())
+
 
 
 @router.get("/genetics/mqtl-coloc", response_model=Evidence)
-async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    """
-    Placeholder endpoint. Module registered in registry but route not implemented yet.
-    Returns NO_DATA to avoid 404s in synthesis fan-outs.
-    """
+async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
+                              gene: Optional[str] = Query(None),
+                              condition: Optional[str] = Query(None)) -> Evidence:
+    """Approximate molecular QTL colocalisation presence using OT datasource breakdown (live)."""
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    return Evidence(status="NO_DATA", source="OpenTargets (planned)", fetched_n=0, data={"note": "not implemented"}, citations=[], fetched_at=_now())
+    ensg = await _ensg_from_symbol(sym) or sym
+    efo  = await _efo_lookup(condition)
+    cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
+    if not (ensg and efo):
+        return Evidence(status="NO_DATA", source="OpenTargets",
+                        fetched_n=0, data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
+                        citations=cites, fetched_at=_now())
+    q = """
+    query($ensg:String!, $efo:String!){
+      associationByEntity(targetId:$ensg, diseaseId:$efo){
+        datasourceScores{ id score }
+      }
+    }"""
+    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
+    qtl_like = [x for x in dss if any(s in str(x.get("id","")).lower() for s in ["eqtl","pqtl","molecular","qtl"]) and (x.get("score") or 0) > 0]
+    return Evidence(status=("OK" if qtl_like else "NO_DATA"), source="OpenTargets",
+                    fetched_n=len(qtl_like),
+                    data={"ensg": ensg, "efo": efo, "mqtl_like": qtl_like, "datasourceScores": dss},
+                    citations=cites, fetched_at=_now())
+
