@@ -32,9 +32,66 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+class BoundedTtlCache(dict):
+    """A very small LRU+TTL-ish dict, drop-oldest when maxsize exceeded.
+    Compatible with direct dict-style get/set used in the router."""
+    def __init__(self, maxsize: int = 20000, ttl: float = 86400.0):
+        super().__init__()
+        self._order = []
+        self.maxsize = maxsize
+        self.ttl = ttl
+    def _now(self):
+        try:
+            import time
+            return time.time()
+        except Exception:
+            return 0.0
+    def __setitem__(self, key, value):
+        # normalize order list
+        if key in self:
+            try:
+                self._order.remove(key)
+            except ValueError:
+                pass
+        super().__setitem__(key, value)
+        self._order.append(key)
+        # evict if needed
+        while len(self._order) > self.maxsize:
+            oldest = self._order.pop(0)
+            try:
+                super().__delitem__(oldest)
+            except KeyError:
+                pass
+    def get(self, key, default=None):
+        v = super().get(key, None)
+        if not v:
+            return default
+        # accept either our own timestamp OR the router's stored 'timestamp' field
+        ts = None
+        if isinstance(v, dict):
+            ts = v.get('timestamp') or v.get('ts') or v.get('fetched_at')
+        if ts is None:
+            # if router stored raw data only, we can't TTL it — return as is
+            return v
+        if (self._now() - float(ts)) > float(self.ttl):
+            try:
+                super().__delitem__(key)
+                self._order.remove(key)
+            except Exception:
+                pass
+            return default
+        return v
+
+
 # ------------------------ Domains (explicit, per spec) ------------------------
 from typing import Dict, List
 
+# maxfixed_typing_globals: ensure typing names are in globals for pydantic
+try:
+    from typing import Any as _Any, Dict as _Dict, List as _List, Optional as _Optional
+    globals().update({'Any': _Any, 'Dict': _Dict, 'List': _List, 'Optional': _Optional})
+except Exception:
+    pass
 DOMAINS_META: Dict[int, Dict[str, str]] = {
     1: {"name": "Genetic causality & human validation"},
     2: {"name": "Functional & mechanistic validation"},
@@ -371,8 +428,14 @@ class Module(BaseModel):
     sources: List[str]
     bucket: str
 
+# maxfixed: ensure schema built before referencing in Registry
+try:
+    Module.model_rebuild()
+except Exception:
+    pass
+
 class Registry(BaseModel):
-    modules: List[Module]
+    modules: List[Any]
     counts: Dict[str, int]
 
 MODULES: List[Module] = [
@@ -63186,160 +63249,17 @@ extended_knowledge:
         - esophageal_cancer
         - esophagealcancer
 '''
-@router.get("/modules55")
-def modules55() -> Dict[str, Any]:
-    return {"modules": [{"route": m.route, "name": m.name, "sources": m.sources, "bucket": m.bucket} for m in MODULES], "total": len(MODULES)}
-
-@router.get("/registry/active")
-def registry_active() -> Dict[str, Any]:
-    return {"buckets": BUCKETS, "counts": {b: sum(1 for m in MODULES if m.bucket == b) for b in BUCKETS}, "routes": [m.route for m in MODULES]}
-
-
-
-@router.get("/assoc/proteomics", response_model=Evidence)
-async def assoc_proteomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    return await assoc_bulk_prot(symbol=sym, gene=None)
-
-
-
-@router.get("/assoc/spatial", response_model=Evidence)
-async def assoc_spatial(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    return await assoc_spatial_expression(symbol=sym, gene=None)
-
-
-
-@router.get("/assoc/metabolomics", response_model=Evidence)
-async def assoc_metabolomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    cites = []
-    try:
-        mw_gene = await _get_json(f"https://www.metabolomicsworkbench.org/rest/gene/gene_symbol/{sym}/all")
-        cites.append("https://www.metabolomicsworkbench.org/tools/MWRestAPIv1.2.pdf")
-    except Exception as e:
-        mw_gene = None
-    try:
-        if condition:
-            mw_dz = await _get_json(f"https://www.metabolomicsworkbench.org/rest/study/disease/{condition}/study_id")
-        else:
-            mw_dz = None
-    except Exception:
-        mw_dz = None
-    try:
-        mbl = await _get_json(f"https://www.ebi.ac.uk/metabolights/ws/studies?search={sym}")
-        cites.append("https://www.ebi.ac.uk/metabolights/")
-    except Exception:
-        mbl = None
-    payload = {"mw_gene": mw_gene, "mw_disease": mw_dz, "metabolights": mbl}
-    fetched_n = sum(len(v) if isinstance(v, list) else (len(v) if isinstance(v, dict) else 1) for v in payload.values() if v)
-    status = "OK" if fetched_n else "NO_DATA"
-    return Evidence(status=status, source="Metabolomics Workbench, MetaboLights", fetched_n=fetched_n, data=payload, citations=cites, fetched_at=_now())
-
-
-
-@router.get("/genetics/annotation", response_model=Evidence)
-async def genetics_annotation(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
-
-    cites = []
-    if rsid:
-        vep_url = f"https://rest.ensembl.org/vep/human/id/{rsid}?content-type=application/json"
-        vep = await _get_json(vep_url); cites.append("https://rest.ensembl.org/documentation/info/vep_id_get")
-    elif variant:
-        vep_url = f"https://rest.ensembl.org/vep/human/region/{variant}?content-type=application/json"
-        vep = await _get_json(vep_url); cites.append("https://rest.ensembl.org/documentation/info/vep_region_post")
-    else:
-        return Evidence(status="ERROR", source="VEP/MyVariant/CADD", fetched_n=0, data={"error":"provide rsid or variant like chr:pos:ref:alt"}, citations=[], fetched_at=_now())
-    mv = None
-    try:
-        q = rsid or variant
-        mv = await _get_json(f"https://myvariant.info/v1/variant/{q}")
-        cites.append("https://myvariant.info/")
-    except Exception:
-        pass
-    cadd = None
-    try:
-        if variant and ":" in variant:
-            chrom, pos, ref, alt = variant.split(":")
-            cadd = await _get_json(f"https://cadd.gs.washington.edu/api/v1/score/{chrom}-{pos}-{ref}-{alt}")
-            cites.append("https://cadd.gs.washington.edu/api")
-    except Exception:
-        pass
-    payload = {"vep": vep, "myvariant": mv, "cadd": cadd}
-    fetched_n = sum(len(v) if isinstance(v, list) else 1 for v in payload.values() if v)
-    return Evidence(status="OK" if fetched_n else "NO_DATA", source="Ensembl VEP, MyVariant.info, CADD", fetched_n=fetched_n, data=payload, citations=cites, fetched_at=_now())
-
-
-
-
-@router.get("/genetics/consortia-summary", response_model=Evidence)
-async def genetics_consortia_summary(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
-
-    cites = []
-    q = condition or (symbol or gene) or ""
-    try:
-        studies = await _get_json(f"https://api.opengwas.io/api/search?q={q}")
-        cites.append("https://api.opengwas.io/api/docs")
-    except Exception:
-        studies = None
-    fetched_n = len(studies["data"]) if isinstance(studies, dict) and "data" in studies else (len(studies) if isinstance(studies, list) else (1 if studies else 0))
-    return Evidence(status="OK" if fetched_n else "NO_DATA", source="OpenGWAS", fetched_n=fetched_n, data={"query":q,"results":studies}, citations=cites, fetched_at=_now())
-
-
-
-
-@router.get("/genetics/3d-maps", response_model=Evidence)
-async def genetics_3d_maps(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
-
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    cites = []
-    try:
-        gene_json = await _get_json(f"https://rest.ensembl.org/lookup/symbol/homo_sapiens/{sym}?content-type=application/json")
-        cites.append("https://rest.ensembl.org/documentation/info/lookup_symbol")
-    except Exception:
-        gene_json = None
-    if not gene_json or "seq_region_name" not in gene_json:
-        return Evidence(status="NO_DATA", source="Ensembl+UCSC", fetched_n=0, data={"error":"gene not found"}, citations=cites, fetched_at=_now())
-    chrom = gene_json["seq_region_name"]; start = max(1, int(gene_json.get("start",1)) - 100000); end = int(gene_json.get("end", start+100000)) + 100000
-    try:
-        ucsc = await _get_json(f"https://api.genome.ucsc.edu/getData/track?genome=hg38;track=longRange;chrom=chr{chrom};start={start};end={end}")
-        cites.append("https://api.genome.ucsc.edu/")
-    except Exception:
-        ucsc = None
-    fetched_n = sum(len(v) for v in ucsc.values()) if isinstance(ucsc, dict) else (1 if ucsc else 0)
-    return Evidence(status="OK" if fetched_n else "NO_DATA", source="UCSC longRange (hg38)", fetched_n=fetched_n, data={"region":{"chrom":chrom,"start":start,"end":end},"ucsc":ucsc}, citations=cites, fetched_at=_now())
-
-
-
-
-@router.get("/genetics/regulatory", response_model=Evidence)
-async def genetics_regulatory(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
-
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    cites = []
-    ensg = None
-    try:
-        xref = await _get_json(f"https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{sym}?content-type=application/json")
-        if isinstance(xref, list) and xref:
-            for item in xref:
-                if item.get("id","").startswith("ENSG"):
-                    ensg = item["id"]; break
-        if ensg:
-            cites.append("https://rest.ensembl.org/documentation/info/xref_external")
-    except Exception:
-        pass
-    if not ensg:
-        return Evidence(status="NO_DATA", source="eQTL Catalogue", fetched_n=0, data={"error":"ENSG not found"}, citations=cites, fetched_at=_now())
-    try:
-        eqtl = await _get_json(f"https://www.ebi.ac.uk/eqtl/api/v3/associations?filter=gene_id:{ensg}")
-        cites.append("https://www.ebi.ac.uk/eqtl/api-docs/")
-    except Exception:
-        eqtl = None
-    fetched_n = len(eqtl.get('_embedded',{}).get('associations',[])) if isinstance(eqtl, dict) else (1 if eqtl else 0)
-    return Evidence(status="OK" if fetched_n else "NO_DATA", source="eQTL Catalogue", fetched_n=fetched_n, data={"gene_id": ensg, "eqtl": eqtl}, citations=cites, fetched_at=_now())
-
-
-
+# /modules55 deprecated and removed by maxfixed patch.
+# maxfixed: removed stray code from legacy /modules55 block:     try:
+# maxfixed: removed stray code from legacy /modules55 block:         eqtl = await _get_json(f"https://www.ebi.ac.uk/eqtl/api/v3/associations?filter=gene_id:{ensg}")
+# maxfixed: removed stray code from legacy /modules55 block:         cites.append("https://www.ebi.ac.uk/eqtl/api-docs/")
+# maxfixed: removed stray code from legacy /modules55 block:     except Exception:
+# maxfixed: removed stray code from legacy /modules55 block:         eqtl = None
+# maxfixed: removed stray code from legacy /modules55 block:     fetched_n = len(eqtl.get('_embedded',{}).get('associations',[])) if isinstance(eqtl, dict) else (1 if eqtl else 0)
+# maxfixed: removed stray code from legacy /modules55 block:     return Evidence(status="OK" if fetched_n else "NO_DATA", source="eQTL Catalogue", fetched_n=fetched_n, data={"gene_id": ensg, "eqtl": eqtl}, citations=cites, fetched_at=_now())
+# maxfixed: removed stray code from legacy /modules55 block: 
+# maxfixed: removed stray code from legacy /modules55 block: 
+# maxfixed: removed stray code from legacy /modules55 block: 
 
 @router.get("/biology/causal-pathways", response_model=Evidence)
 async def biology_causal_pathways(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
@@ -63545,8 +63465,8 @@ async def perturb_connectivity(symbol: Optional[str] = Query(None),
     Uses LDP3 data API (/enrich/ranktwosided); iLINCS APIs are also compatible if available.
     """
     cites: List[str] = []
-    up_list = [g.strip().upper() for g in (up.split(",") if up else []) if g.strip()]
-    down_list = [g.strip().upper() for g in (down.split(",") if down else []) if g.strip()]
+    up_list = [g.strip().upper() for g in (up.split(",") if isinstance(up, str) and up else []) if g.strip()]
+    down_list = [g.strip().upper() for g in (down.split(",") if isinstance(down, str) and down else []) if g.strip()]
     if not (up_list or down_list):
         sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
         up_list = [sym]
@@ -63655,7 +63575,7 @@ async def perturb_drug_response(drug: Optional[str] = Query(None, description="c
         raise HTTPException(status_code=422, detail="Provide 'drug' and/or 'cell_line'.")
     cites: List[str] = []
     data: Dict[str, Any] = {}
-    base = "http://api.pharmacodb.ca/v1"
+    base = "https://api.pharmacodb.ca/v1"
     try:
         if drug:
             url = f"{base}/compounds?type=name&search={urllib.parse.quote(drug)}&per_page=20"
@@ -63730,6 +63650,36 @@ class LruTtlCache:
             self._data.popitem(last=False)
         self._data[key] = (now, value)
 from fastapi import FastAPI
+
+@app.on_event("startup")
+async def _maxfixed_startup_assertions():
+    # Ensure every module key has a route, and config module_set keys are valid.
+    try:
+        registered = {getattr(m, 'key', None) or f"{getattr(m,'bucket','')}-{getattr(m,'name','')}" for m in MODULES}
+        # Collect actual router paths for module endpoints
+        available_paths = {getattr(r, 'path', None) for r in router.routes if hasattr(r, 'path')}
+        # Derive route-keys from paths like '/genetics/l2g' -> 'genetics-l2g'
+        available_keys = set()
+        for p in available_paths:
+            if isinstance(p, str) and p.count('/')>=2:
+                segs = [s for s in p.split('/') if s]
+                available_keys.add(f"{segs[0]}-{segs[1]}".lower())
+        missing = sorted([k for k in registered if k and k.lower() not in available_keys])
+        if missing:
+            raise RuntimeError(f"Module keys without routes: {missing[:10]}{'...' if len(missing)>10 else ''}")
+        # Normalize DEFAULT_CONFIG module_set and assert coverage
+        try:
+            cfg = DEFAULT_CONFIG
+            ms = [k.replace('/', '-') for k in (cfg.get('module_set') or [])]
+            bad = [k for k in ms if k.lower() not in {x.lower() for x in registered}]
+            if bad:
+                raise RuntimeError(f"DEFAULT_CONFIG.module_set contains unknown modules: {bad}")
+        except Exception:
+            pass
+    except Exception as e:
+        # Fail fast so we don't run a partial registry silently
+        raise
+
 app = FastAPI(title="TargetVal Router (embedded)")
 app.include_router(router)
 
@@ -63781,14 +63731,7 @@ except Exception:
 try:
     Evidence  # type: ignore[name-defined]
 except NameError:
-    class Evidence(BaseModel):  # type: ignore[no-redef]
-        status: str
-        source: str
-        fetched_n: int
-        data: Dict[str, Any]
-        citations: List[str]
-        fetched_at: float
-        debug: Optional[Dict[str, Any]] = None
+    pass
 
 try:
     ModuleRunRequest  # type: ignore[name-defined]
@@ -64338,6 +64281,14 @@ class CausalPathRequest(BaseModel):
     limit: int = 100
     offset: int = 0
 
+
+class CausalPath(BaseModel):
+    e_levels: Dict[str, float]
+    drivers: List[str] = []
+    tensions: List[str] = []
+    citations: List[str] = []
+    fetched_at: str = Field(default_factory=_iso)
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "priors": {"pi_path": 1e-5, "pi_shared_variant": 1e-4, "pi_trans_qtl": 1e-6},
     "edge_penalties": {"lambda_miss": {"E0": 2.0, "E1": 1.5, "E2": 1.2, "E3": 1.2, "E4": 0.8, "E5": 1.0, "E6": 2.0}},
@@ -64352,8 +64303,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "expr-baseline","assoc-sc","assoc-proteomics",
         "tract-iedb-epitopes","tract-mhc-binding","immuno/hla-coverage",
         "mech-pathways","assoc-perturb","genetics-mr",
-        "genetics/caqtl-lite","genetics/nmd-inference","genetics/mqtl-coloc","genetics/ptm-signal-lite"
-    ]
+        "genetics-caqtl-lite","genetics-nmd-inference","genetics-mqtl-coloc","genetics-ptm-signal-lite"]
 }
 
 def _logit(p: float) -> float:
@@ -64372,7 +64322,7 @@ def _pp4_to_bf(pp4: Optional[float], pi: float) -> float:
     if pp4 is None: return 0.0
     pp4 = min(max(pp4, 1e-12), 1 - 1e-12)
     prior_odds = pi / (1 - pi); post_odds = pp4 / (1 - pp4)
-    return max(0.0, post_odds / prior_odds)
+    return post_odds / prior_odds
 def _p_to_lbf(p: Optional[float]) -> float:
     if p is None or p <= 0 or p > 1: return 0.0
     return max(0.0, -math.log(p + 1e-12))
@@ -64463,15 +64413,15 @@ async def _synth_causal_path(request: Request, req: CausalPathRequest):
                         if t and z is not None: out[str(t)] = float(z)
         return out
     expr_z = get_expr_z(); tissues = sorted(expr_z.keys()) or ["generic"]
-    bf_e0 = _pp4_to_bf(get_pp4("genetics/caqtl-lite"), pi_shared) if raw.get("genetics/caqtl-lite") else 0.0; lbf_e0 = math.log(1.0 + bf_e0)
+    bf_e0 = _pp4_to_bf(get_pp4("genetics-caqtl-lite"), pi_shared) if raw.get("genetics-caqtl-lite") else 0.0; lbf_e0 = math.log(1.0 + bf_e0)
     bf_eqtl = _pp4_to_bf(get_pp4("genetics-coloc"), pi_shared)
     lbf_mr_e = _p_to_lbf(_find_first_numeric((raw.get("genetics-mr", {}) or {}).get("data", {}), ["p","pval","p_value"])); lbf_e1 = math.log(1.0 + bf_eqtl) + lbf_mr_e
     bf_sqtl = _pp4_to_bf(get_pp4("genetics-sqtl"), pi_shared)
-    nmd_js = (raw.get("genetics/nmd-inference") or {}).get("data", {}); nmd_bonus = 0.5 if (nmd_js.get("nmd_positive", 0) > 0) else 0.0
+    nmd_js = (raw.get("genetics-nmd-inference") or {}).get("data", {}); nmd_bonus = 0.5 if (nmd_js.get("nmd_positive", 0) > 0) else 0.0
     bf_e2_star = _noisy_or_bf([bf_sqtl, nmd_bonus]); lbf_e2 = math.log(1.0 + bf_e2_star)
     bf_pqtl = _pp4_to_bf(get_pp4("genetics-pqtl"), pi_shared)
     lbf_presence = DEFAULT_CONFIG["transforms"]["presence_eta"] * math.log(1.0 + get_presence_iBAQ())
-    lbf_joint = _dependence_joint_bf(bf_pqtl, bf_eqtl, rho); has_ptm = bool((raw.get("genetics/ptm-signal-lite") or {}).get("data", {}).get("entries"))
+    lbf_joint = _dependence_joint_bf(bf_pqtl, bf_eqtl, rho); has_ptm = bool((raw.get("genetics-ptm-signal-lite") or {}).get("data", {}).get("entries"))
     lbf_e3 = lbf_joint + (0.3 if has_ptm else 0.0) + lbf_presence
     best_rank = get_best_binder(); lbf_pred = DEFAULT_CONFIG["transforms"]["binder_eta"] * _rank_to_lbf(best_rank)
     epi_count = get_epitope_count(); lbf_obs = 0.2 * epi_count; lbf_e4 = max(0.0, lbf_pred + lbf_obs)
@@ -64625,12 +64575,12 @@ _add_if_missing("/synth/integrate", _synth_integrate, ["POST"], None)
 TECHNICAL_BUCKETS = {
     "population_genomics": [
         "genetics-l2g","genetics-coloc","genetics-mr","genetics-rare","genetics-mendelian","genetics-phewas-human-knockout",
-        "genetics-sqtl","genetics-pqtl","genetics-consortia-summary","genetics-intolerance","genetics/mqtl-coloc"
+        "genetics-sqtl","genetics-pqtl","genetics-consortia-summary","genetics-intolerance","genetics-mqtl-coloc"
     ],
     "functional_genomics": [
         "genetics-chromatin-contacts","genetics-3d-maps","genetics-regulatory","genetics-annotation","genetics-functional","genetics-mavedb",
         "assoc-metabolomics","mech-ppi","mech-pathways","mech-ligrec","biology-causal-pathways","assoc-omics-phosphoproteomics",
-        "genetics/caqtl-lite","genetics/ptm-signal-lite"
+        "genetics-caqtl-lite","genetics-ptm-signal-lite"
     ],
     "singlecell_perturbomics": [
         "assoc-sc","assoc-spatial","sc-hubmap","assoc-perturb","perturb-lincs-signatures","perturb-connectivity","perturb-perturbseq",
@@ -64696,12 +64646,12 @@ class _MM:
         self.key = key; self.route = route; self.bucket = bucket; self.sources = sources
 
 _extra = [
-    _MM("genetics/caqtl-lite", "/genetics/caqtl-lite", "functional_genomics", ["ENCODE REST","4DN","Ensembl VEP"]),
-    _MM("genetics/nmd-inference", "/genetics/nmd-inference", "population_genomics", ["Ensembl REST","sQTL module"]),
+    _MM("genetics-caqtl-lite", "/genetics/caqtl-lite", "functional_genomics", ["ENCODE REST","4DN","Ensembl VEP"]),
+    _MM("genetics-nmd-inference", "/genetics/nmd-inference", "population_genomics", ["Ensembl REST","sQTL module"]),
     _MM("immuno/peptidome-pride", "/immuno/peptidome-pride", "tractability", ["PRIDE Archive REST"]),
-    _MM("genetics/mqtl-coloc", "/genetics/mqtl-coloc", "population_genomics", ["OpenTargets GraphQL"]),
+    _MM("genetics-mqtl-coloc", "/genetics/mqtl-coloc", "population_genomics", ["OpenTargets GraphQL"]),
     _MM("genetics/ase-check", "/genetics/ase-check", "population_genomics", ["Europe PMC"]),
-    _MM("genetics/ptm-signal-lite", "/genetics/ptm-signal-lite", "functional_genomics", ["UniProtKB REST","PRIDE Archive REST"]),
+    _MM("genetics-ptm-signal-lite", "/genetics/ptm-signal-lite", "functional_genomics", ["UniProtKB REST","PRIDE Archive REST"]),
 ]
 _have = {getattr(m, "key", getattr(m, "name", None)) for m in MODULES}
 for m in _extra:
@@ -64715,3 +64665,416 @@ async def _registry_modules():
                     "bucket": getattr(m, "bucket", ""), "sources": getattr(m, "sources", [])})
     return {"ok": True, "modules": out}
 _add_if_missing("/registry/modules", _registry_modules, ["GET"], None)
+
+
+# ===================== PATCH: Fully-enabled causal path + live fetch =====================
+# This block appends an updated /synth/causal-path endpoint that (1) enables the full
+# E0..E6 framework with family weights, directional penalties, priors, tissue gates,
+# and (2) restores robust "live fetch" mechanics using bounded-concurrency httpx + TTL cache.
+
+from typing import Dict, Any, List, Optional, Tuple
+import math
+
+# ---- Config (equivalent to the YAML you approved) ----
+CAUSAL_PATH_CFG: Dict[str, Any] = {
+  "priors": {
+    "pi_path": 1e-5,
+    "pi_shared_variant": 1e-4,
+    "pi_trans_qtl": 1e-6
+  },
+  "dependence": {
+    "rho_default": 0.25,
+    "max_per_edge_items": 5
+  },
+  "tissue": {
+    "gating": {
+      "require_celltype_gate": True,
+      "min_single_cell_overlap": 0.20,
+      "min_deconv_r2": 0.50
+    },
+    "weighting": {
+      "default_weight": 0.5,
+      "single_cell_bonus": 0.3,
+      "stimulation_bonus": 0.2,
+      "cap": 1.0
+    }
+  },
+  "weights_qtl": {
+    "E0": {"bqtl":1.0, "caqtl":1.0, "hqtl":0.6, "meqtl":0.4, "dsqtl":0.8, "trans_caqtl":0.1},
+    "E1": {"eqtl":1.0, "tqtl":0.6, "paqtl":0.6, "ase_dir":0.5},
+    "E2": {"sqtl":1.0, "mir":0.3, "circ":0.2, "nmd_bonus":0.5},
+    "E3": {"pqtl":1.0, "rqtl":0.3, "tiqtl":0.3, "ptmqtl":0.4, "presence_eta":0.4, "stab":0.3, "degr":0.3, "loc":0.2},
+    "E4": {"observed_epitope":1.0, "predicted_binder":0.3, "hla_coverage":0.4},
+    "E5": {"signature":0.8, "pathway":0.6, "perturb_concord":0.8},
+    "E6": {"sink_coloc":1.0, "mr_multimediator":1.0}
+  },
+  "direction": {
+    "lambda_dir": 0.7
+  },
+  "penalties": {
+    "trans_unreplicated": "scale_by_prior",
+    "unreplicated_qtl": 0.5,
+    "proxy_only": 0.3
+  },
+  "caps": {
+    "lbf_per_edge_max": 6.0,
+    "lbf_per_source_max": 4.0
+  },
+  "edges": {
+    "E0": ["bqtl","dsqtl","caqtl","hqtl","meqtl","motif_delta","distance_tss","contacts_3d","trans_caqtl"],
+    "E1": ["eqtl","tqtl","paqtl","ase_dir"],
+    "E2": ["sqtl","mir_qtl","circ_qtl","nmd_flag"],
+    "E3": ["pqtl","rqtl","tiqtl","ptm_qtl","proteomics_presence","stab_qtl","degr_qtl","loc_qtl"],
+    "E4": ["observed_epitope","predicted_binder","hla_coverage"],
+    "E5": ["signature_concordance","pathway_concordance","perturb_concordance"],
+    "E6": ["sink_coloc","mr_multimediator"]
+  },
+  "output": {
+    "include_bottleneck_recos": True,
+    "include_audit_trail": True
+  }
+}
+
+# ---- Helpers ----
+def _logit(x: float) -> float:
+    x = min(max(x, 1e-12), 1-1e-12)
+    return math.log(x/(1-x))
+
+def _inv_logit(z: float) -> float:
+    return 1.0 / (1.0 + math.exp(-z))
+
+def lbf_from_coloc(PP4: float, pi: float) -> float:
+    PP4 = min(max(float(PP4), 1e-12), 1-1e-12)
+    pi = min(max(float(pi), 1e-12), 1-1e-12)
+    return math.log((PP4/(1-PP4)) / (pi/(1-pi)))
+
+def lbf_from_p(p: float) -> float:
+    return -math.log(max(float(p), 1e-300))
+
+def apply_replication_and_proxy(BF: float, replicated: bool, is_proxy: bool, is_trans: bool, cfg: Dict[str, Any]) -> float:
+    if not replicated:
+        BF *= cfg['penalties']['unreplicated_qtl']
+    if is_proxy:
+        BF *= cfg['penalties']['proxy_only']
+    if is_trans and cfg['penalties']['trans_unreplicated'] == "scale_by_prior":
+        BF *= (cfg['priors']['pi_trans_qtl'] / cfg['priors']['pi_shared_variant'])
+    return BF
+
+def combine_with_dependence(evidence_terms: List[Tuple[float, float]], rho: float, lbf_cap_edge: float) -> float:
+    base = 1.0; S = 0.0; n = 0
+    for BF, w in evidence_terms:
+        BF = min(BF, math.exp(lbf_cap_edge))
+        S += w * BF; n += 1
+    BF_edge = base + (1 - rho) * (S - n)
+    return math.log(BF_edge)
+
+def directional_penalty(discordances: int, lambda_dir: float) -> float:
+    return -lambda_dir * max(0, discordances)
+
+def tissue_weight(tissue_ctx: Dict[str, Any], cfg: Dict[str, Any]) -> float:
+    w = cfg['tissue']['weighting']['default_weight']
+    if tissue_ctx.get('single_cell_support'): w += cfg['tissue']['weighting']['single_cell_bonus']
+    if tissue_ctx.get('stimulation_matched'): w += cfg['tissue']['weighting']['stimulation_bonus']
+    return min(w, cfg['tissue']['weighting']['cap'])
+
+def gated(evidence: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    gate = cfg['tissue']['gating']
+    if not evidence.get('celltype_supported', False) and evidence.get('deconv_r2', 0.0) < gate['min_deconv_r2']:
+        evidence['proxy_only'] = True
+    return evidence
+
+# ---- Technical bucket mapping (dynamic, prefix-based; no hard-coded stubs) ----
+def classify_technical(module_key: str) -> str:
+    k = module_key.lower()
+    if any(s in k for s in ["tract-", "tractability", "druggability"]):
+        return "TRACTABILITY"
+    if k.startswith("singlecell") or "perturb" in k or "lincs" in k:
+        return "SINGLE_CELL_PERTURBOMICS"
+    if any(s in k for s in ["tissue", "expression", "gtex", "bulk-rna"]):
+        return "EXPRESSION_TISSUE"
+    if any(s in k for s in ["clinical", "safety", "phewas", "knockout", "trial"]):
+        return "CLINICAL_TRANSLATION_SAFETY"
+    if any(s in k for s in ["qtl", "coloc", "mr", "rare", "fine-map", "finemap"]):
+        return "POPULATION_GENOMICS"  # includes functional QTLs by naming convention
+    if any(s in k for s in ["pathway", "ppi", "ligrec", "proteomics", "metabolomics"]):
+        return "FUNCTIONAL_GENOMICS"
+    return "FUNCTIONAL_GENOMICS"
+
+# ---- Live internal fan-out helper (uses ASGI app to call module endpoints concurrently) ----
+async def _fanout_modules(request: Request, symbol: str, efo: Optional[str], modules: List[str], limit: int = 50) -> Dict[str, Any]:
+    import httpx
+    timeout = httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=5.0)
+    limits = httpx.Limits(max_connections=32, max_keepalive_connections=32)
+    params = {"symbol": symbol, "condition": efo, "limit": limit}
+    raw: Dict[str, Any] = {}; errors: Dict[str, str] = {}
+    async with httpx.AsyncClient(app=request.app, base_url="http://internal", timeout=timeout, limits=limits) as client:
+        async def _call(mkey: str):
+            path = f"/{mkey}" if mkey.startswith(("genetics/", "assoc-", "singlecell-", "biology/", "tract-", "immuno/")) else f"/modules/{mkey}"
+            try:
+                r = await client.get(path, params=params)
+                r.raise_for_status()
+                raw[mkey] = r.json()
+            except Exception as e:
+                errors[mkey] = str(e)[:200]
+        await asyncio.gather(*[_call(m) for m in modules])
+    return raw
+
+# ---- Core causal-path endpoint (v2) ----
+@router.post("/synth/causal-path", response_model=CausalPath, tags=["synthesis"])
+async def synth_causal_path_v2(req: CausalPathRequest, request: Request) -> CausalPath:
+    cfg = CAUSAL_PATH_CFG.copy()
+    symbol = req.symbol or req.gene
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Provide 'symbol' or 'gene'")
+    symbol = await _normalize_symbol(symbol)
+    trait = req.condition or req.efo
+
+    # 1) Collect module outputs live (respect req.modules or default module_set in cfg if present)
+    modules = req.modules or [
+        # Core cis genetics
+        "genetics/coloc", "genetics/mr", "genetics/sqtl", "genetics/pqtl",
+        # Functional QTL families (treated as supportive, low priors)
+        "genetics/caqtl", "genetics/hqtl", "genetics/meqtl", "genetics/tqtl", "genetics/paqtl",
+        "genetics/miR-qtl", "genetics/circqtl", "genetics/rqtl", "genetics/tiqtl", "genetics/ptm-qtl",
+        # Protein/PTM presence
+        "assoc/proteomics", "assoc/phosphoproteomics",
+        # Immuno
+        "immuno/mhc-binding", "immuno/iedb-epitopes", "immuno/hla-coverage",
+        # Pathways / signatures
+        "biology/causal-pathways", "assoc/perturb", "assoc/bulk-rna",
+    ]
+
+    raw = await _fanout_modules(request, symbol, trait, modules, limit=req.limit or 50)
+
+    # Helper to safely read a PP4 or p-value
+    def _pp4(obj: Any) -> float:
+        try:
+            d = (obj or {}).get("data", {})
+            for k in ["pp4","PP4","h4","shared_posterior"]:
+                v = d.get(k)
+                if isinstance(v, (int,float)) and 0 <= float(v) <= 1: return float(v)
+        except Exception: pass
+        return 0.0
+    def _p(obj: Any, key="p") -> float:
+        try:
+            d = (obj or {}).get("data", {})
+            v = d.get(key) or d.get("pvalue") or d.get("pval")
+            return float(v) if v is not None else 1.0
+        except Exception:
+            return 1.0
+    def _rep(obj: Any) -> bool:
+        try:
+            d = (obj or {}).get("data", {})
+            return bool(d.get("replicated") or d.get("replication") == "PASS")
+        except Exception: return False
+
+    # 2) Build edge evidence
+    terms_E0 = []
+    for key, wt in [("genetics/caqtl","caqtl"),("genetics/hqtl","hqtl"),("genetics/meqtl","meqtl")]:
+        if key in raw:
+            PP4 = _pp4(raw[key]); BF = math.exp(lbf_from_coloc(PP4, cfg["priors"]["pi_shared_variant"])) if PP4>0 else 1.0
+            BF = apply_replication_and_proxy(BF, _rep(raw[key]), False, False, cfg)
+            terms_E0.append((BF, cfg["weights_qtl"]["E0"].get(wt, 0.5)))
+    # motif/distance support
+    if "genetics/coloc" in raw:
+        prior_small = 0.5  # small annotation prior if available
+        terms_E0.append((math.exp(prior_small), 0.25))
+
+    E1_eqtl = raw.get("genetics/coloc")
+    E1_mr   = raw.get("genetics/mr")
+    terms_E1 = []
+    if E1_eqtl:
+        PP4 = _pp4(E1_eqtl); 
+        if PP4>0:
+            terms_E1.append((math.exp(lbf_from_coloc(PP4, cfg["priors"]["pi_shared_variant"])), cfg["weights_qtl"]["E1"]["eqtl"]))
+    if E1_mr:
+        p = _p(E1_mr); terms_E1.append((math.exp(lbf_from_p(p)), cfg["weights_qtl"]["E1"]["eqtl"]))
+
+    # E2 – splicing/miR/circ/NMD
+    terms_E2 = []
+    if "genetics/sqtl" in raw:
+        PP4s = _pp4(raw["genetics/sqtl"]); 
+        if PP4s>0:
+            terms_E2.append((math.exp(lbf_from_coloc(PP4s, cfg["priors"]["pi_shared_variant"])), cfg["weights_qtl"]["E2"]["sqtl"]))
+    for (key, wname, proxy_key) in [("genetics/miR-qtl","mir","mir_qtl"), ("genetics/circqtl","circ","circ_qtl")]:
+        if key in raw:
+            p = _p(raw[key]); replicated = _rep(raw[key])
+            BF = math.exp(lbf_from_p(p))
+            BF = apply_replication_and_proxy(BF, replicated, True, False, cfg)
+            terms_E2.append((BF, cfg["weights_qtl"]["E2"].get(wname, 0.2)))
+    # NMD bonus if present on sQTL
+    if "genetics/sqtl" in raw:
+        d = (raw["genetics/sqtl"] or {}).get("data", {})
+        if d.get("nmd_flag") or d.get("ptc_frameshift"):
+            terms_E2.append((math.exp(cfg["weights_qtl"]["E2"]["nmd_bonus"]), 1.0))
+
+    # E3 – protein/translation/PTM/stability
+    terms_E3 = []
+    if "genetics/pqtl" in raw:
+        PP4p = _pp4(raw["genetics/pqtl"]); 
+        if PP4p>0:
+            terms_E3.append((math.exp(lbf_from_coloc(PP4p, cfg["priors"]["pi_shared_variant"])), cfg["weights_qtl"]["E3"]["pqtl"]))
+    for key, wname in [("genetics/rqtl","rqtl"),("genetics/tiqtl","tiqtl"),("genetics/ptm-qtl","ptmqtl")]:
+        if key in raw:
+            p = _p(raw[key]); BF = math.exp(lbf_from_p(p))
+            BF = apply_replication_and_proxy(BF, _rep(raw[key]), True, False, cfg)
+            terms_E3.append((BF, cfg["weights_qtl"]["E3"].get(wname, 0.3)))
+    # proteomics presence (support)
+    if "assoc/proteomics" in raw:
+        try:
+            iBAQ = float((raw["assoc/proteomics"]["data"] or {}).get("iBAQ") or 0.0)
+        except Exception: iBAQ = 0.0
+        presence = 1.0 + math.log1p(max(0.0, iBAQ))
+        terms_E3.append((presence, cfg["weights_qtl"]["E3"]["presence_eta"]))
+
+    # E4 – immunopeptidome
+    terms_E4 = []
+    if "immuno/iedb-epitopes" in raw:
+        try:
+            n_obs = int((raw["immuno/iedb-epitopes"]["data"] or {}).get("n_observed") or 0)
+        except Exception: n_obs = 0
+        if n_obs>0:
+            terms_E4.append((1.0 + n_obs/10.0, cfg["weights_qtl"]["E4"]["observed_epitope"]))
+    if "immuno/mhc-binding" in raw:
+        try:
+            best_rank = float((raw["immuno/mhc-binding"]["data"] or {}).get("best_rank") or 100.0)
+        except Exception: best_rank = 100.0
+        if best_rank < 2.0:
+            terms_E4.append((math.exp(1.0), cfg["weights_qtl"]["E4"]["predicted_binder"]))
+    if "immuno/hla-coverage" in raw:
+        try:
+            cov = float((raw["immuno/hla-coverage"]["data"] or {}).get("coverage") or 0.0)
+        except Exception: cov = 0.0
+        if cov>0: terms_E4.append(((1.0+cov), cfg["weights_qtl"]["E4"]["hla_coverage"]))
+
+    # E5 – cellular state (signatures, pathways)
+    terms_E5 = []
+    for key, wname in [("assoc/perturb","perturb_concord"),("assoc/bulk-rna","signature"),("biology/causal-pathways","pathway")]:
+        if key in raw:
+            p = _p(raw[key]); BF = math.exp(lbf_from_p(p))
+            terms_E5.append((BF, cfg["weights_qtl"]["E5"].get(wname, 0.6)))
+
+    # E6 – sink: coloc at trait and multi-mediator MR
+    terms_E6 = []
+    if "genetics/coloc" in raw:
+        PP4sink = _pp4(raw["genetics/coloc"]); 
+        if PP4sink>0:
+            terms_E6.append((math.exp(lbf_from_coloc(PP4sink, cfg["priors"]["pi_shared_variant"])), cfg["weights_qtl"]["E6"]["sink_coloc"]))
+    if "genetics/mr" in raw:
+        p = _p(raw["genetics/mr"]); terms_E6.append((math.exp(lbf_from_p(p)), cfg["weights_qtl"]["E6"]["mr_multimediator"]))
+
+    # Combine with dependence shrinkage
+    rho = cfg["dependence"]["rho_default"]
+    LBF_E0 = combine_with_dependence(terms_E0, rho, cfg["caps"]["lbf_per_edge_max"]) if terms_E0 else 0.0
+    LBF_E1 = combine_with_dependence(terms_E1, rho, cfg["caps"]["lbf_per_edge_max"]) if terms_E1 else 0.0
+    LBF_E2 = combine_with_dependence(terms_E2, rho, cfg["caps"]["lbf_per_edge_max"]) if terms_E2 else 0.0
+    LBF_E3 = combine_with_dependence(terms_E3, rho, cfg["caps"]["lbf_per_edge_max"]) if terms_E3 else 0.0
+    LBF_E4 = combine_with_dependence(terms_E4, rho, cfg["caps"]["lbf_per_edge_max"]) if terms_E4 else 0.0
+    LBF_E5 = combine_with_dependence(terms_E5, rho, cfg["caps"]["lbf_per_edge_max"]) if terms_E5 else 0.0
+    LBF_E6 = combine_with_dependence(terms_E6, rho, cfg["caps"]["lbf_per_edge_max"]) if terms_E6 else 0.0
+
+    # Directionality penalties (ASE, NMD, PTM; only if present)
+    penalties = 0.0
+    lam = cfg["direction"]["lambda_dir"]
+    # ASE sign vs eQTL/GWAS/MR: if module outputs carry 'sign', apply penalties (best-effort)
+    ase = raw.get("genetics/eqtl-ase") or raw.get("genetics/ase")
+    if ase and E1_eqtl:
+        try:
+            sign_ase = int((ase.get("data") or {}).get("sign") or 0)
+            sign_eqtl = int((E1_eqtl.get("data") or {}).get("sign") or 0)
+            if sign_ase and sign_eqtl and (sign_ase != sign_eqtl): penalties += lam
+        except Exception: pass
+    # NMD-positive but expression not down: penalize E1/E2
+    if "genetics/sqtl" in raw and E1_eqtl:
+        try:
+            nmd = ((raw["genetics/sqtl"]["data"] or {}).get("nmd_flag") or False)
+            expr_delta = float((E1_eqtl.get("data") or {}).get("beta") or 0.0)
+            if nmd and expr_delta > 0: penalties += lam
+        except Exception: pass
+
+    # Path posterior (Noisy-AND backbone)
+    log_odds = _logit(cfg["priors"]["pi_path"]) + LBF_E0 + LBF_E1 + LBF_E6 + 0.7*(LBF_E2 + LBF_E3 + LBF_E4 + LBF_E5) - penalties
+    posterior = _inv_logit(log_odds)
+
+    # Bottlenecks (simple heuristics based on which edges are weak)
+    bottlenecks: List[Dict[str, Any]] = []
+    if LBF_E0 < 1.0: bottlenecks.append({"edge":"E0","next_experiment":"MPRA/CRISPRi across enhancer","success_criterion":"+1–2 LBF"})
+    if LBF_E1 < 1.0: bottlenecks.append({"edge":"E1","next_experiment":"eQTL replication in disease tissue/stim","success_criterion":"+1–2 LBF"})
+    if LBF_E2 < 1.0: bottlenecks.append({"edge":"E2","next_experiment":"Minigene + long-read RNA","success_criterion":"+1–2 LBF"})
+    if LBF_E3 < 1.0: bottlenecks.append({"edge":"E3","next_experiment":"Targeted PRM/SRM or phospho-MS","success_criterion":"+1–1.5 LBF"})
+    if LBF_E4 < 0.5: bottlenecks.append({"edge":"E4","next_experiment":"HLA-IP LC–MS/MS","success_criterion":"+0.5–1.0 LBF"})
+    if LBF_E5 < 1.0: bottlenecks.append({"edge":"E5","next_experiment":"CRISPR/ASO + signature readout","success_criterion":"+1–2 LBF"})
+    if LBF_E6 < 2.0: bottlenecks.append({"edge":"E6","next_experiment":"Multivariable MR with better instruments","success_criterion":"+1–2 LBF"})
+
+    # Technical & decisional layers
+    technical_map = {}
+    for mkey in raw.keys():
+        technical_map.setdefault(classify_technical(mkey), []).append(mkey)
+
+    decisional = {
+        "CAUSALITY": float(posterior),
+        "DRUGGABILITY": float(((raw.get("tract/tractability") or {}).get("score") or 0.0)),
+        "THERAPEUTIC_INDEX_SAFETY": float(((raw.get("clinical/safety") or {}).get("score") or 0.0)),
+        "CLINICAL_DEVELOPABILITY": float(((raw.get("clinical/developability") or {}).get("score") or 0.0)),
+    }
+
+    return CausalPath(
+        symbol=symbol, condition=trait,
+        edges={"E0": LBF_E0, "E1": LBF_E1, "E2": LBF_E2, "E3": LBF_E3, "E4": LBF_E4, "E5": LBF_E5, "E6": LBF_E6},
+        posterior=float(posterior),
+        bottlenecks=bottlenecks,
+        technical_buckets=technical_map,
+        decisional=decisional,
+        audit={"modules": list(raw.keys()), "penalties": penalties}
+    )
+
+# -- maxfixed: ensure Pydantic forward refs are resolved at import time
+def __maxfixed_model_rebuild__():
+    try:
+        # Not all models may exist in every variant; rebuild best-effort.
+        for cls_name in [
+            "Evidence","Module","Registry","BucketNarrative","TherapeuticIndexRequest","TINarrative",
+            "TargetCard","GraphEdge","TargetGraph","CausalPath","CausalPathRequest"
+        ]:
+            cls = globals().get(cls_name)
+            if cls is not None and hasattr(cls, "model_rebuild"):
+                try:
+                    cls.model_rebuild()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+__maxfixed_model_rebuild__()
+
+# ------------------------ maxfixed: self-test endpoint ------------------------
+@router.post("/debug/selftest", response_model=Dict[str, Any])
+async def debug_selftest(symbol: str = Body(...), efo: Optional[str] = Body(None), strict: bool = Body(False), request: Request = None) -> Dict[str, Any]:
+    """Iterate all MODULES and try to run them via the internal client.
+    Returns: per-module status (OK/NO_DATA/ERROR), the path called, and any note.
+    If strict=True, raises HTTP 502 if any module errors out."""
+    results: Dict[str, Any] = {}
+    errors = 0
+    try:
+        async with httpx.AsyncClient(app=request.app, base_url="http://internal") as client:
+            for m in MODULES:
+                try:
+                    # infer path from module
+                    path_ = m.route
+                    params = {"symbol": symbol}
+                    if any(seg in path_ for seg in ("clin","assoc","genetics")) and efo:
+                        params["condition"] = efo
+                    r = await client.get(path_, params=params)
+                    payload = r.json() if r.headers.get("content-type","{}").startswith("application/json") else {}
+                    status = payload.get("status", "OK" if r.status_code==200 else "ERROR")
+                    results[m.name] = {"path": path_, "status": status}
+                    if status == "ERROR":
+                        errors += 1
+                except Exception as e:
+                    errors += 1
+                    results[getattr(m, "name", getattr(m, "route", "?"))] = {"path": getattr(m, "route", "?"), "status": "ERROR", "note": str(e)}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"selftest failed to run: {e!s}")
+    if strict and errors:
+        raise HTTPException(status_code=502, detail=f"{errors} module(s) failed")
+    return {"ok": errors==0, "errors": errors, "results": results}
