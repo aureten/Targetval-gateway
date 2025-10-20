@@ -1,4 +1,5 @@
 
+from __future__ import annotations
 # router.py — Advanced (64 modules) with live fetch (approach aligned to router-revised.py)
 
 # -------------- Live genetics helpers (OpenTargets + OpenGWAS) --------------
@@ -97,8 +98,6 @@ What this file does:
 
 Public-only: no API keys required. All endpoints work with public APIs or literature fallbacks.
 """
-
-from __future__ import annotations
 
 import asyncio
 import gzip
@@ -3637,3 +3636,65 @@ async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
                     data={"ensg": ensg, "efo": efo, "mqtl_like": qtl_like, "datasourceScores": dss},
                     citations=cites, fetched_at=_now())
 
+
+
+@router.get("/genetics/consortia-summary", response_model=Evidence)
+async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
+                                     gene: Optional[str] = Query(None),
+                                     condition: Optional[str] = Query(None)) -> Evidence:
+    """
+    Live OpenTargets Platform GraphQL summary of consortia-like datasources
+    (UK Biobank, FinnGen, GWAS Catalog) for the target–disease pair.
+    """
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    ensg = await _ensg_from_symbol(sym) or sym
+    efo  = await _efo_lookup(condition)
+    cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
+    if not (ensg and efo):
+        return Evidence(status="NO_DATA", source="OpenTargets",
+                        fetched_n=0, data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
+                        citations=cites, fetched_at=_now())
+    q = """
+    query($ensg:String!, $efo:String!){
+      associationByEntity(targetId:$ensg, diseaseId:$efo){
+        datasourceScores{ id score }
+      }
+    }"""
+    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
+    keys  = {"uk_biobank","finngen","gwas_catalog"}
+    cons  = [x for x in dss if (str(x.get("id","")).lower() in keys) and (x.get("score") or 0) > 0]
+    return Evidence(status=("OK" if cons else "NO_DATA"), source="OpenTargets",
+                    fetched_n=len(cons),
+                    data={"ensg": ensg, "efo": efo, "consortia": cons, "datasourceScores": dss},
+                    citations=cites, fetched_at=_now())
+
+@router.get("/genetics/mqtl-coloc", response_model=Evidence)
+async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
+                              gene: Optional[str] = Query(None),
+                              condition: Optional[str] = Query(None)) -> Evidence:
+    """
+    Live OpenTargets Platform GraphQL QTL-coloc heuristic:
+    flags datasourceScores that look QTL-like (contains 'eqtl','pqtl','molecular','qtl').
+    """
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    ensg = await _ensg_from_symbol(sym) or sym
+    efo  = await _efo_lookup(condition)
+    cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
+    if not (ensg and efo):
+        return Evidence(status="NO_DATA", source="OpenTargets",
+                        fetched_n=0, data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
+                        citations=cites, fetched_at=_now())
+    q = """
+    query($ensg:String!, $efo:String!){
+      associationByEntity(targetId:$ensg, diseaseId:$efo){
+        datasourceScores{ id score }
+      }
+    }"""
+    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
+    qtl_like = [x for x in dss if any(s in str(x.get("id","")).lower() for s in ["eqtl","pqtl","molecular","qtl"]) and (x.get("score") or 0) > 0]
+    return Evidence(status=("OK" if qtl_like else "NO_DATA"), source="OpenTargets",
+                    fetched_n=len(qtl_like),
+                    data={"ensg": ensg, "efo": efo, "mqtl_like": qtl_like, "datasourceScores": dss},
+                    citations=cites, fetched_at=_now())
