@@ -1621,7 +1621,7 @@ try:
     _here = _os.path.dirname(__file__)
 except Exception:
     _here = "."
-_ROUTER_KNOWLEDGE_PATH = _os.environ.get("ROUTER_KNOWLEDGE_PATH") or                          _os.path.join(_here, "router_knowledge.yaml")
+_ROUTER_KNOWLEDGE_PATH = _os.environ.get("ROUTER_KNOWLEDGE_PATH") or _os.path.join(_here, "router_knowledge.yaml")
 try:
     with open(_ROUTER_KNOWLEDGE_PATH, "r", encoding="utf-8") as _fh:
         ROUTER_KNOWLEDGE_YAML = _fh.read()
@@ -3441,3 +3441,23 @@ async def debug_selftest(symbol: str = Body(...), efo: Optional[str] = Body(None
     if strict and errors:
         raise HTTPException(status_code=502, detail=f"{errors} module(s) failed")
     return {"ok": errors==0, "errors": errors, "results": results}
+
+
+@router.get("/genetics/consortia-summary", response_model=Evidence)
+async def genetics_consortia_summary(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    """
+    Placeholder endpoint. Module registered in registry but route not implemented yet.
+    Returns NO_DATA to avoid 404s in synthesis fan-outs.
+    """
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    return Evidence(status="NO_DATA", source="(not implemented)", fetched_n=0, data={"note": "not implemented"}, citations=[], fetched_at=_now())
+
+
+@router.get("/genetics/mqtl-coloc", response_model=Evidence)
+async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    """
+    Placeholder endpoint. Module registered in registry but route not implemented yet.
+    Returns NO_DATA to avoid 404s in synthesis fan-outs.
+    """
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    return Evidence(status="NO_DATA", source="OpenTargets (planned)", fetched_n=0, data={"note": "not implemented"}, citations=[], fetched_at=_now())
