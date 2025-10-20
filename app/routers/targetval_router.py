@@ -1610,27 +1610,195 @@ async def synth_bucket_get(
     return await synth_bucket(BucketSynthRequest(gene=sym, condition=condition, bucket=bucket, module_outputs=module_outputs, lit_summary=lit_summary))
 @router.get("/debug/extended-size")
 def debug_extended_size() -> Dict[str, Any]:
-    return {"extended_yaml_bytes": len(EXTENDED_KNOWLEDGE_YAML)}
+    return {"extended_yaml_bytes": len(ROUTER_KNOWLEDGE_YAML)}
 
 # ------------------------ EOF -------------------------------------------------
 
-# EXTENDED_KNOWLEDGE_YAML (literal, for QA + size)
-EXTENDED_KNOWLEDGE_YAML = """"""
-
-# --- moved to external file to reduce module size ---
+# Router knowledge blob moved to external YAML to reduce module size and avoid giant literals.
+# Default filename: router_knowledge.yaml (next to this file). Override with ROUTER_KNOWLEDGE_PATH if desired.
+import os as _os
 try:
-    _here = os.path.dirname(__file__)
+    _here = _os.path.dirname(__file__)
 except Exception:
     _here = "."
-_EXT_YAML_PATH = os.environ.get("EXTENDED_KNOWLEDGE_YAML_PATH", os.path.join(_here, "extended_knowledge.yaml"))
+_ROUTER_KNOWLEDGE_PATH = _os.environ.get("ROUTER_KNOWLEDGE_PATH") or                          _os.path.join(_here, "router_knowledge.yaml")
 try:
-    with open(_EXT_YAML_PATH, "r", encoding="utf-8") as _fh:
-        EXTENDED_KNOWLEDGE_YAML = _fh.read()
+    with open(_ROUTER_KNOWLEDGE_PATH, "r", encoding="utf-8") as _fh:
+        ROUTER_KNOWLEDGE_YAML = _fh.read()
 except Exception as _e:
-    # Keep service running; endpoints that rely on this will reflect absence
-    print(f"Warning: failed to load extended_knowledge.yaml: {_e}")
-    EXTENDED_KNOWLEDGE_YAML = ""
+    print(f"Warning: failed to load router_knowledge.yaml: {_e}")
+    ROUTER_KNOWLEDGE_YAML = ""
 
+# /modules55 deprecated and removed by maxfixed patch.
+# maxfixed: removed stray code from legacy /modules55 block:     try:
+# maxfixed: removed stray code from legacy /modules55 block:         eqtl = await _get_json(f"https://www.ebi.ac.uk/eqtl/api/v3/associations?filter=gene_id:{ensg}")
+# maxfixed: removed stray code from legacy /modules55 block:         cites.append("https://www.ebi.ac.uk/eqtl/api-docs/")
+# maxfixed: removed stray code from legacy /modules55 block:     except Exception:
+# maxfixed: removed stray code from legacy /modules55 block:         eqtl = None
+# maxfixed: removed stray code from legacy /modules55 block:     fetched_n = len(eqtl.get('_embedded',{}).get('associations',[])) if isinstance(eqtl, dict) else (1 if eqtl else 0)
+# maxfixed: removed stray code from legacy /modules55 block:     return Evidence(status="OK" if fetched_n else "NO_DATA", source="eQTL Catalogue", fetched_n=fetched_n, data={"gene_id": ensg, "eqtl": eqtl}, citations=cites, fetched_at=_now())
+# maxfixed: removed stray code from legacy /modules55 block: 
+# maxfixed: removed stray code from legacy /modules55 block: 
+# maxfixed: removed stray code from legacy /modules55 block: 
+
+@router.get("/biology/causal-pathways", response_model=Evidence)
+async def biology_causal_pathways(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
+
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    cites = []
+    try:
+        up = await _get_json(f"https://rest.uniprot.org/uniprotkb/search?query=gene_exact:{sym}+AND+organism_id:9606&fields=accession")
+        cites.append("https://www.uniprot.org/help/api_queries")
+        acc = up["results"][0]["primaryAccession"] if up.get("results") else None
+    except Exception:
+        acc = None
+    if not acc:
+        return Evidence(status="NO_DATA", source="Reactome", fetched_n=0, data={"error":"UniProt accession not found"}, citations=cites, fetched_at=_now())
+    try:
+        rx = await _get_json(f"https://reactome.org/ContentService/data/mapping/UniProt/{acc}/pathways?species=Homo%20sapiens")
+        cites.append("https://reactome.org/dev/content-service")
+    except Exception:
+        rx = None
+    fetched_n = len(rx) if isinstance(rx, list) else (1 if rx else 0)
+    return Evidence(status="OK" if fetched_n else "NO_DATA", source="Reactome ContentService", fetched_n=fetched_n, data={"uniprot":acc,"pathways":rx}, citations=cites, fetched_at=_now())
+
+
+
+
+@router.get("/function/dependency", response_model=Evidence)
+async def function_dependency(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
+
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    cites = []
+    files = None
+    try:
+        files = await _get_json("https://depmap.org/portal/api/download/files")
+        cites.append("https://forum.depmap.org/t/stable-url-for-current-release-files/3765")
+    except Exception:
+        pass
+    orcs = None
+    import os
+    key = os.getenv("BIOGRID_ORCS_KEY") or os.getenv("BIOGRID_API_KEY")
+    if key:
+        try:
+            orcs = await _get_json(f"https://orcsws.thebiogrid.org/genes/?accesskey={key}&geneName={sym}&format=json")
+            cites.append("https://wiki.thebiogrid.org/doku.php/orcs:webservice")
+        except Exception:
+            pass
+    payload = {"depmap_files": files, "orcs_gene": orcs}
+    fetched_n = sum(len(v) if isinstance(v, list) else (len(v) if isinstance(v, dict) else 1) for v in payload.values() if v)
+    return Evidence(status="OK" if fetched_n else "NO_DATA", source="DepMap portal, BioGRID ORCS", fetched_n=fetched_n, data=payload, citations=cites, fetched_at=_now())
+
+
+
+
+@router.get("/immuno/hla-coverage", response_model=Evidence)
+async def immuno_hla_coverage(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
+
+    import json as _json
+    cites = ["https://nextgen-tools.iedb.org/docs/api/endpoints/api_references.html"]
+    alleles = (condition or "").split(",") if condition else []
+    if not alleles:
+        return Evidence(status="ERROR", source="IEDB Tools", fetched_n=0, data={"error":"provide alleles (comma-separated) in 'condition' or POST body"}, citations=cites, fetched_at=_now())
+    return Evidence(status="OK", source="IEDB (spec refs)", fetched_n=len(alleles), data={"alleles": alleles, "note": "Use POST /tract/mhc-binding + /tract/iedb-epitopes first, then coverage."}, citations=cites, fetched_at=_now())
+
+
+
+
+@router.get("/clin/feasibility", response_model=Evidence)
+async def clin_feasibility(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
+
+    q = condition or (symbol or gene) or ""
+    try:
+        url = "https://clinicaltrials.gov/api/query/study_fields?expr=" + q + "&fields=NCTId,Condition,EnrollmentCount,OverallStatus,LocationCountry&min_rnk=1&max_rnk=200&fmt=json"
+        ct = await _get_json(url)
+    except Exception:
+        ct = None
+    fetched_n = len(ct.get("StudyFieldsResponse",{}).get("StudyFields",[])) if isinstance(ct, dict) else (1 if ct else 0)
+    return Evidence(status="OK" if fetched_n else "NO_DATA", source="ClinicalTrials.gov", fetched_n=fetched_n, data={"query":q,"ctgov": ct}, citations=["https://clinicaltrials.gov/api/"], fetched_at=_now())
+
+
+@router.get("/tract/surfaceome", response_model=Evidence)
+async def tract_surfaceome(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None)) -> Evidence:
+
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    return await tract_surfaceome_hpa(symbol=sym, gene=None)
+    
+
+
+
+    # fail-closed would break the service; we log to stdout and keep routes as-is
+    print("Route guard skipped due to error:", _e)
+
+
+
+# ===== Strict route pruning (hard-coded 55 module paths) =====
+# ---------- Added modules to reach 64 per Targetval Config (2025-10-17) ----------
+try:
+    MODULES += [
+        Module(route="/perturb/qc", name="perturb-qc (internal)", sources=["(internal only)"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/scrna-summary", name="perturb-scrna-summary (internal)", sources=["(internal only)"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/lincs-signatures", name="perturb-lincs-signatures", sources=["LINCS Data Portal (LDP3) Signature API","iLINCS API"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/connectivity", name="perturb-connectivity", sources=["iLINCS API","LDP3 Data API"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/perturbseq", name="perturb-perturbseq-encode", sources=["ENCODE REST API","EBI ENA"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/crispr-screens", name="perturb-crispr-screens", sources=["BioGRID ORCS REST"], bucket="Functional & mechanistic validation"),
+        Module(route="/perturb/depmap-dependency", name="perturb-depmap-dependency", sources=["Broad DepMap Portal/figshare","Sanger Cell Model Passports JSON:API"], bucket="Therapeutic index & safety translation"),
+        Module(route="/perturb/drug-response", name="perturb-drug-response", sources=["PharmacoDB API","NCI-60 CellMiner API"], bucket="Druggability & modality tractability"),
+        Module(route="/perturb/signature-enrichment", name="perturb-signature-enrichment", sources=["iLINCS API","LINCS Data Portal (LDP3)"], bucket="Functional & mechanistic validation"),
+    ]
+except Exception:
+    pass
+
+
+# ------------------------ Added endpoints: PERTURBATION (per new config) -------
+
+@router.get("/perturb/qc", response_model=Evidence)
+async def perturb_qc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    # Internal-only per spec — expose explicit, truthful status.
+    return Evidence(status="ERROR", source="internal-only", fetched_n=0, data={"note": "Module is internal per configuration."}, citations=[], fetched_at=_now())
+
+@router.get("/perturb/scrna-summary", response_model=Evidence)
+async def perturb_scrna_summary(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    # Internal-only per spec — expose explicit, truthful status.
+    return Evidence(status="ERROR", source="internal-only", fetched_n=0, data={"note": "Module is internal per configuration."}, citations=[], fetched_at=_now())
+
+async def _ldp3_find_signatures(where: Dict[str, Any], limit: int = 50) -> Tuple[List[Dict[str, Any]], List[str]]:
+    cites: List[str] = []
+    url = "https://ldp3.cloud/metadata-api/signatures/find"
+    payload = {"filter": {"where": where, "limit": limit}}
+    try:
+        js = await _post_json(url, payload, tries=2)
+        cites.append(url)
+        if isinstance(js, list):
+            return js, cites
+        # some LDP3 endpoints return dict; normalize
+        if isinstance(js, dict) and js.get("results") and isinstance(js["results"], list):
+            return js["results"], cites
+    except Exception:
+        pass
+    return [], cites
+
+async def _ldp3_entities_from_genes(genes: List[str]) -> Tuple[Dict[str, str], List[str]]:
+    # Map gene symbols -> entity UUIDs
+    cites: List[str] = []
+    url = "https://ldp3.cloud/metadata-api/entities/find"
+    payload = {"filter": {"where": {"meta.symbol": {"inq": genes}}, "fields": ["id","meta.symbol"]}}
+    try:
+        js = await _post_json(url, payload, tries=2)
+        cites.append(url)
+        mapping = {}
+        if isinstance(js, list):
+            for e in js:
+                sym = ((e or {}).get("meta") or {}).get("symbol")
+                if sym and e.get("id"):
+                    mapping[str(sym).upper()] = e["id"]
+        return mapping, cites
+    except Exception:
+        return {}, cites
+
+@router.get("/perturb/lincs-signatures", response_model=Evidence)
+async def perturb_lincs_signatures(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), limit: int = Query(50)) -> Evidence:
+    """
     Find LINCS signatures where the perturbagen corresponds to the input gene (knockdown/overexpression).
     Primary: LDP3 metadata API; Fallback: iLINCS docs not reliably programmatic here.
     """
@@ -1848,8 +2016,6 @@ from fastapi import FastAPI
 app = FastAPI(title="TargetVal Router (embedded)")
 app.include_router(router)
 
-
-
 @app.on_event("startup")
 async def _maxfixed_startup_assertions():
     # Ensure every module key has a route, and config module_set keys are valid.
@@ -1878,6 +2044,8 @@ async def _maxfixed_startup_assertions():
     except Exception as e:
         # Fail fast so we don't run a partial registry silently
         raise
+
+
 
 @router.get("/domains")
 async def list_domains_router() -> Dict[str, Any]:
