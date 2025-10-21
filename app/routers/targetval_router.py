@@ -717,20 +717,10 @@ def registry_sources() -> List[Dict[str, Any]]:
 def registry_counts() -> Dict[str, Any]:
     return {"total": len(MODULES), "by_bucket": {b: sum(1 for m in MODULES if m.bucket == b) for b in BUCKETS}}
 
-
 # ------------------------ Europe PMC helpers ---------------------------------
 
-from typing import List, Dict, Tuple
-import urllib.parse
-
-# Conservative keyword sets for very coarse stance tagging
-CONFIRM_KWS = {
-    "mendelian randomization","colocalization","co-localization",
-    "functional validation","perturb-seq","crispr","mpra","starr","burden test"
-}
-DISCONFIRM_KWS = {
-    "no association","did not replicate","not significant","failed replication","no effect","not associated"
-}
+CONFIRM_KWS = {"mendelian randomization","colocalization","colocalisation","replication","significant association","functional validation","perturb-seq","crispr","mpra","starr"}
+DISCONFIRM_KWS = {"no association","did not replicate","null association","not significant","failed replication","no effect","not associated"}
 
 async def _epmc_search(query: str, size: int = 50) -> Tuple[List[Dict[str, Any]], List[str]]:
     citations: List[str] = []
@@ -739,7 +729,7 @@ async def _epmc_search(query: str, size: int = 50) -> Tuple[List[Dict[str, Any]]
     js = await _get_json(url, tries=2)
     hits = (js.get("resultList", {}) or {}).get("result", []) if isinstance(js, dict) else []
     citations.append(url)
-    # very light stance tag
+    # light stance tag
     for h in hits:
         text = (h.get("title","") + " " + h.get("abstract","")).lower()
         if any(k in text for k in CONFIRM_KWS) and not any(k in text for k in DISCONFIRM_KWS):
@@ -750,7 +740,6 @@ async def _epmc_search(query: str, size: int = 50) -> Tuple[List[Dict[str, Any]]
             h["stance"] = "neutral"
     return hits, citations
 
-# ------------------------ End Europe PMC helpers ------------------------------
 # ------------------------ Endpoints: IDENTITY --------------------------------
 
 @router.get("/expr/baseline", response_model=Evidence)
@@ -800,7 +789,7 @@ async def mech_structure(symbol: Optional[str] = Query(None), gene: Optional[str
 async def expr_inducibility(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} induction OR inducible OR cytokine OR stimulus"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=80)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 # ------------------------ Endpoints: ASSOCIATION ------------------------------
@@ -834,21 +823,21 @@ async def assoc_bulk_rna(symbol: Optional[str] = Query(None), gene: Optional[str
 async def assoc_sc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} single-cell OR scRNA-seq OR snRNA-seq OR Tabula Sapiens"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="HCA Azul, Tabula Sapiens (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/spatial-expression", response_model=Evidence)
 async def assoc_spatial_expression(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} spatial transcriptomics OR MERFISH OR Visium OR Xenium"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/spatial-neighborhoods", response_model=Evidence)
 async def assoc_spatial_neighborhoods(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} neighborhood OR ligand-receptor OR cell-cell communication OR NicheNet"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/bulk-prot", response_model=Evidence)
@@ -869,14 +858,14 @@ async def assoc_bulk_prot(symbol: Optional[str] = Query(None), gene: Optional[st
 async def assoc_omics_phosphoproteomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} phosphoproteomics OR phosphorylation site"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="PRIDE (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/omics-metabolites", response_model=Evidence)
 async def assoc_omics_metabolites(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} metabolomics OR metabolite OR HMDB OR Nightingale"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=80)
     return Evidence(status="OK", source="MetaboLights, HMDB", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/hpa-pathology", response_model=Evidence)
@@ -904,14 +893,14 @@ async def assoc_hpa_pathology(symbol: Optional[str] = Query(None), gene: Optiona
 async def assoc_bulk_prot_pdc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} CPTAC proteomics"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="PDC GraphQL (CPTAC) (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/metabolomics-ukb-nightingale", response_model=Evidence)
 async def assoc_metabolomics_ukb_nightingale(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} Nightingale biomarker"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=30)
     return Evidence(status="OK", source="Nightingale Biomarker Atlas", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/sc/bican", response_model=Evidence)
@@ -919,7 +908,7 @@ async def sc_bican(symbol: Optional[str] = Query(None), gene: Optional[str] = Qu
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     link = "https://biccn.org"
     q = f"{sym} BICAN single-cell"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints")); cites.append(link)
+    hits, cites = await _epmc_search(q, size=20); cites.append(link)
     return Evidence(status="OK", source="BICAN portal", fetched_n=len(hits), data={"portal": link, "query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/sc/hubmap", response_model=Evidence)
@@ -927,7 +916,7 @@ async def sc_hubmap(symbol: Optional[str] = Query(None), gene: Optional[str] = Q
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     link = "https://portal.hubmapconsortium.org"
     q = f"{sym} HuBMAP single-cell"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints")); cites.append(link)
+    hits, cites = await _epmc_search(q, size=20); cites.append(link)
     return Evidence(status="OK", source="HuBMAP portal", fetched_n=len(hits), data={"portal": link, "query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 # ------------------------ Endpoints: GENETIC CAUSALITY ------------------------
@@ -942,10 +931,13 @@ async def genetics_l2g(symbol: Optional[str] = Query(None),
     cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
     if not (ensg and efo):
         return Evidence(status="NO_DATA", source="OpenTargets",
-                        fetched_n=0, data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
+                        fetched_n=0,
+                        data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
                         citations=cites, fetched_at=_now())
     q = """
     query($ensg:String!, $efo:String!){
+      target(ensemblId:$ensg){ id approvedSymbol }
+      disease(efoId:$efo){ id name }
       associationByEntity(targetId:$ensg, diseaseId:$efo){
         overallScore
         datasourceScores{ id score }
@@ -955,9 +947,11 @@ async def genetics_l2g(symbol: Optional[str] = Query(None),
     assoc = (((js or {}).get("data") or {}).get("associationByEntity") or {})
     if not assoc:
         return Evidence(status="NO_DATA", source="OpenTargets", fetched_n=0,
-                        data={"ensg": ensg, "efo": efo}, citations=cites, fetched_at=_now())
+                        data={"ensg": ensg, "efo": efo},
+                        citations=cites, fetched_at=_now())
     return Evidence(status="OK", source="OpenTargets", fetched_n=1,
-                    data={"ensg": ensg, "efo": efo, **assoc}, citations=cites, fetched_at=_now())
+                    data={"ensg": ensg, "efo": efo, **assoc},
+                    citations=cites, fetched_at=_now())
 
 
 @router.get("/genetics/coloc", response_model=Evidence)
@@ -970,7 +964,8 @@ async def genetics_coloc(symbol: Optional[str] = Query(None),
     cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
     if not (ensg and efo):
         return Evidence(status="NO_DATA", source="OpenTargets",
-                        fetched_n=0, data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
+                        fetched_n=0,
+                        data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
                         citations=cites, fetched_at=_now())
     q = """
     query($ensg:String!, $efo:String!){
@@ -997,7 +992,6 @@ async def genetics_mr(symbol: Optional[str] = Query(None),
     if not condition:
         return Evidence(status="NO_DATA", source="OpenGWAS", fetched_n=0,
                         data={"note":"missing condition text"}, citations=cites, fetched_at=_now())
-    import urllib.parse
     try:
         outcomes   = await _httpx_json_get(f"{_IEU_BASE}v1/gwas?q={urllib.parse.quote(condition)}&p=1")
         n_outcomes = len(outcomes or []) if isinstance(outcomes, list) else 0
@@ -1014,88 +1008,83 @@ async def genetics_mr(symbol: Optional[str] = Query(None),
 
 
 @router.get("/genetics/rare", response_model=Evidence)
-async def genetics_rare(symbol: Optional[str] = Query(None),
-                        gene: Optional[str] = Query(None),
-                        condition: Optional[str] = Query(None)) -> Evidence:
+async def genetics_rare(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    cites = ["https://www.ncbi.nlm.nih.gov/clinvar/","https://eutils.ncbi.nlm.nih.gov/"]
-    import urllib.parse
-    # E-utilities: search variants for gene, optionally filter by condition term in text
+    term = urllib.parse.quote(f"{sym}[gene] AND human[orgn]")
+    es = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&term={term}&retmode=json&retmax=100"
     try:
-        term = f"{sym}[gene]"
-        if condition:
-            term += f"+AND+{urllib.parse.quote(condition)}"
-        esearch = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&retmode=json&retmax=100&term={term}"
-        js = await _httpx_json_get(esearch)
-        ids = (((js or {}).get("esearchresult") or {}).get("idlist")) or []
-        data = {"ids": ids, "count": len(ids), "symbol": sym, "condition": condition}
-        status = "OK" if ids else "NO_DATA"
-        return Evidence(status=status, source="ClinVar (E-utilities)", fetched_n=len(ids), data=data, citations=cites, fetched_at=_now())
+        s_js = await _get_json(es, tries=2)
+        ids = ((s_js.get('esearchresult', {}) or {}).get('idlist') or [])[:50]
+        cites = [es]
+        v = {}
+        if ids:
+            summ = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&id={','.join(ids)}&retmode=json"
+            v = await _get_json(summ, tries=1); cites.append(summ)
+        return Evidence(status="OK", source="ClinVar (NCBI E-utilities)", fetched_n=len(ids), data={"ids": ids, "summary": v}, citations=cites, fetched_at=_now())
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"ClinVar query failed: {e!s}")
-
+        raise HTTPException(status_code=502, detail=f"ClinVar fetch failed: {e!s}")
 
 @router.get("/genetics/mendelian", response_model=Evidence)
 async def genetics_mendelian(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} ClinGen gene validity"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=30)
     return Evidence(status="OK", source="ClinGen Gene Validity (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/phewas-human-knockout", response_model=Evidence)
 async def genetics_phewas_human_knockout(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} PheWAS human loss-of-function OR LoF"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/sqtl", response_model=Evidence)
 async def genetics_sqtl(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} sQTL splice QTL"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="GTEx sQTL API (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/pqtl", response_model=Evidence)
 async def genetics_pqtl(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} pQTL colocalization"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="OpenTargets GraphQL (pQTL colocs) (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/chromatin-contacts", response_model=Evidence)
 async def genetics_chromatin_contacts(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} promoter capture Hi-C OR PCHi-C OR HiC enhancer-promoter"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/functional", response_model=Evidence)
 async def genetics_functional(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} MPRA OR STARR OR CRISPRa OR CRISPRi functional screen"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=80)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/lncrna", response_model=Evidence)
 async def genetics_lncrna(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} lncRNA long noncoding RNA"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/mirna", response_model=Evidence)
 async def genetics_mirna(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} microRNA OR miRNA"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/pathogenicity-priors", response_model=Evidence)
 async def genetics_pathogenicity_priors(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:  # type: ignore
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} AlphaMissense OR PrimateAI pathogenicity"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/finngen-summary", response_model=Evidence)
@@ -1112,7 +1101,7 @@ async def genetics_gbmi_summary(condition: Optional[str] = None) -> Evidence:
 async def genetics_mavedb(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} deep mutational scanning OR MAVE database"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="MaveDB API, Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 # ------------------------ Endpoints: MECHANISM -------------------------------
@@ -1132,7 +1121,7 @@ async def mech_ppi(symbol: Optional[str] = Query(None), gene: Optional[str] = Qu
 async def mech_pathways(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} Reactome pathway"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=30)
     return Evidence(status="OK", source="Reactome (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/mech/ligrec", response_model=Evidence)
@@ -1150,14 +1139,14 @@ async def mech_ligrec(symbol: Optional[str] = Query(None), gene: Optional[str] =
 async def assoc_perturb(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), phenotype: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} CRISPR OR RNAi OR perturb-seq {phenotype or ''}"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=100)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/perturbatlas", response_model=Evidence)
 async def assoc_perturbatlas(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} PerturbAtlas OUP perturb-seq"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="PerturbAtlas OUP", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 # ------------------------ Endpoints: TRACTABILITY -----------------------------
@@ -1221,7 +1210,7 @@ async def tract_ligandability_ab(symbol: Optional[str] = Query(None), gene: Opti
 async def tract_ligandability_oligo(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} antisense OR siRNA OR ASO OR aptamer"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=80)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/tract/modality", response_model=Evidence)
@@ -1242,21 +1231,21 @@ async def tract_modality(symbol: Optional[str] = Query(None), gene: Optional[str
 async def tract_immunogenicity(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} immunogenic OR epitope OR HLA"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/tract/mhc-binding", response_model=Evidence)
 async def tract_mhc_binding(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} netMHCpan OR HLA binding"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/tract/iedb-epitopes", response_model=Evidence)
 async def tract_iedb_epitopes(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} IEDB epitope HLA"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="IEDB IQ-API, Europe PMC (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/tract/surfaceome-hpa", response_model=Evidence)
@@ -1271,7 +1260,7 @@ async def tract_surfaceome_hpa(symbol: Optional[str] = Query(None), gene: Option
 async def tract_tsca(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} Cancer Surfaceome Atlas"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=20)
     return Evidence(status="OK", source="Cancer Surfaceome Atlas (TCSA)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 # ------------------------ Endpoints: CLINICAL FIT -----------------------------
@@ -1290,14 +1279,14 @@ async def clin_endpoints(condition: Optional[str] = None) -> Evidence:
 async def clin_biomarker_fit(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} {condition or ''} biomarker predictive prospective validation"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=80)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/clin/pipeline", response_model=Evidence)
 async def clin_pipeline(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} NCATS Inxight Drugs pipeline"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=20)
     return Evidence(status="OK", source="Inxight Drugs (NCATS) (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/clin/safety", response_model=Evidence)
@@ -1329,7 +1318,7 @@ async def clin_safety(symbol: Optional[str] = Query(None), gene: Optional[str] =
 async def clin_safety_pgx(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} pharmacogenomics site:pharmgkb.org"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="PharmGKB (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/clin/rwe", response_model=Evidence)
@@ -1345,7 +1334,7 @@ async def clin_rwe() -> Evidence:
 async def clin_on_target_ae_prior(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} SIDER adverse effect class signal"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=30)
     return Evidence(status="OK", source="DGIdb, SIDER", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/comp/intensity", response_model=Evidence)
@@ -1377,7 +1366,7 @@ async def clin_eu_ctr_linkouts(condition: Optional[str] = None) -> Evidence:
 async def genetics_intolerance(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     q = f"{sym} gnomAD constraint intolerance pLI"
-    hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+    hits, cites = await _epmc_search(q, size=40)
     return Evidence(status="OK", source="gnomAD GraphQL (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 # ------------------------ Literature mesh + Synthesis -------------------------
@@ -1473,7 +1462,7 @@ async def lit_mesh(req: LitMeshRequest) -> LitSummary:
     hits_all: List[Dict[str, Any]] = []
     citations: List[str] = []
     for q in queries:
-        hits, cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+        hits, cites = await _epmc_search(q, size=60)
         citations += cites
         hits_all.extend(hits)
     confirm = sum(1 for h in hits_all if h.get("stance") == "confirm")
@@ -1482,7 +1471,7 @@ async def lit_mesh(req: LitMeshRequest) -> LitSummary:
     # one focused pass if evidence is thin
     if confirm < 3 and req.max_passes > 0:
         q2 = f"{req.gene} {req.condition or ''} tissue-specific OR cell-type specific"
-        hits2, cites2 = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+        hits2, cites2 = await _epmc_search(q2, size=40)
         citations += cites2; hits_all.extend(hits2)
         notes += " | resolution_pass_applied"
     stance_tally = {"confirm": confirm, "disconfirm": disconfirm, "neutral": len(hits_all) - confirm - disconfirm}
@@ -2045,7 +2034,7 @@ async def perturb_crispr_screens(symbol: Optional[str] = Query(None), gene: Opti
         data["orcs"] = None
     if not data.get("orcs"):
         q = f"{sym} CRISPR screen"
-        hits, epmc_cites = await (_ for _ in ()).throw(RuntimeError("EPMC fallback disabled for live endpoints"))
+        hits, epmc_cites = await _epmc_search(q, size=40)
         data["literature_proxy"] = {"query": q, "hits": hits}
         cites += epmc_cites
         n = len(hits or [])
@@ -3595,6 +3584,7 @@ async def debug_selftest(symbol: str = Body(...), efo: Optional[str] = Body(None
 async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
                                      gene: Optional[str] = Query(None),
                                      condition: Optional[str] = Query(None)) -> Evidence:
+    """Summarise consortia evidence via OT datasourceScores for target-disease pair."""
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     ensg = await _ensg_from_symbol(sym) or sym
     efo  = await _efo_lookup(condition)
@@ -3619,10 +3609,12 @@ async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
                     citations=cites, fetched_at=_now())
 
 
+
 @router.get("/genetics/mqtl-coloc", response_model=Evidence)
 async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
                               gene: Optional[str] = Query(None),
                               condition: Optional[str] = Query(None)) -> Evidence:
+    """Approximate molecular QTL colocalisation presence using OT datasource breakdown (live)."""
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     ensg = await _ensg_from_symbol(sym) or sym
     efo  = await _efo_lookup(condition)
@@ -3644,12 +3636,17 @@ async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
                     fetched_n=len(qtl_like),
                     data={"ensg": ensg, "efo": efo, "mqtl_like": qtl_like, "datasourceScores": dss},
                     citations=cites, fetched_at=_now())
+
 
 
 @router.get("/genetics/consortia-summary", response_model=Evidence)
 async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
                                      gene: Optional[str] = Query(None),
                                      condition: Optional[str] = Query(None)) -> Evidence:
+    """
+    Live OpenTargets Platform GraphQL summary of consortia-like datasources
+    (UK Biobank, FinnGen, GWAS Catalog) for the target–disease pair.
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     ensg = await _ensg_from_symbol(sym) or sym
     efo  = await _efo_lookup(condition)
@@ -3673,11 +3670,14 @@ async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
                     data={"ensg": ensg, "efo": efo, "consortia": cons, "datasourceScores": dss},
                     citations=cites, fetched_at=_now())
 
-
 @router.get("/genetics/mqtl-coloc", response_model=Evidence)
 async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
                               gene: Optional[str] = Query(None),
                               condition: Optional[str] = Query(None)) -> Evidence:
+    """
+    Live OpenTargets Platform GraphQL QTL-coloc heuristic:
+    flags datasourceScores that look QTL-like (contains 'eqtl','pqtl','molecular','qtl').
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     ensg = await _ensg_from_symbol(sym) or sym
     efo  = await _efo_lookup(condition)
@@ -3702,21 +3702,28 @@ async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
 
 
 
-
-@app.on_event("startup")
-async def _assert_domain1_routes_exist():
-    # fail-fast if Domain-1 mapping references routes that are not mounted
-    try:
-        defined = {getattr(r, "path", None) for r in router.routes if hasattr(r, "path")}
-        pg = TECHNICAL_BUCKETS.get("population_genomics") or []
-        missing = []
-        for key in pg:
-            path = ("/" + key) if "/" in key else "/genetics/" + key.split("genetics-", 1)[1]
-            if path not in defined:
-                missing.append(path)
-        if missing:
-            raise RuntimeError(f"Missing live endpoints for Domain-1 modules: {missing}")
-    except Exception as e:
-        # If router/structures unavailable at import time, we still want visibility
-        print("Startup domain1 assert:", e)
+# ---------- Backward-compatibility: hyphen aliases for genetics endpoints ----------
+try:
+    # Map canonical functions if they exist
+    _alias_defs = [
+        ("/genetics-coloc", "/genetics/coloc", "genetics_coloc"),
+        ("/genetics-consortia-summary", "/genetics/consortia-summary", "genetics_consortia_summary"),
+        ("/genetics-intolerance", "/genetics/intolerance", "genetics_intolerance"),
+        ("/genetics-l2g", "/genetics/l2g", "genetics_l2g"),
+        ("/genetics-mendelian", "/genetics/mendelian", "genetics_mendelian"),
+        ("/genetics-mqtl-coloc", "/genetics/mqtl-coloc", "genetics_mqtl_coloc"),
+        ("/genetics-mr", "/genetics/mr", "genetics_mr"),
+        ("/genetics-nmd-inference", "/genetics/nmd-inference", "genetics_nmd_inference"),
+        ("/genetics-phewas-human-knockout", "/genetics/phewas-human-knockout", "genetics_phewas_human_knockout"),
+        ("/genetics-pqtl", "/genetics/pqtl", "genetics_pqtl"),
+        ("/genetics-rare", "/genetics/rare", "genetics_rare"),
+        ("/genetics-sqtl", "/genetics/sqtl", "genetics_sqtl"),
+        ("/genetics-ase-check", "/genetics/ase-check", "genetics_ase_check"),
+    ]
+    for hyphen_path, slash_path, fn_name in _alias_defs:
+        if fn_name in globals():
+            router.add_api_route(hyphen_path, globals()[fn_name], methods=["GET"])
+except Exception as _e:
+    print("Alias registration warning:", _e)
+# -------------------------------------------------------------------------------
 
