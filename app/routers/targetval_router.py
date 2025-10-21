@@ -1,6 +1,23 @@
 
-
 from __future__ import annotations
+
+# ---- Pydantic v2 typing prelude ----------------------------------------------
+from typing import Any, Dict, List, Optional, Tuple, Set, Mapping, Iterable, Union, Literal
+try:
+    from typing import TypedDict, NotRequired
+except Exception:
+    try:
+        from typing_extensions import TypedDict, NotRequired  # type: ignore
+    except Exception:
+        TypedDict = dict  # type: ignore
+        NotRequired = None  # type: ignore
+globals().update({
+    "Any": Any, "Dict": Dict, "List": List, "Optional": Optional, "Tuple": Tuple, "Set": Set,
+    "Mapping": Mapping, "Iterable": Iterable, "Union": Union, "Literal": Literal,
+    "TypedDict": TypedDict, "NotRequired": NotRequired
+})
+# ------------------------------------------------------------------------------
+
 # router.py — Advanced (64 modules) with live fetch (approach aligned to router-revised.py)
 
 # -------------- Live genetics helpers (OpenTargets + OpenGWAS) --------------
@@ -3704,7 +3721,6 @@ async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
 
 # ---------- Backward-compatibility: hyphen aliases for genetics endpoints ----------
 try:
-    # Map canonical functions if they exist
     _alias_defs = [
         ("/genetics-coloc", "/genetics/coloc", "genetics_coloc"),
         ("/genetics-consortia-summary", "/genetics/consortia-summary", "genetics_consortia_summary"),
