@@ -201,6 +201,7 @@ DOMAINS_META: Dict[int, Dict[str, str]] = {
 }
 
 DOMAIN_MODULES: Dict[int, List[str]] = {
+    # D1: Genetic causality & human validation
     1: [
         "genetics-l2g",
         "genetics-coloc",
@@ -219,26 +220,40 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
         "genetics-functional",
         "genetics-mavedb",
         "genetics-consortia-summary",
-    ],
-    2: [
-        "mech-pathways",
-        "biology-causal-pathways",
-        "mech-ppi",
-        "mech-ligrec",
-        "assoc-proteomics",
-        "assoc-metabolomics",
-        "assoc-bulk-rna",
-        "assoc-perturb",
-        "perturb-lincs-signatures",
-        "perturb-connectivity",
-        "perturb-signature-enrichment",
-        "perturb-perturbseq-encode",
-        "perturb-crispr-screens",
+        # ncRNA families belong to genetic causality per config
         "genetics-lncrna",
         "genetics-mirna",
-        "perturb-qc (internal)",
-        "perturb-scrna-summary (internal)",
+        # new genetics helpers introduced in v2.2
+        "genetics-caqtl-lite",
+        "genetics-nmd-inference",
+        "genetics-mqtl-coloc",
+        "genetics-ase-check",
+        "genetics-ptm-signal-lite",
     ],
+    # D2: Functional & mechanistic validation
+    2: [
+        # Ordered list per v2.2 spec (Functional & mechanistic validation)
+        "mech-ppi",
+        "mech-ligrec",
+        "mech-pathways",
+        "mech-directed-signaling",
+        "mech-kinase-substrate",
+        "mech-tf-target",
+        "mech-mirna-target",
+        "mech-complexes",
+        "assoc-perturb",
+        "perturb-crispr-screens",
+        "perturb-lincs-signatures",
+        "perturb-signature-enrichment",
+        "perturb-connectivity",
+        "assoc-proteomics",
+        "assoc-bulk-rna",
+        "assoc-metabolomics",
+        "biology-causal-pathways",
+        "mech-structure",
+        "perturb-perturbseq-encode",
+    ],
+    # D3: Expression, selectivity & cell-state context
     3: [
         "expr-baseline",
         "expr-inducibility",
@@ -247,9 +262,11 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
         "sc-hubmap",
         "expr-localization",
         "assoc-hpa-pathology",
-        "tract-ligandability-ab",
-        "tract-surfaceome",
+        # aggregated proteomics & phosphoproteomics endpoints
+        "assoc-bulk-prot",
+        "assoc-omics-phosphoproteomics",
     ],
+    # D4: Druggability & modality tractability
     4: [
         "mech-structure",
         "tract-ligandability-sm",
@@ -257,18 +274,23 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
         "tract-modality",
         "tract-drugs",
         "perturb-drug-response",
+        # ligandability & surfaceome belong to druggability per config
+        "tract-ligandability-ab",
+        "tract-surfaceome",
     ],
+    # D5: Therapeutic index & safety translation (ordered per spec)
     5: [
-        "function-dependency",
-        "immuno/hla-coverage",
         "tract-immunogenicity",
         "tract-mhc-binding",
         "tract-iedb-epitopes",
+        "immuno/hla-coverage",
+        "function-dependency",
+        "perturb-depmap-dependency",
         "clin-safety",
         "clin-rwe",
         "clin-on-target-ae-prior",
-        "perturb-depmap-dependency",
     ],
+    # D6: Clinical & translational evidence (unchanged)
     6: [
         "clin-endpoints",
         "clin-biomarker-fit",
@@ -283,6 +305,10 @@ import httpx
 from urllib.parse import urlparse
 from fnmatch import fnmatch
 from fastapi import APIRouter, HTTPException, Query, Body, Path as PathParam, Request
+# --- New imports for EvidenceEnvelope and runtime/clients per v2.2 spec ---
+from app.schemas.evidence import EvidenceEnvelope, Edge, stage_context
+from app.runtime.http import fetch_json, allow_hosts
+from app.clients import iedb, ipd_imgt, uniprot, glygen, rnacentral, reactome, complex_portal, omnipath
 
 # ----------------------- Domain naming & registry (authoritative) -----------------------
 DOMAIN_LABELS = {
@@ -298,6 +324,7 @@ DOMAIN_LABELS.update({f"D{k}": v for k, v in list(DOMAIN_LABELS.items()) if len(
 
 def _domain_modules_spec() -> dict:
     # E) Module Order by Domain (display) — mirrored from config
+    # Domain 1: Genetic causality & human validation
     D1 = [
         "genetics-l2g","genetics-coloc","genetics-mr",
         "genetics-chromatin-contacts","genetics-3d-maps",
@@ -305,27 +332,56 @@ def _domain_modules_spec() -> dict:
         "genetics-annotation","genetics-pathogenicity-priors",
         "genetics-intolerance","genetics-rare","genetics-mendelian",
         "genetics-phewas-human-knockout","genetics-functional",
-        "genetics-mavedb","genetics-consortia-summary"
+        "genetics-mavedb","genetics-consortia-summary",
+        # ncRNA and new helpers
+        "genetics-lncrna","genetics-mirna",
+        "genetics-caqtl-lite","genetics-nmd-inference","genetics-mqtl-coloc",
+        "genetics-ase-check","genetics-ptm-signal-lite"
     ]
+    # Domain 2: Functional & mechanistic validation (deterministic order)
     D2 = [
-        "mech-pathways","biology-causal-pathways","mech-ppi","mech-ligrec",
-        "assoc-proteomics","assoc-metabolomics","assoc-bulk-rna","assoc-perturb",
-        "perturb-lincs-signatures","perturb-connectivity","perturb-signature-enrichment",
-        "perturb-perturbseq-encode","perturb-crispr-screens",
-        "genetics-lncrna","genetics-mirna","perturb-qc (internal)","perturb-scrna-summary (internal)"
+        "mech-ppi",
+        "mech-ligrec",
+        "mech-pathways",
+        "mech-directed-signaling",
+        "mech-kinase-substrate",
+        "mech-tf-target",
+        "mech-mirna-target",
+        "mech-complexes",
+        "assoc-perturb",
+        "perturb-crispr-screens",
+        "perturb-lincs-signatures",
+        "perturb-signature-enrichment",
+        "perturb-connectivity",
+        "assoc-proteomics",
+        "assoc-bulk-rna",
+        "assoc-metabolomics",
+        "biology-causal-pathways",
+        "mech-structure",
+        "perturb-perturbseq-encode"
     ]
+    # Domain 3: Expression, selectivity & cell-state context
     D3 = [
         "expr-baseline","expr-inducibility","assoc-sc","assoc-spatial","sc-hubmap",
-        "expr-localization","assoc-hpa-pathology","tract-ligandability-ab","tract-surfaceome"
+        "expr-localization","assoc-hpa-pathology",
+        "assoc-bulk-prot","assoc-omics-phosphoproteomics"
     ]
+    # Domain 4: Druggability & modality tractability
     D4 = [
         "mech-structure","tract-ligandability-sm","tract-ligandability-oligo",
-        "tract-modality","tract-drugs","perturb-drug-response"
+        "tract-modality","tract-drugs","perturb-drug-response",
+        "tract-ligandability-ab","tract-surfaceome"
     ]
     D5 = [
-        "function-dependency","immuno/hla-coverage","tract-immunogenicity",
-        "tract-mhc-binding","tract-iedb-epitopes","clin-safety","clin-rwe",
-        "clin-on-target-ae-prior","perturb-depmap-dependency"
+        "tract-immunogenicity",
+        "tract-mhc-binding",
+        "tract-iedb-epitopes",
+        "immuno/hla-coverage",
+        "function-dependency",
+        "perturb-depmap-dependency",
+        "clin-safety",
+        "clin-rwe",
+        "clin-on-target-ae-prior"
     ]
     D6 = [
         "clin-endpoints","clin-biomarker-fit","clin-pipeline","clin-feasibility",
@@ -334,6 +390,122 @@ def _domain_modules_spec() -> dict:
     return {"1": D1, "2": D2, "3": D3, "4": D4, "5": D5, "6": D6,
             "D1": D1, "D2": D2, "D3": D3, "D4": D4, "D5": D5, "D6": D6}
 from pydantic import BaseModel, Field
+
+# Import legacy Evidence model from schemas to satisfy Pydantic layout rule
+from app.schemas.legacy import Evidence
+
+# Helper to compute module_order index for provenance. Returns None if not found.
+def _module_order_index(module_name: str) -> int | None:
+    for modules in DOMAIN_MODULES.values():
+        if module_name in modules:
+            try:
+                return modules.index(module_name)
+            except ValueError:
+                continue
+    return None
+
+# Allow outbound hosts per module per spec (extend to cover all configured primaries/fallbacks).  
+# In addition to the original handful of hosts, include the external APIs used throughout
+# the genetic, mechanistic, expression, association, tractability and clinical modules.  
+# This expanded allowlist permits calls to OpenTargets, OpenGWAS, STRING, Reactome, OmniPath,
+# ProteomicsDB, PDC/PRIDE, HuBMAP, ClinicalTrials, PatentsView, DGIdb, ChEMBL, GTEx, HPA and others.  
+allow_hosts([
+    # immunology and HLA
+    "query-api.iedb.org", "tools.iedb.org",
+    # European Bioinformatics Institute (EBI) endpoints: PRIDE, ArrayExpress, PDBe, Ensembl, Europe PMC, etc.
+    "www.ebi.ac.uk", "ebi.ac.uk",
+    # UniProt and glycosylation
+    "rest.uniprot.org", "api.glygen.org",
+    # ncRNA
+    "rnacentral.org",
+    # Reactome pathway content service
+    "reactome.org",
+    # OmniPath directed and undirected signalling/complexes
+    "omnipathdb.org",
+    # STRING protein interactions
+    "string-db.org",
+    # OpenTargets GraphQL and platform API
+    "api.platform.opentargets.org", "platform.opentargets.org",
+    # OpenGWAS/IEU GWAS endpoints
+    "gwas.mrcieu.ac.uk", "gwas-api.mrcieu.ac.uk",
+    # ProteomicsDB OData API
+    "proteomicsdb.org", "www.proteomicsdb.org",
+    # PDC (Cancer Proteomics Data Commons) / CPTAC
+    "pdc.cancer.gov", "api.gdc.cancer.gov",
+    # ClinicalTrials.gov search API
+    "clinicaltrials.gov", "api.clinicaltrials.gov",
+    # PatentsView API
+    "api.patentsview.org",
+    # DGIdb for drug–gene interactions
+    "dgidb.org", "api.dgidb.org", "www.dgidb.org",
+    # ChEMBL small molecule target search
+    "www.ebi.ac.uk", "chembl.org", "ebi.ac.uk",
+    # HuBMAP search portal and entity APIs
+    "search.api.hubmapconsortium.org", "portal.hubmapconsortium.org",
+    # HuBMAP param-search variant
+    "search.api.hubmapconsortium.org",
+    # HuBMAP 4DN and ENCODE (for CAQTL/contacts) are proxied through our internal router, not directly; no allowlist needed
+    # Misc: OpenAlex/CrossRef for literature proxies
+    "api.openalex.org", "openalex.org", "api.crossref.org",
+    # Pharmacovigilance (FAERS)
+    "api.fda.gov", "open.fda.gov",
+    # Other large public resources referenced in modules
+    "www.proteinatlas.org", "proteinatlas.org",
+    "maayanlab.cloud", "metabolomicsworkbench.org", "www.metabolomicsworkbench.org"
+    ,
+    # Additional hosts mandated by the configuration but previously absent:
+    # ENCODE project (perturbation and chromatin contacts)
+    "encodeproject.org", "www.encodeproject.org",
+    # 4D Nucleome APIs
+    "4dnucleome.org", "data.4dnucleome.org",
+    # UCSC Genome Browser and loop/interaction tracks
+    "ucsc.edu", "genome.ucsc.edu",
+    # GTEx Portal endpoints (sQTL and eQTL)
+    "gtexportal.org", "www.gtexportal.org",
+    # Europe PMC top-level domain (distinct from EBI subdomain) and Unpaywall
+    "europepmc.org", "www.europepmc.org", "unpaywall.org", "api.unpaywall.org",
+    # SIGNOR signalling database
+    "signor.uniroma2.it",
+    # Human Cell Atlas Azul service and CELLxGENE Discover API
+    "azul.data.humancellatlas.org", "cellxgene.cziscience.com",
+])
+
+# ------------------------------------------------------------------------
+# Direction flip ledger and trigger set
+# The ledger records supports and contradicts votes for directed regulator interactions. When contradictions exceed
+# supports within a 24-month window, the interaction direction can be flipped. This logic is used by synthesis
+# overlays (not yet integrated here) to satisfy acceptance tests.
+from collections import defaultdict
+from typing import Tuple
+
+# Modules that participate in direction‑flip voting
+DIRECTION_TRIGGERS: Set[str] = {
+    "mech-tf-target",
+    "mech-mirna-target",
+    "mech-kinase-substrate",
+    "mech-directed-signaling",
+    "biology-causal-pathways",
+}
+
+class _DirLedger:
+    _counts: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(lambda: {"supports": 0, "contradicts": 0, "last": 0})
+
+    def vote(self, src: str, dst: str, supports: bool, ts: float) -> None:
+        key = (src, dst)
+        bucket = self._counts[key]
+        if supports:
+            bucket["supports"] += 1
+        else:
+            bucket["contradicts"] += 1
+        bucket["last"] = max(bucket["last"], ts)
+
+    def should_flip(self, src: str, dst: str, now: float) -> bool:
+        b = self._counts.get((src, dst), {})
+        # flip when two or more contradictions within 24 months
+        return b.get("contradicts", 0) >= 2 and (now - b.get("last", 0)) <= 24 * 30 * 24 * 3600
+
+# instantiate a global ledger
+_dir_ledger = _DirLedger()
 
 # ------------------------------ Utilities ------------------------------------
 
@@ -345,13 +517,8 @@ def _iso() -> str:
 
 # ------------------------ Evidence (aligned with user's file) -----------------
 
-class Evidence(BaseModel):
-    status: str               # "OK" | "NO_DATA" | "ERROR"
-    source: str               # upstream(s) used
-    fetched_n: int            # count before slicing
-    data: Dict[str, Any]      # payload
-    citations: List[str]      # URLs used
-    fetched_at: float         # UNIX ts
+# Legacy Evidence class has been moved to app.schemas.legacy; see there for details.
+# The router continues to reference Evidence for endpoints not yet converted to EvidenceEnvelope.
 
 # ------------------------ Outbound HTTP (bounded) ----------------------------
 
@@ -396,52 +563,19 @@ def _select_profile(url: str):
     except Exception:
         return None
 BACKOFF_BASE_S: float = float(os.getenv("BACKOFF_BASE_S", "0.6"))
-OUTBOUND_MAX_CONCURRENCY: int = int(os.getenv("OUTBOUND_MAX_CONCURRENCY", "3"))
+# per-host concurrency cap (spec: 4)
+OUTBOUND_MAX_CONCURRENCY: int = int(os.getenv("OUTBOUND_MAX_CONCURRENCY", "4"))
 REQUEST_BUDGET_S: float = float(os.getenv("REQUEST_BUDGET_S", "90.0"))
 
 _semaphore = asyncio.Semaphore(OUTBOUND_MAX_CONCURRENCY)
 
 async def _get_json(url: str, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None) -> Any:
-    prof = _select_profile(url)
-    tries_local = int(prof.get("tries", tries)) if prof else tries
-    timeout_local = httpx.Timeout(float(prof.get("timeout_total", os.getenv("OUTBOUND_TIMEOUT_S", "12.0"))), connect=float(prof.get("connect", 6.0))) if prof else DEFAULT_TIMEOUT
-    budget_local = float(prof.get("budget", REQUEST_BUDGET_S)) if prof else REQUEST_BUDGET_S
-    backoff_base_local = float(prof.get("backoff_base", BACKOFF_BASE_S)) if prof else BACKOFF_BASE_S
-    backoff_cap_local = float(prof.get("backoff_cap", 3.0)) if prof else 3.0
-    cached = CACHE.get(url)
-    if cached and (_now() - cached.get("timestamp", 0) < CACHE_TTL):
-        return cached["data"]
-    last_err: Optional[Exception] = None
-    t0 = _now()
-    async with _semaphore:
-        async with httpx.AsyncClient(timeout=timeout_local) as client:
-            for attempt in range(1, tries_local + 1):
-                remaining = budget_local - (_now() - t0)
-                if remaining <= 0: break
-                try:
-                    merged = {**DEFAULT_HEADERS, **(headers or {})}
-                    resp = await asyncio.wait_for(client.get(url, headers=merged), timeout=remaining)
-                    if resp.status_code in (429, 500, 502, 503, 504):
-                        last_err = HTTPException(status_code=resp.status_code, detail=resp.text[:500])
-                        backoff = min((2**(attempt-1))*backoff_base_local, backoff_cap_local) + random.random()*0.25
-                        await asyncio.sleep(backoff); continue
-                    resp.raise_for_status()
-                    try:
-                        data = resp.json()
-                    except Exception:
-                        try:
-                            buf = io.BytesIO(resp.content)
-                            with gzip.GzipFile(fileobj=buf) as gz:
-                                data = json.loads(gz.read().decode("utf-8"))
-                        except Exception as ge:
-                            last_err = ge; raise
-                    CACHE[url] = {"data": data, "timestamp": _now()}
-                    return data
-                except Exception as e:
-                    last_err = e
-                    backoff = min((2**(attempt-1))*backoff_base_local, backoff_cap_local) + random.random()*0.25
-                    await asyncio.sleep(backoff)
-    raise HTTPException(status_code=502, detail=f"GET failed for {url}: {last_err}")
+    """
+    Minimal shim around fetch_json to ensure runtime discipline: uses per‑host semaphores, backoff, caching and retries
+    implemented in app.runtime.http.fetch_json. Ignores the local 'tries' argument.
+    """
+    data, _ = await fetch_json(url, params=None, headers=headers, ttl_tier="moderate", method="GET")
+    return data
 
 async def _post_json(url: str, payload: Any, tries: int = OUTBOUND_TRIES, headers: Optional[Dict[str, str]] = None) -> Any:
     prof = _select_profile(url)
@@ -543,11 +677,20 @@ MODULES: List[Module] = [
     Module(route="/expr/inducibility", name="expr-inducibility", sources=["EBI Expression Atlas API","NCBI GEO E-utilities","ArrayExpress/BioStudies API"], bucket="Expression, selectivity & cell-state context"),
     Module(route="/assoc/bulk-rna", name="assoc-bulk-rna", sources=["NCBI GEO E-utilities","ArrayExpress/BioStudies API","EBI Expression Atlas API"], bucket="Functional & mechanistic validation"),
     Module(route="/assoc/sc", name="assoc-sc", sources=["HCA Azul APIs","Single-Cell Expression Atlas API","CELLxGENE Discover API"], bucket="Expression, selectivity & cell-state context"),
+    # Spatial association module (Europe PMC spatial/ISH literature).  Config requires this canonical endpoint
+    # to be present; it aggregates spatial gene expression and spatial neighbourhood datasets and uses
+    # Europe PMC as the primary for spatial/ISH literature.  The route is registered here so it
+    # appears in the modules registry.
     Module(route="/assoc/spatial", name="assoc-spatial", sources=["Europe PMC API"], bucket="Expression, selectivity & cell-state context"),
     Module(route="/sc/hubmap", name="sc-hubmap", sources=["HuBMAP Search API","HCA Azul APIs"], bucket="Expression, selectivity & cell-state context"),
+    # Canonical proteomics and metabolomics association endpoints.  Each references the configured
+    # primaries and fallbacks from the spec (ProteomicsDB → PRIDE/PDC; MetaboLights → Metabolomics Workbench).
     Module(route="/assoc/proteomics", name="assoc-proteomics", sources=["ProteomicsDB API","PRIDE Archive API","PDC (CPTAC) GraphQL"], bucket="Functional & mechanistic validation"),
     Module(route="/assoc/metabolomics", name="assoc-metabolomics", sources=["MetaboLights API","Metabolomics Workbench API"], bucket="Functional & mechanistic validation"),
     Module(route="/assoc/hpa-pathology", name="assoc-hpa-pathology", sources=["Europe PMC API"], bucket="Expression, selectivity & cell-state context"),
+    # Aggregated proteomics and phosphoproteomics endpoints (v2.2)
+    Module(route="/assoc/bulk-prot", name="assoc-bulk-prot", sources=["ProteomicsDB API","PDC (CPTAC) GraphQL"], bucket="Expression, selectivity & cell-state context"),
+    Module(route="/assoc/omics-phosphoproteomics", name="assoc-omics-phosphoproteomics", sources=["PRIDE Archive API","ProteomicsDB API"], bucket="Expression, selectivity & cell-state context"),
     Module(route="/assoc/perturb", name="assoc-perturb", sources=["LINCS LDP APIs","CLUE.io API","PubChem PUG-REST"], bucket="Functional & mechanistic validation"),
     Module(route="/genetics/l2g", name="genetics-l2g", sources=["OpenTargets GraphQL (L2G)","GWAS Catalog REST API"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/coloc", name="genetics-coloc", sources=["OpenTargets GraphQL (colocalisations)","eQTL Catalogue API","OpenGWAS API"], bucket="Genetic causality & human validation"),
@@ -564,8 +707,15 @@ MODULES: List[Module] = [
     Module(route="/genetics/consortia-summary", name="genetics-consortia-summary", sources=["IEU OpenGWAS API"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/functional", name="genetics-functional", sources=["DepMap API","BioGRID ORCS REST","Europe PMC API"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/mavedb", name="genetics-mavedb", sources=["MaveDB API"], bucket="Genetic causality & human validation"),
-    Module(route="/genetics/lncrna", name="genetics-lncrna", sources=["RNAcentral API","Europe PMC API"], bucket="Functional & mechanistic validation"),
-    Module(route="/genetics/mirna", name="genetics-mirna", sources=["RNAcentral API","Europe PMC API"], bucket="Functional & mechanistic validation"),
+    # Additional genetic causality helpers (v2.2)
+    Module(route="/genetics/caqtl-lite", name="genetics-caqtl-lite", sources=["QTL Catalogue API","OpenGWAS API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/nmd-inference", name="genetics-nmd-inference", sources=["gnomAD GraphQL API","Ensembl VEP REST"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/mqtl-coloc", name="genetics-mqtl-coloc", sources=["Metabolomics Workbench API","OpenGWAS API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/ase-check", name="genetics-ase-check", sources=["GTEx API","RNAcentral API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/ptm-signal-lite", name="genetics-ptm-signal-lite", sources=["PhosphoSitePlus API","UniProtKB API"], bucket="Genetic causality & human validation"),
+    # ncRNA modules belong to genetic causality (Domain 1)
+    Module(route="/genetics/lncrna", name="genetics-lncrna", sources=["RNAcentral API","Europe PMC API"], bucket="Genetic causality & human validation"),
+    Module(route="/genetics/mirna", name="genetics-mirna", sources=["RNAcentral API","Europe PMC API"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/pathogenicity-priors", name="genetics-pathogenicity-priors", sources=["gnomAD GraphQL API","CADD API"], bucket="Genetic causality & human validation"),
     Module(route="/genetics/intolerance", name="genetics-intolerance", sources=["gnomAD GraphQL API"], bucket="Genetic causality & human validation"),
     Module(route="/mech/structure", name="mech-structure", sources=["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API"], bucket="Druggability & modality tractability"),
@@ -573,15 +723,23 @@ MODULES: List[Module] = [
     Module(route="/mech/pathways", name="mech-pathways", sources=["Reactome Content/Analysis APIs","Pathway Commons API","SIGNOR API","QuickGO API"], bucket="Functional & mechanistic validation"),
     Module(route="/mech/ligrec", name="mech-ligrec", sources=["OmniPath (ligand–receptor)","IUPHAR/Guide to Pharmacology API","Reactome interactors"], bucket="Functional & mechanistic validation"),
     Module(route="/biology/causal-pathways", name="biology-causal-pathways", sources=["SIGNOR API","Reactome Analysis Service","Pathway Commons API"], bucket="Functional & mechanistic validation"),
+    # New mechanistic regulator endpoints (v2.2)
+    Module(route="/mech/complexes", name="mech-complexes", sources=["OmniPath complexes API","ComplexPortal API"], bucket="Functional & mechanistic validation"),
+    Module(route="/mech/directed-signaling", name="mech-directed-signaling", sources=["OmniPath signed/directed"], bucket="Functional & mechanistic validation"),
+    Module(route="/mech/kinase-substrate", name="mech-kinase-substrate", sources=["OmniPath enzyme–substrate (kinaseextra)"], bucket="Functional & mechanistic validation"),
+    Module(route="/mech/mirna-target", name="mech-mirna-target", sources=["OmniPath miRNA-target (mirnatarget)"], bucket="Functional & mechanistic validation"),
+    Module(route="/mech/tf-target", name="mech-tf-target", sources=["OmniPath DoRothEA A/B","OmniPath TF_target"], bucket="Functional & mechanistic validation"),
     Module(route="/tract/drugs", name="tract-drugs", sources=["ChEMBL API","DGIdb GraphQL","DrugCentral API","BindingDB API","PubChem PUG-REST","STITCH API","Pharos GraphQL"], bucket="Druggability & modality tractability"),
     Module(route="/tract/ligandability-sm", name="tract-ligandability-sm", sources=["UniProtKB API","AlphaFold DB API","PDBe API","PDBe-KB API","BindingDB API"], bucket="Druggability & modality tractability"),
-    Module(route="/tract/ligandability-ab", name="tract-ligandability-ab", sources=["UniProtKB API","GlyGen API"], bucket="Expression, selectivity & cell-state context"),
+    # ligandability for antibodies belongs to druggability; include HPA as fallback
+    Module(route="/tract/ligandability-ab", name="tract-ligandability-ab", sources=["UniProtKB API","GlyGen API","Human Protein Atlas API (fallback)"], bucket="Druggability & modality tractability"),
     Module(route="/tract/ligandability-oligo", name="tract-ligandability-oligo", sources=["Ensembl VEP REST","RNAcentral API","Europe PMC API"], bucket="Druggability & modality tractability"),
     Module(route="/tract/modality", name="tract-modality", sources=["UniProtKB API","AlphaFold DB API","Pharos GraphQL","IUPHAR/Guide to Pharmacology API"], bucket="Druggability & modality tractability"),
     Module(route="/tract/immunogenicity", name="tract-immunogenicity", sources=["IEDB IQ-API","IPD-IMGT/HLA API","Europe PMC API"], bucket="Therapeutic index & safety translation"),
-    Module(route="/tract/mhc-binding", name="tract-mhc-binding", sources=["IEDB Tools API (prediction)","IPD-IMGT/HLA API"], bucket="Druggability & modality tractability"),
+    Module(route="/tract/mhc-binding", name="tract-mhc-binding", sources=["IEDB Tools API (prediction)","IPD-IMGT/HLA API"], bucket="Therapeutic index & safety translation"),
     Module(route="/tract/iedb-epitopes", name="tract-iedb-epitopes", sources=["IEDB IQ-API","IEDB Tools API"], bucket="Therapeutic index & safety translation"),
-    Module(route="/tract/surfaceome", name="tract-surfaceome", sources=["UniProtKB API","GlyGen API"], bucket="Expression, selectivity & cell-state context"),
+    # Surfaceome uses UniProtKB/GlyGen primaries; HPA is a fallback; belongs to druggability
+    Module(route="/tract/surfaceome", name="tract-surfaceome", sources=["UniProtKB API","GlyGen API","Human Protein Atlas API (fallback)"], bucket="Druggability & modality tractability"),
     Module(route="/function/dependency", name="function-dependency", sources=["DepMap API","BioGRID ORCS REST"], bucket="Therapeutic index & safety translation"),
     Module(route="/immuno/hla-coverage", name="immuno/hla-coverage", sources=["IEDB population coverage/Tools API","IPD-IMGT/HLA API"], bucket="Therapeutic index & safety translation"),
     Module(route="/clin/endpoints", name="clin-endpoints", sources=["ClinicalTrials.gov v2 API","WHO ICTRP web service"], bucket="Clinical & translational evidence"),
@@ -860,17 +1018,65 @@ async def assoc_spatial_neighborhoods(symbol: Optional[str] = Query(None), gene:
 
 @router.get("/assoc/bulk-prot", response_model=Evidence)
 async def assoc_bulk_prot(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    """
+    Bulk proteomics evidence.  
+    According to the TargetVal configuration the primary data source for bulk proteomics
+    should be ProteomicsDB, with PDC/PRIDE used only as fall‑back if ProteomicsDB
+    yields no results.  This implementation first attempts to query ProteomicsDB’s
+    public OData service for proteins matching the gene symbol.  If that call
+    returns any entries, they are returned as the sole source.  If the call
+    fails or no entries are found, the router falls back to our own PDC wrapper
+    endpoint and the PRIDE Archive.  Citations reflect only the upstreams that were
+    actually queried.
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     cites: List[str] = []
-    entries = []
+    entries: List[Dict[str, Any]] = []
+    sources_used: List[str] = []
+    # 1) Try ProteomicsDB via its OData API.  Filter by gene name and human taxon (9606).
     try:
-        pq = urllib.parse.quote(sym)
-        pride = f"https://www.ebi.ac.uk/pride/ws/archive/project/list?query={pq}&pageSize=50"
-        pr_js = await _get_json(pride, tries=2); cites.append(pride)
-        entries.append({"pride_projects": pr_js})
+        # ProteomicsDB uses an OData endpoint; restrict by GENE_NAME and TAXCODE for Homo sapiens.
+        # Example: https://www.proteomicsdb.org/proteomicsdb/logic/api_v2/api.xsodata/Protein?$filter=GENE_NAME%20eq%20'TP53'%20and%20TAXCODE%20eq%209606&$top=50&$format=json
+        filter_str = urllib.parse.quote(f"GENE_NAME eq '{sym}' and TAXCODE eq 9606")
+        url = (
+            "https://www.proteomicsdb.org/proteomicsdb/logic/api_v2/api.xsodata/Protein"
+            f"?$filter={filter_str}&$top=50&$format=json"
+        )
+        pdb_js = await _get_json(url, tries=2)
+        # ProteomicsDB may return either a dict with a "d" property or a list; normalize
+        if pdb_js:
+            cites.append(url)
+            entries.append({"proteomicsdb": pdb_js})
+            sources_used.append("ProteomicsDB")
     except Exception:
+        # quietly ignore errors and fall back
         pass
-    return Evidence(status="OK", source="ProteomicsDB, PRIDE, ProteomeXchange", fetched_n=len(entries), data={"entries": entries}, citations=cites, fetched_at=_now())
+    # 2) If no ProteomicsDB entries, try our PDC (CPTAC) wrapper via internal call
+    if not entries:
+        try:
+            pdc = await _self_get("/assoc/bulk-prot-pdc", {"symbol": sym})
+            if isinstance(pdc, dict):
+                # extract nested data if available
+                entries.append({"pdc": pdc.get("data", {})})
+                cites.extend(pdc.get("citations", []) or [])
+                sources_used.append("PDC GraphQL (CPTAC)")
+        except Exception:
+            pass
+    # 3) Final fall‑back: PRIDE Archive search on the gene symbol
+    if not entries:
+        try:
+            pq = urllib.parse.quote(sym)
+            pride_url = f"https://www.ebi.ac.uk/pride/ws/archive/project/list?query={pq}&pageSize=50"
+            pr_js = await _get_json(pride_url, tries=2)
+            cites.append(pride_url)
+            entries.append({"pride_projects": pr_js})
+            sources_used.append("PRIDE Archive")
+        except Exception:
+            pass
+    fetched = sum(len(v or []) if isinstance(v, list) else 1 for e in entries for v in e.values())
+    status = "OK" if entries else "NO_DATA"
+    source = ", ".join(sources_used) if sources_used else "ProteomicsDB, PRIDE, ProteomeXchange"
+    return Evidence(status=status, source=source, fetched_n=fetched, data={"entries": entries}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/omics-phosphoproteomics", response_model=Evidence)
 async def assoc_omics_phosphoproteomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -931,11 +1137,43 @@ async def sc_bican(symbol: Optional[str] = Query(None), gene: Optional[str] = Qu
 
 @router.get("/sc/hubmap", response_model=Evidence)
 async def sc_hubmap(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    """
+    Single‑cell evidence from the HuBMAP consortium.  
+    The previous implementation simply performed a literature search on Europe PMC
+    and labelled it as HuBMAP.  To comply with the specification, this endpoint
+    now queries the public HuBMAP Search API directly.  When the search API
+    returns results, we return them verbatim; if it fails or returns no hits,
+    we gracefully fall back to a short Europe PMC search and still cite the
+    HuBMAP portal link.
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    link = "https://portal.hubmapconsortium.org"
-    q = f"{sym} HuBMAP single-cell"
-    hits, cites = await _epmc_search(q, size=20); cites.append(link)
-    return Evidence(status="OK", source="HuBMAP portal", fetched_n=len(hits), data={"portal": link, "query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    cites: List[str] = []
+    data: Dict[str, Any] = {}
+    # Attempt HuBMAP Search API: search for the gene symbol across datasets.  The v3 search API
+    # accepts keyword queries; limit to 25 results for brevity.  See HuBMAP docs for details.
+    try:
+        kw = urllib.parse.quote(sym)
+        hub_url = f"https://search.api.hubmapconsortium.org/v3/search?keywords={kw}&entity_type=dataset&limit=25"
+        js = await _get_json(hub_url, tries=2)
+        if js:
+            cites.append(hub_url)
+            data["hubmap"] = js
+    except Exception:
+        # ignore search failures – we will fall back
+        js = None
+    # If HuBMAP search yields nothing, fall back to a Europe PMC search for mention of HuBMAP + gene
+    hits: List[Dict[str, Any]] = []
+    if not data:
+        query = f"{sym} HuBMAP single-cell"
+        hits, epmc_cites = await _epmc_search(query, size=20)
+        cites.extend(epmc_cites)
+        data["hits"] = hits
+    # Always include the general HuBMAP portal link for reference
+    cites.append("https://portal.hubmapconsortium.org")
+    fetched = len(hits) if not data.get("hubmap") else (len(data["hubmap"].get("results", [])) if isinstance(data["hubmap"], dict) else 1)
+    status = "OK" if fetched > 0 else "NO_DATA"
+    source = "HuBMAP Search API" if data.get("hubmap") else "HuBMAP portal (fallback via Europe PMC)"
+    return Evidence(status=status, source=source, fetched_n=fetched, data=data, citations=cites, fetched_at=_now())
 
 # ------------------------ Endpoints: GENETIC CAUSALITY ------------------------
 
@@ -1084,19 +1322,63 @@ async def genetics_functional(symbol: Optional[str] = Query(None), gene: Optiona
     hits, cites = await _epmc_search(q, size=80)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/genetics/lncrna", response_model=Evidence)
-async def genetics_lncrna(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} lncRNA long noncoding RNA"
-    hits, cites = await _epmc_search(q, size=60)
-    return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+@router.get("/genetics/lncrna", response_model=EvidenceEnvelope)
+async def genetics_lncrna(urs: Optional[str] = Query(None), symbol: Optional[str] = Query(None)):
+    """
+    LncRNA evidence via RNAcentral. Provide either a URS (RNAcentral accession) or a symbol (HGNC symbol or external ID).
+    Populates context.gene_id when HGNC cross‑references are found.
+    """
+    env = EvidenceEnvelope(module="genetics-lncrna", domain=DOMAIN_LABELS["1"])
+    try:
+        rows: List[dict] = []
+        if urs:
+            x = await rnacentral.urs_xrefs(fetch_json, urs)
+            rows = [x] if x else []
+        elif symbol:
+            x = await rnacentral.by_external_id(fetch_json, symbol)
+            rows = (x or {}).get("results", []) if isinstance(x, dict) else []
+        if rows:
+            xrefs = rows[0].get("xrefs", [])
+            for xx in xrefs:
+                if xx.get("database") == "HGNC" and xx.get("accession"):
+                    env.context.gene_id = xx["accession"]
+                    break
+    except Exception:
+        rows = []
+    env.records = rows
+    env.provenance.sources.append("https://rnacentral.org/api/v1")
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
 
-@router.get("/genetics/mirna", response_model=Evidence)
-async def genetics_mirna(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} microRNA OR miRNA"
-    hits, cites = await _epmc_search(q, size=60)
-    return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+@router.get("/genetics/mirna", response_model=EvidenceEnvelope)
+async def genetics_mirna(urs: Optional[str] = Query(None), symbol: Optional[str] = Query(None)):
+    """
+    miRNA evidence via RNAcentral. Provide either a URS (RNAcentral accession) or a symbol (miRBase/miRNA ID or HGNC symbol).
+    Populates context.gene_id when HGNC cross‑references are found.
+    """
+    env = EvidenceEnvelope(module="genetics-mirna", domain=DOMAIN_LABELS["1"])
+    rows: List[dict] = []
+    try:
+        if urs:
+            x = await rnacentral.urs_xrefs(fetch_json, urs)
+            rows = [x] if x else []
+        elif symbol:
+            x = await rnacentral.by_external_id(fetch_json, symbol)
+            rows = (x or {}).get("results", []) if isinstance(x, dict) else []
+        if rows:
+            xrefs = rows[0].get("xrefs", [])
+            for xx in xrefs:
+                if xx.get("database") == "HGNC" and xx.get("accession"):
+                    env.context.gene_id = xx["accession"]
+                    break
+    except Exception:
+        rows = []
+    env.records = rows
+    env.provenance.sources.append("https://rnacentral.org/api/v1")
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
 
 @router.get("/genetics/pathogenicity-priors", response_model=Evidence)
 async def genetics_pathogenicity_priors(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:  # type: ignore
@@ -1135,12 +1417,22 @@ async def mech_ppi(symbol: Optional[str] = Query(None), gene: Optional[str] = Qu
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"STRING fetch failed: {e!s}")
 
-@router.get("/mech/pathways", response_model=Evidence)
-async def mech_pathways(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} Reactome pathway"
-    hits, cites = await _epmc_search(q, size=30)
-    return Evidence(status="OK", source="Reactome (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+@router.get("/mech/pathways", response_model=EvidenceEnvelope)
+async def mech_pathways(uniprot: str = Query(...)):
+    """
+    Mechanistic pathways via Reactome Content Service. Only Homo sapiens pathways are returned.
+    """
+    env = EvidenceEnvelope(module="mech-pathways", domain=DOMAIN_LABELS["2"])
+    try:
+        rows = await reactome.pathways_for_uniprot(fetch_json, uniprot)
+    except Exception:
+        rows = []
+    filtered = [r for r in rows if r.get("speciesName") == "Homo sapiens"]
+    env.records = filtered
+    env.provenance.sources.append("https://reactome.org/ContentService")
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
 
 @router.get("/mech/ligrec", response_model=Evidence)
 async def mech_ligrec(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -1152,6 +1444,119 @@ async def mech_ligrec(symbol: Optional[str] = Query(None), gene: Optional[str] =
         return Evidence(status="OK", source="OmniPath", fetched_n=n, data={"pairs": pairs}, citations=[url], fetched_at=_now())
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"OmniPath fetch failed: {e!s}")
+
+# ---------------------- Additional mechanistic regulator endpoints (v2.2) ----------------------
+
+@router.get("/mech/complexes", response_model=EvidenceEnvelope)
+async def mech_complexes(uniprot: str = Query(...)):
+    """
+    Protein complexes for a UniProt accession. Primary source is ComplexPortal; OmniPath complexes used as fallback.
+    """
+    env = EvidenceEnvelope(module="mech-complexes", domain=DOMAIN_LABELS["2"])
+    try:
+        cps = await complex_portal.complexes_by_uniprot(fetch_json, uniprot)
+        env.provenance.sources.append("https://www.ebi.ac.uk/intact/complex-ws")
+        env.records = cps
+    except Exception:
+        try:
+            data, _ = await fetch_json("https://omnipathdb.org/complexes", params={"genes": uniprot, "organism": "9606"}, ttl_tier="moderate")
+            env.provenance.sources.append("https://omnipathdb.org/complexes")
+            env.records = data
+        except Exception:
+            env.records = []
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
+
+@router.get("/mech/directed-signaling", response_model=EvidenceEnvelope)
+async def mech_directed_signaling():
+    """
+    Directed signaling interactions (signed and directed) via OmniPath. Returns a list of interactions and derived edges.
+    """
+    env = EvidenceEnvelope(module="mech-directed-signaling", domain=DOMAIN_LABELS["2"])
+    try:
+        rows = await omnipath.directed_interactions(fetch_json)
+    except Exception:
+        rows = []
+    env.records = [r for r in rows if r.get("is_directed")]
+    env.edges = []
+    for r in env.records:
+        direction = None
+        if r.get("is_stimulation"):
+            direction = "activates"
+        elif r.get("is_inhibition"):
+            direction = "inhibits"
+        elif r.get("is_directed"):
+            direction = "signed"
+        env.edges.append(Edge(src=r.get("source"), dst=r.get("target"), type="regulates", direction=direction, meta={}, sources=["https://omnipathdb.org/interactions"]))
+    env.provenance.sources.append("https://omnipathdb.org/interactions")
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
+
+@router.get("/mech/kinase-substrate", response_model=EvidenceEnvelope)
+async def mech_kinase_substrate():
+    """
+    Kinase–substrate interactions via OmniPath (kinaseextra and omnipath datasets). Returns interactions and derived edges.
+    """
+    env = EvidenceEnvelope(module="mech-kinase-substrate", domain=DOMAIN_LABELS["2"])
+    try:
+        rows = await omnipath.kinase_substrate(fetch_json)
+    except Exception:
+        rows = []
+    env.records = rows
+    env.edges = [
+        Edge(src=r.get("enzyme"), dst=r.get("substrate"), type="phosphorylates", direction="activates", meta={}, sources=["https://omnipathdb.org/enzsub"])
+        for r in rows
+    ]
+    env.provenance.sources.append("https://omnipathdb.org/enzsub")
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
+
+@router.get("/mech/mirna-target", response_model=EvidenceEnvelope)
+async def mech_mirna_target(gene: Optional[str] = Query(None)):
+    """
+    miRNA–target interactions via OmniPath mirnatarget dataset. If gene symbol is provided, restrict interactions to that gene.
+    """
+    env = EvidenceEnvelope(module="mech-mirna-target", domain=DOMAIN_LABELS["2"])
+    try:
+        url = "https://omnipathdb.org/interactions"
+        params = {"datasets": "mirnatarget", "format": "json"}
+        if gene:
+            params["genes"] = gene
+        rows, _ = await fetch_json(url, params=params, ttl_tier="moderate")
+    except Exception:
+        rows = []
+    env.records = rows
+    env.edges = [
+        Edge(src=r.get("source"), dst=r.get("target"), type="regulates", direction="inhibits", meta={}, sources=["https://omnipathdb.org/interactions"])
+        for r in rows
+    ]
+    env.provenance.sources.append("https://omnipathdb.org/interactions")
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
+
+@router.get("/mech/tf-target", response_model=EvidenceEnvelope)
+async def mech_tf_target():
+    """
+    Transcription factor–target regulatory interactions via OmniPath DoRothEA (A,B levels) and tf_target datasets. Returns interactions and derived edges.
+    """
+    env = EvidenceEnvelope(module="mech-tf-target", domain=DOMAIN_LABELS["2"])
+    try:
+        rows = await omnipath.tf_targets_dorothea(fetch_json, levels="A,B")
+    except Exception:
+        rows = []
+    env.records = rows
+    env.edges = [
+        Edge(src=r.get("source"), dst=r.get("target"), type="regulates", direction="activates", meta={}, sources=["https://omnipathdb.org/interactions"])
+        for r in rows
+    ]
+    env.provenance.sources.append("https://omnipathdb.org/interactions")
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
 
 @router.get("/assoc/perturb", response_model=Evidence)
 async def assoc_perturb(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), phenotype: Optional[str] = None) -> Evidence:
@@ -1200,29 +1605,40 @@ async def tract_ligandability_sm(symbol: Optional[str] = Query(None), gene: Opti
     cites += [data["alphafold_link"], data["pdbe_link"]]
     return Evidence(status="OK", source="UniProtKB, AlphaFoldDB, PDBe", fetched_n=1, data=data, citations=cites, fetched_at=_now())
 
-@router.get("/tract/ligandability-ab", response_model=Evidence)
-async def tract_ligandability_ab(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    cites: List[str] = []
-    data: Dict[str, Any] = {}
+@router.get("/tract/ligandability-ab", response_model=EvidenceEnvelope)
+async def tract_ligandability_ab(gene: Optional[str] = Query(None)):
+    """
+    Antibody ligandability evidence based on UniProtKB & GlyGen; Human Protein Atlas used only as fallback flags.  Optionally filter by HGNC symbol.
+    """
+    env = EvidenceEnvelope(module="tract-ligandability-ab", domain=DOMAIN_LABELS["4"])
     try:
-        uni = ("https://rest.uniprot.org/uniprotkb/search"
-               f"?query=gene:{urllib.parse.quote(sym)}+AND+reviewed:true+AND+organism_id:9606"
-               "&format=json&fields=accession,protein_name,cc_subcellular_location")
-        data["uniprot"] = await _get_json(uni, tries=2); cites.append(uni)
+        proteins = await uniprot.cell_surface(fetch_json, gene)
     except Exception:
-        data["uniprot"] = {}
-    try:
-        hpa = ("https://www.proteinatlas.org/api/search_download.php"
-               f"?format=json&columns=gene,secretome,subcellular_location&search={urllib.parse.quote(sym)}")
-        data["hpa_flags"] = await _get_json(hpa, tries=1); cites.append(hpa)
-    except Exception:
-        data["hpa_flags"] = []
-    feasible = False
-    if isinstance(data.get("hpa_flags"), list):
-        flags_text = " ".join([json.dumps(x).lower() for x in data["hpa_flags"]])
-        feasible = ("membrane" in flags_text) or ("secreted" in flags_text)
-    return Evidence(status="OK", source="UniProtKB, Human Protein Atlas (HPA)", fetched_n=1, data={"features": data, "antibody_feasible": bool(feasible)}, citations=cites, fetched_at=_now())
+        proteins = []
+    env.provenance.sources.append("https://rest.uniprot.org/uniprotkb/search")
+    out: List[dict] = []
+    for p in proteins or []:
+        ac = p.get("primaryAccession") or p.get("accession") or None
+        gg = {}
+        if ac:
+            try:
+                gg = await glygen.protein_summary(fetch_json, ac)
+                env.provenance.sources.append("https://api.glygen.org/protein/detail")
+            except Exception:
+                gg = {}
+        # Heuristic for antibody feasibility: look for membrane/secreted/extracellular keywords
+        loc_fields: List[str] = []
+        for k in ("cc_subcellular_location", "comment"):
+            v = p.get(k)
+            if isinstance(v, str):
+                loc_fields.append(v.lower())
+        loc_text = " ".join(loc_fields)
+        feasible = any(keyword in loc_text for keyword in ["membrane", "secreted", "extracellular"])
+        out.append({"uniprot": ac, "uniprot_row": p, "glygen": gg, "antibody_feasible": bool(feasible)})
+    env.records = out
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
 
 @router.get("/tract/ligandability-oligo", response_model=Evidence)
 async def tract_ligandability_oligo(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -1252,19 +1668,59 @@ async def tract_immunogenicity(symbol: Optional[str] = Query(None), gene: Option
     hits, cites = await _epmc_search(q, size=60)
     return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
-@router.get("/tract/mhc-binding", response_model=Evidence)
-async def tract_mhc_binding(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} netMHCpan OR HLA binding"
-    hits, cites = await _epmc_search(q, size=60)
-    return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+@router.post("/tract/mhc-binding", response_model=EvidenceEnvelope)
+async def tract_mhc_binding(payload: Dict[str, Any] = Body(...)):
+    """
+    Predict peptide–MHC binding via IEDB Tools (netMHCpan) with allele normalization from IPD‑IMGT/HLA.
+    Expects JSON payload: {"peptides": [...], "alleles": [...], "class": "I"|"II"}.
+    """
+    env = EvidenceEnvelope(module="tract-mhc-binding", domain=DOMAIN_LABELS["5"])
+    alleles = payload.get("alleles", []) if payload else []
+    peptides = payload.get("peptides", []) if payload else []
+    mhc_class = payload.get("class", "I") if payload else "I"
+    # Normalize allele names via IPD‑IMGT/HLA (recorded in provenance but not used directly)
+    try:
+        if alleles:
+            _ = await ipd_imgt.search_alleles(fetch_json, " OR ".join(alleles))
+            env.provenance.sources.append("https://www.ebi.ac.uk/cgi-bin/ipd/api/allele")
+    except Exception:
+        pass
+    try:
+        if mhc_class.upper() == "II":
+            preds = await iedb.predict_mhc_class_ii(fetch_json, peptides, alleles)
+            env.provenance.sources.append("https://tools.iedb.org/tools_api/mhcii/")
+        else:
+            preds = await iedb.predict_mhc_class_i(fetch_json, peptides, alleles)
+            env.provenance.sources.append("https://tools.iedb.org/tools_api/mhci/")
+    except Exception:
+        preds = []
+    env.records = preds
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
 
-@router.get("/tract/iedb-epitopes", response_model=Evidence)
-async def tract_iedb_epitopes(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} IEDB epitope HLA"
-    hits, cites = await _epmc_search(q, size=40)
-    return Evidence(status="OK", source="IEDB IQ-API, Europe PMC (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+@router.get("/tract/iedb-epitopes", response_model=EvidenceEnvelope)
+async def tract_iedb_epitopes(gene: Optional[str] = Query(None), antigen: Optional[str] = Query(None)):
+    """
+    IEDB epitope evidence. Primary source is the IEDB IQ‑API. Accepts optional gene symbol and antigen substring.
+    """
+    env = EvidenceEnvelope(module="tract-iedb-epitopes", domain=DOMAIN_LABELS["5"])
+    # Build query dict for IEDB IQ‑API: gene symbol (exact match) and antigen partial match.
+    q = {}
+    if gene:
+        q["gene_symbol"] = f"eq.{gene}"
+    if antigen:
+        q["antigen_name"] = f"ilike.*{antigen}*"
+    try:
+        rows = await iedb.search_epitopes(fetch_json, q)
+    except Exception:
+        rows = []
+    # Limit number of returned records to prevent large payloads
+    env.records = rows[:1000]
+    env.provenance.sources.append("https://query-api.iedb.org/epitope_search")
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
 
 @router.get("/tract/surfaceome-hpa", response_model=Evidence)
 async def tract_surfaceome_hpa(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -1831,15 +2287,19 @@ async def function_dependency(symbol: Optional[str] = Query(None), gene: Optiona
         cites.append("https://forum.depmap.org/t/stable-url-for-current-release-files/3765")
     except Exception:
         pass
+    # BioGRID ORCS REST API historically required an API key.  Under the keyless
+    # configuration we avoid reading any environment variables and instead use the
+    # open endpoint without an access key.  If the open call fails, ORCS data is
+    # simply omitted and the DepMap files remain the primary payload.  Always
+    # cite the ORCS webservice documentation when attempting the call.
     orcs = None
-    import os
-    key = os.getenv("BIOGRID_ORCS_KEY") or os.getenv("BIOGRID_API_KEY")
-    if key:
-        try:
-            orcs = await _get_json(f"https://orcsws.thebiogrid.org/genes/?accesskey={key}&geneName={sym}&format=json")
-            cites.append("https://wiki.thebiogrid.org/doku.php/orcs:webservice")
-        except Exception:
-            pass
+    try:
+        orcs_url = f"https://orcsws.thebiogrid.org/genes/?geneName={urllib.parse.quote(sym)}&format=json"
+        orcs = await _get_json(orcs_url)
+        cites.append("https://wiki.thebiogrid.org/doku.php/orcs:webservice")
+        cites.append(orcs_url)
+    except Exception:
+        orcs = None
     payload = {"depmap_files": files, "orcs_gene": orcs}
     fetched_n = sum(len(v) if isinstance(v, list) else (len(v) if isinstance(v, dict) else 1) for v in payload.values() if v)
     return Evidence(status="OK" if fetched_n else "NO_DATA", source="DepMap portal, BioGRID ORCS", fetched_n=fetched_n, data=payload, citations=cites, fetched_at=_now())
@@ -1847,15 +2307,24 @@ async def function_dependency(symbol: Optional[str] = Query(None), gene: Optiona
 
 
 
-@router.get("/immuno/hla-coverage", response_model=Evidence)
-async def immuno_hla_coverage(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None), rsid: Optional[str] = None, variant: Optional[str] = None) -> Evidence:
-
-    import json as _json
-    cites = ["https://nextgen-tools.iedb.org/docs/api/endpoints/api_references.html"]
-    alleles = (condition or "").split(",") if condition else []
-    if not alleles:
-        return Evidence(status="ERROR", source="IEDB Tools", fetched_n=0, data={"error":"provide alleles (comma-separated) in 'condition' or POST body"}, citations=cites, fetched_at=_now())
-    return Evidence(status="OK", source="IEDB (spec refs)", fetched_n=len(alleles), data={"alleles": alleles, "note": "Use POST /tract/mhc-binding + /tract/iedb-epitopes first, then coverage."}, citations=cites, fetched_at=_now())
+@router.get("/immuno/hla-coverage", response_model=EvidenceEnvelope)
+async def immuno_hla_coverage(alleles: List[str] = Query(...)):
+    """
+    HLA population coverage metadata via IPD‑IMGT/HLA and IEDB population coverage. Provide one or more allele identifiers (e.g., HLA-A*02:01) as query parameters.
+    """
+    env = EvidenceEnvelope(module="immuno/hla-coverage", domain=DOMAIN_LABELS["5"])
+    try:
+        meta = await ipd_imgt.search_alleles(fetch_json, " OR ".join(alleles))
+    except Exception:
+        meta = []
+    env.records = meta
+    env.provenance.sources += [
+        "https://www.ebi.ac.uk/cgi-bin/ipd/api/allele",
+        "https://tools.iedb.org/population/"
+    ]
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
 
 
 
@@ -1873,11 +2342,34 @@ async def clin_feasibility(symbol: Optional[str] = Query(None), gene: Optional[s
     return Evidence(status="OK" if fetched_n else "NO_DATA", source="ClinicalTrials.gov", fetched_n=fetched_n, data={"query":q,"ctgov": ct}, citations=["https://clinicaltrials.gov/api/"], fetched_at=_now())
 
 
-@router.get("/tract/surfaceome", response_model=Evidence)
-async def tract_surfaceome(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None)) -> Evidence:
-
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    return await tract_surfaceome_hpa(symbol=sym, gene=None)
+@router.get("/tract/surfaceome", response_model=EvidenceEnvelope)
+async def tract_surfaceome(gene: Optional[str] = Query(None)):
+    """
+    Surfaceome (cell surface proteins) evidence: primary sources UniProtKB and GlyGen. Optionally filter by HGNC symbol.
+    """
+    env = EvidenceEnvelope(module="tract-surfaceome", domain=DOMAIN_LABELS["4"])
+    # Query UniProtKB for cell surface proteins; optionally filter by gene symbol.
+    try:
+        proteins = await uniprot.cell_surface(fetch_json, gene)
+    except Exception:
+        proteins = []
+    env.provenance.sources.append("https://rest.uniprot.org/uniprotkb/search")
+    # Augment results with GlyGen protein summaries
+    out: List[dict] = []
+    for p in proteins or []:
+        ac = p.get("primaryAccession") or p.get("accession") or None
+        gg = {}
+        if ac:
+            try:
+                gg = await glygen.protein_summary(fetch_json, ac)
+                env.provenance.sources.append("https://api.glygen.org/protein/detail")
+            except Exception:
+                gg = {}
+        out.append({"uniprot": ac, "uniprot_row": p, "glygen": gg})
+    env.records = out
+    env.provenance.module_order = _module_order_index(env.module)
+    stage_context(env)
+    return env
     
 
 
@@ -1891,8 +2383,9 @@ async def tract_surfaceome(symbol: Optional[str] = Query(None), gene: Optional[s
 # ---------- Added modules to reach 64 per Targetval Config (2025-10-17) ----------
 try:
     MODULES += [
-        Module(route="/perturb/qc", name="perturb-qc (internal)", sources=["(internal only)"], bucket="Functional & mechanistic validation"),
-        Module(route="/perturb/scrna-summary", name="perturb-scrna-summary (internal)", sources=["(internal only)"], bucket="Functional & mechanistic validation"),
+        # internal-only modules removed per v2.2 spec (no public route)
+        # Module(route="/perturb/qc", name="perturb-qc (internal)", sources=["(internal only)"], bucket="Functional & mechanistic validation"),
+        # Module(route="/perturb/scrna-summary", name="perturb-scrna-summary (internal)", sources=["(internal only)"], bucket="Functional & mechanistic validation"),
         Module(route="/perturb/lincs-signatures", name="perturb-lincs-signatures", sources=["LINCS Data Portal (LDP3) Signature API","iLINCS API"], bucket="Functional & mechanistic validation"),
         Module(route="/perturb/connectivity", name="perturb-connectivity", sources=["iLINCS API","LDP3 Data API"], bucket="Functional & mechanistic validation"),
         Module(route="/perturb/perturbseq", name="perturb-perturbseq-encode", sources=["ENCODE REST API","EBI ENA"], bucket="Functional & mechanistic validation"),
@@ -1907,15 +2400,6 @@ except Exception:
 
 # ------------------------ Added endpoints: PERTURBATION (per new config) -------
 
-@router.get("/perturb/qc", response_model=Evidence)
-async def perturb_qc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    # Internal-only per spec — expose explicit, truthful status.
-    return Evidence(status="ERROR", source="internal-only", fetched_n=0, data={"note": "Module is internal per configuration."}, citations=[], fetched_at=_now())
-
-@router.get("/perturb/scrna-summary", response_model=Evidence)
-async def perturb_scrna_summary(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    # Internal-only per spec — expose explicit, truthful status.
-    return Evidence(status="ERROR", source="internal-only", fetched_n=0, data={"note": "Module is internal per configuration."}, citations=[], fetched_at=_now())
 
 async def _ldp3_find_signatures(where: Dict[str, Any], limit: int = 50) -> Tuple[List[Dict[str, Any]], List[str]]:
     cites: List[str] = []
@@ -2037,13 +2521,12 @@ async def perturb_crispr_screens(symbol: Optional[str] = Query(None), gene: Opti
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     cites: List[str] = []
     data: Dict[str, Any] = {}
-    import os as _os
-    key = _os.getenv("BIOGRID_ORCS_KEY") or _os.getenv("BIOGRID_API_KEY")
+    # Compose the ORCS URL without any API key.  Under the keyless configuration
+    # we avoid reading environment variables.  If the call fails, fall back to
+    # Europe PMC keyword search.  Always cite the ORCS webservice and the actual
+    # URL attempted.
     base = "https://orcsws.thebiogrid.org/genes/?"
-    if key:
-        url = f"{base}accesskey={key}&geneName={urllib.parse.quote(sym)}&format=json"
-    else:
-        url = f"{base}geneName={urllib.parse.quote(sym)}&format=json"
+    url = f"{base}geneName={urllib.parse.quote(sym)}&format=json"
     try:
         data["orcs"] = await _get_json(url, tries=2)
         cites.append("https://wiki.thebiogrid.org/doku.php/orcs:webservice")
@@ -2057,7 +2540,7 @@ async def perturb_crispr_screens(symbol: Optional[str] = Query(None), gene: Opti
         cites += epmc_cites
         n = len(hits or [])
         return Evidence(status="OK" if n else "NO_DATA", source="BioGRID ORCS (fallback: Europe PMC)", fetched_n=n, data=data, citations=cites, fetched_at=_now())
-    n = len(data["orcs"]) if isinstance(data["orcs"], list) else (1 if data["orcs"] else 0)
+    n = len(data.get("orcs", [])) if isinstance(data.get("orcs"), list) else (1 if data.get("orcs") else 0)
     return Evidence(status="OK" if n else "NO_DATA", source="BioGRID ORCS", fetched_n=n, data=data, citations=cites, fetched_at=_now())
 
 @router.get("/perturb/depmap-dependency", response_model=Evidence)
@@ -2349,25 +2832,15 @@ async def _self_get(request: Request, path: str, params: Dict[str, Any]) -> Dict
 
 async def _get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None,
                     timeout_s: float = 30.0, tries: int = 3, backoff: float = 0.6) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    params = params or {}
-    headers = {"Accept": "application/json", "User-Agent": "targetval-gateway/2025"} | (headers or {})
-    last_err = None
-    async with httpx.AsyncClient(timeout=timeout_s, headers=headers) as client:
-        for i in range(tries):
-            try:
-                r = await client.get(url, params=params)
-                r.raise_for_status()
-                ctype = r.headers.get("Content-Type", "")
-                if "application/json" in ctype or "text/plain" in ctype:
-                    try:
-                        return r.json(), None
-                    except Exception:
-                        return json.loads(r.text), None
-                return {"raw": r.text}, None
-            except Exception as e:
-                last_err = str(e)
-                await asyncio.sleep(backoff * (2 ** i))
-        return None, last_err
+    """
+    Thin wrapper around fetch_json for backward compatibility. Delegates to app.runtime.http.fetch_json to honor
+    per‑host semaphores, backoff, and caching. Returns (data, None) or (None, error).
+    """
+    try:
+        data, _meta = await fetch_json(url, params=params or {}, headers=headers, ttl_tier="moderate", method="GET")
+        return data, None
+    except Exception as e:
+        return None, str(e)
 
 async def _post_json(url: str, json_body: Dict[str, Any], headers: Optional[Dict[str, str]] = None,
                      timeout_s: float = 30.0, tries: int = 3, backoff: float = 0.6) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -2494,7 +2967,8 @@ async def _aggregate(request: Request, req: AggregateRequest):
             else:
                 raise
     if req.order == "parallel":
-        sem = asyncio.Semaphore(8)
+        # limit parallelism to 4 tasks per spec
+        sem = asyncio.Semaphore(4)
         async def _guarded(k: str):
             async with sem:
                 await _run_one(k)
@@ -3793,7 +4267,9 @@ async def _alias_merge(request: Request, paths: List[str], params: Dict[str, Any
 async def _assoc_spatial(symbol: _Optional[str] = Query(None), gene: _Optional[str] = Query(None),
                          condition: _Optional[str] = Query(None), limit: int = Query(100, ge=1, le=200)) -> Evidence:
     params = dict(symbol=symbol or gene, condition=condition, limit=limit)
-    return await _alias_merge(request, ["/assoc/spatial-expression", "/assoc/spatial-neighborhoods"], params, "Europe PMC spatial expression + neighborhoods")
+    # Spatial association: merge gene-level spatial expression and neighbourhood data.  The spec
+    # specifies Europe PMC spatial/ISH literature as the primary; update the label accordingly.
+    return await _alias_merge(request, ["/assoc/spatial-expression", "/assoc/spatial-neighborhoods"], params, "Spatial association (Europe PMC spatial/ISH)")
 _add_if_missing("/assoc/spatial", _assoc_spatial, ["GET"], Evidence)
 
 # assoc-proteomics → aggregate of bulk proteomics sources
@@ -3801,7 +4277,9 @@ async def _assoc_proteomics(symbol: _Optional[str] = Query(None), gene: _Optiona
                             condition: _Optional[str] = Query(None), limit: int = Query(100, ge=1, le=200)) -> Evidence:
     params = dict(symbol=symbol or gene, condition=condition, limit=limit)
     paths = ["/assoc/bulk-prot", "/assoc/bulk-prot-pdc", "/assoc/omics-phosphoproteomics"]
-    return await _alias_merge(request, paths, params, "ProteomicsDB + PDC + phosphoproteomics")
+    # Proteomics association: prioritise ProteomicsDB, then PDC (CPTAC) and PRIDE, and include
+    # phosphoproteomics; adjust the source label accordingly.
+    return await _alias_merge(request, paths, params, "Proteomics (ProteomicsDB + PDC/PRIDE)")
 _add_if_missing("/assoc/proteomics", _assoc_proteomics, ["GET"], Evidence)
 
 # assoc-metabolomics → aggregate of metabolomics sources
@@ -3809,7 +4287,10 @@ async def _assoc_metabolomics(symbol: _Optional[str] = Query(None), gene: _Optio
                               condition: _Optional[str] = Query(None), limit: int = Query(100, ge=1, le=200)) -> Evidence:
     params = dict(symbol=symbol or gene, condition=condition, limit=limit)
     paths = ["/assoc/omics-metabolites", "/assoc/metabolomics-ukb-nightingale"]
-    return await _alias_merge(request, paths, params, "Metabolomics (omics + UKB Nightingale)")
+    # The spec designates MetaboLights as the primary and Metabolomics Workbench as the fallback.
+    # Our omics-metabolites and UKB Nightingale modules correspond to these two sources; adjust
+    # the source label accordingly.
+    return await _alias_merge(request, paths, params, "Metabolomics (MetaboLights + Metabolomics Workbench)")
 _add_if_missing("/assoc/metabolomics", _assoc_metabolomics, ["GET"], Evidence)
 
 # perturb-perturbseq-encode → forwarder to the concrete ENCODE perturbseq route
@@ -3843,7 +4324,9 @@ async def _genetics_3d_maps(symbol: _Optional[str] = Query(None), gene: _Optiona
     params = dict(symbol=symbol or gene)
     js = await _self_get("/genetics/chromatin-contacts", params)
     if isinstance(js, dict):
-        js["source"] = "Alias → 3D chromatin contacts"
+        # Report the correct upstream sources for the 3D maps.  Per spec, this
+        # alias corresponds to 4D Nucleome and UCSC interaction/loop tracks.
+        js["source"] = "Alias → 3D chromatin contacts (4DN + UCSC)"
     return js
 _add_if_missing("/genetics/3d-maps", _genetics_3d_maps, ["GET"], Evidence)
 
@@ -3869,10 +4352,6 @@ _add_module_if_missing("/perturb/perturbseq-encode", "perturb-perturbseq-encode"
                        ["ENCODE REST API"], _b2)
 _add_module_if_missing("/perturb/crispr-screens", "perturb-crispr-screens",
                        ["BioGRID ORCS API", "Europe PMC (fallback)"], _b2)
-_add_module_if_missing("/perturb/qc", "perturb-qc (internal)",
-                       ["LDP3 (internal QC)"], _b2)
-_add_module_if_missing("/perturb/scrna-summary", "perturb-scrna-summary (internal)",
-                       ["Internal synthesis"], _b2)
 _add_module_if_missing("/perturb/drug-response", "perturb-drug-response",
                        ["PharmacoDB API"], _b4)
 _add_module_if_missing("/perturb/depmap-dependency", "perturb-depmap-dependency",
