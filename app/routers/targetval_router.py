@@ -306,116 +306,9 @@ from urllib.parse import urlparse
 from fnmatch import fnmatch
 from fastapi import APIRouter, HTTPException, Query, Body, Path as PathParam, Request
 # --- New imports for EvidenceEnvelope and runtime/clients per v2.2 spec ---
-# EvidenceEnvelope and related classes may live in app.schemas.evidence in the full
-# TargetVal application.  When running this standalone router outside that package (e.g.
-# on Render or in isolation), the import may fail.  Fall back to minimal placeholder
-# implementations to avoid ModuleNotFoundError.  These stubs implement just enough
-# behaviour (dict-like fields) to satisfy downstream usage.
-try:
-    from app.schemas.evidence import EvidenceEnvelope, Edge, stage_context  # type: ignore
-except ImportError:
-    from typing import Any, Dict, List, Optional
-    class EvidenceEnvelope(dict):
-        """Minimal stand‑alone replacement for the EvidenceEnvelope Pydantic model.
-
-        It stores module and domain identifiers along with context, provenance, data,
-        citations and status/fetched counters.  Consumers can treat it as a dict.
-        """
-        def __init__(self, module: str, domain: str):
-            super().__init__()
-            self["module"] = module
-            self["domain"] = domain
-            self["context"] = {}
-            self["provenance"] = {"sources": [], "module_order": []}
-            self["data"] = {}
-            self["citations"] = []
-            self["notes"] = []
-            self["status"] = "NO_DATA"
-            self["fetched_n"] = 0
-            self["fetched_at"] = 0.0
-
-        # Provide attribute accessors for convenience
-        def __getattr__(self, item: str) -> Any:
-            return self.get(item)
-        def __setattr__(self, item: str, value: Any) -> None:
-            self[item] = value
-
-    class Edge(dict):
-        """Placeholder for an Edge object used in synthesis; stores source, target and optional weight."""
-        def __init__(self, source: str, target: str, weight: Optional[float] = None):
-            super().__init__(source=source, target=target)
-            if weight is not None:
-                self["weight"] = weight
-
-    def stage_context(*args: Any, **kwargs: Any) -> Dict[str, Any]:
-        """Stub for stage_context; returns an empty dict since staging is not implemented in this standalone router."""
-        return {}
-# Attempt to import fetch_json and allow_hosts from the original TargetVal runtime.  These
-# functions provide HTTP fetching with retries/caching and host allowlisting.  On this
-# platform the `app.runtime` package is unavailable, which previously resulted in
-# `ModuleNotFoundError: No module named 'app.runtime'`.  To ensure the router
-# continues to work in such environments, we try to import the functions and
-# gracefully fall back to local stubs when import fails.  The stubs implement
-# minimal functionality: `fetch_json` performs a simple HTTP GET returning
-# the JSON and `allow_hosts` becomes a no-op.  This preserves existing
-# behaviour without breaking imports.
-try:
-    from app.runtime.http import fetch_json, allow_hosts  # type: ignore
-except Exception:
-    # Fallback definitions when app.runtime.http is not available.
-    import httpx, asyncio
-
-    async def fetch_json(url: str, *args, **kwargs) -> Tuple[Any, Any]:
-        """Simplified fallback for fetch_json.
-
-        This implementation performs an HTTP GET using httpx and returns a
-        `(data, meta)` tuple where `data` is the parsed JSON or `None`, and
-        `meta` is `None` (since we lack metadata in this context).  It does
-        not implement caching, retries or host allowlisting beyond basic
-        exception handling.  This stub is intended solely as a safety net
-        when the real fetch_json cannot be imported.
-        """
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, params=kwargs.get("params"))
-                response.raise_for_status()
-                if "application/json" in (response.headers.get("content-type", "").lower()):
-                    return response.json(), None
-                # Not JSON – return text
-                return response.text, None
-        except Exception:
-            # On error return None for data and meta
-            return None, None
-
-    def allow_hosts(hosts: Iterable[str]) -> None:
-        """Fallback no-op for allow_hosts.
-
-        The original allow_hosts sets a global allowlist for outbound HTTP
-        requests.  In the absence of the app.runtime module, we silently
-        ignore host allowlisting.  This preserves router initialization
-        without raising errors.
-        """
-        return None
-# Optional import of client helpers; handle missing modules gracefully
-try:
-    # Try to import the client helper modules from app.clients. In environments where
-    # these modules are not installed (e.g., minimal or containerized deployments),
-    # this import will fail. We catch any exception and substitute dummy
-    # namespaces so that router initialization doesn’t crash.
-    from app.clients import iedb, ipd_imgt, uniprot, glygen, rnacentral, reactome, complex_portal, omnipath  # type: ignore
-except Exception:
-    from types import SimpleNamespace
-    # Create harmless stand-ins to avoid AttributeError if the optional
-    # dependencies are missing. Each SimpleNamespace instance can accept
-    # arbitrary attribute access without failing.
-    iedb = SimpleNamespace()
-    ipd_imgt = SimpleNamespace()
-    uniprot = SimpleNamespace()
-    glygen = SimpleNamespace()
-    rnacentral = SimpleNamespace()
-    reactome = SimpleNamespace()
-    complex_portal = SimpleNamespace()
-    omnipath = SimpleNamespace()
+from app.schemas.evidence import EvidenceEnvelope, Edge, stage_context
+from app.runtime.http import fetch_json, allow_hosts
+from app.clients import iedb, ipd_imgt, uniprot, glygen, rnacentral, reactome, complex_portal, omnipath
 
 # ----------------------- Domain naming & registry (authoritative) -----------------------
 DOMAIN_LABELS = {
@@ -499,30 +392,7 @@ def _domain_modules_spec() -> dict:
 from pydantic import BaseModel, Field
 
 # Import legacy Evidence model from schemas to satisfy Pydantic layout rule
-try:
-    from app.schemas.legacy import Evidence  # type: ignore
-except Exception:
-    # Fallback Evidence model so this router can run without the full app package.
-    # It mirrors the fields used by the endpoints and allows extra keys.
-    try:
-        from pydantic import ConfigDict  # type: ignore
-    except Exception:
-        ConfigDict = dict  # type: ignore
-    class Evidence(BaseModel):
-        status: str
-        source: str = ''
-        fetched_n: int = 0
-        data: Dict[str, Any] = {}
-        citations: List[str] = []
-        fetched_at: float = 0.0
-        module: Optional[str] = None
-        domain: Optional[str] = None
-        provenance: Optional[Dict[str, Any]] = None
-        notes: List[str] = []
-        context: Dict[str, Any] = {}
-        # Allow any additional fields present in legacy Evidence objects
-        model_config = ConfigDict(extra='allow')
-
+from app.schemas.legacy import Evidence
 
 # Helper to compute module_order index for provenance. Returns None if not found.
 def _module_order_index(module_name: str) -> int | None:
