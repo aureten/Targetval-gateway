@@ -499,7 +499,30 @@ def _domain_modules_spec() -> dict:
 from pydantic import BaseModel, Field
 
 # Import legacy Evidence model from schemas to satisfy Pydantic layout rule
-from app.schemas.legacy import Evidence
+try:
+    from app.schemas.legacy import Evidence  # type: ignore
+except Exception:
+    # Fallback Evidence model so this router can run without the full app package.
+    # It mirrors the fields used by the endpoints and allows extra keys.
+    try:
+        from pydantic import ConfigDict  # type: ignore
+    except Exception:
+        ConfigDict = dict  # type: ignore
+    class Evidence(BaseModel):
+        status: str
+        source: str = ''
+        fetched_n: int = 0
+        data: Dict[str, Any] = {}
+        citations: List[str] = []
+        fetched_at: float = 0.0
+        module: Optional[str] = None
+        domain: Optional[str] = None
+        provenance: Optional[Dict[str, Any]] = None
+        notes: List[str] = []
+        context: Dict[str, Any] = {}
+        # Allow any additional fields present in legacy Evidence objects
+        model_config = ConfigDict(extra='allow')
+
 
 # Helper to compute module_order index for provenance. Returns None if not found.
 def _module_order_index(module_name: str) -> int | None:
