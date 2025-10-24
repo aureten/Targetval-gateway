@@ -396,7 +396,26 @@ except Exception:
         without raising errors.
         """
         return None
-from app.clients import iedb, ipd_imgt, uniprot, glygen, rnacentral, reactome, complex_portal, omnipath
+# Optional import of client helpers; handle missing modules gracefully
+try:
+    # Try to import the client helper modules from app.clients. In environments where
+    # these modules are not installed (e.g., minimal or containerized deployments),
+    # this import will fail. We catch any exception and substitute dummy
+    # namespaces so that router initialization doesn’t crash.
+    from app.clients import iedb, ipd_imgt, uniprot, glygen, rnacentral, reactome, complex_portal, omnipath  # type: ignore
+except Exception:
+    from types import SimpleNamespace
+    # Create harmless stand-ins to avoid AttributeError if the optional
+    # dependencies are missing. Each SimpleNamespace instance can accept
+    # arbitrary attribute access without failing.
+    iedb = SimpleNamespace()
+    ipd_imgt = SimpleNamespace()
+    uniprot = SimpleNamespace()
+    glygen = SimpleNamespace()
+    rnacentral = SimpleNamespace()
+    reactome = SimpleNamespace()
+    complex_portal = SimpleNamespace()
+    omnipath = SimpleNamespace()
 
 # ----------------------- Domain naming & registry (authoritative) -----------------------
 DOMAIN_LABELS = {
