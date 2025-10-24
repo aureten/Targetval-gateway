@@ -306,7 +306,50 @@ from urllib.parse import urlparse
 from fnmatch import fnmatch
 from fastapi import APIRouter, HTTPException, Query, Body, Path as PathParam, Request
 # --- New imports for EvidenceEnvelope and runtime/clients per v2.2 spec ---
-from app.schemas.evidence import EvidenceEnvelope, Edge, stage_context
+# EvidenceEnvelope and related classes may live in app.schemas.evidence in the full
+# TargetVal application.  When running this standalone router outside that package (e.g.
+# on Render or in isolation), the import may fail.  Fall back to minimal placeholder
+# implementations to avoid ModuleNotFoundError.  These stubs implement just enough
+# behaviour (dict-like fields) to satisfy downstream usage.
+try:
+    from app.schemas.evidence import EvidenceEnvelope, Edge, stage_context  # type: ignore
+except ImportError:
+    from typing import Any, Dict, List, Optional
+    class EvidenceEnvelope(dict):
+        """Minimal stand‑alone replacement for the EvidenceEnvelope Pydantic model.
+
+        It stores module and domain identifiers along with context, provenance, data,
+        citations and status/fetched counters.  Consumers can treat it as a dict.
+        """
+        def __init__(self, module: str, domain: str):
+            super().__init__()
+            self["module"] = module
+            self["domain"] = domain
+            self["context"] = {}
+            self["provenance"] = {"sources": [], "module_order": []}
+            self["data"] = {}
+            self["citations"] = []
+            self["notes"] = []
+            self["status"] = "NO_DATA"
+            self["fetched_n"] = 0
+            self["fetched_at"] = 0.0
+
+        # Provide attribute accessors for convenience
+        def __getattr__(self, item: str) -> Any:
+            return self.get(item)
+        def __setattr__(self, item: str, value: Any) -> None:
+            self[item] = value
+
+    class Edge(dict):
+        """Placeholder for an Edge object used in synthesis; stores source, target and optional weight."""
+        def __init__(self, source: str, target: str, weight: Optional[float] = None):
+            super().__init__(source=source, target=target)
+            if weight is not None:
+                self["weight"] = weight
+
+    def stage_context(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Stub for stage_context; returns an empty dict since staging is not implemented in this standalone router."""
+        return {}
 from app.runtime.http import fetch_json, allow_hosts
 from app.clients import iedb, ipd_imgt, uniprot, glygen, rnacentral, reactome, complex_portal, omnipath
 
