@@ -206,7 +206,7 @@ DOMAINS_META: Dict[int, Dict[str, str]] = {
 
 DOMAIN_MODULES: Dict[int, List[str]] = {
     # D1: Genetic causality & human validation
-        1: [
+    1: [
         "genetics-regulatory",
         "genetics-lncrna",
         "genetics-mirna",
@@ -231,7 +231,7 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
         "genetics-consortia-summary",
         "genetics-nmd-inference",
         "genetics-ptm-signal-lite",
-    ]
+    ],
     # D2: Functional & mechanistic validation
     2: [
         # Ordered list per v2.2 spec (Functional & mechanistic validation)
@@ -256,7 +256,7 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
         "perturb-perturbseq-encode",
     ],
     # D3: Expression, selectivity & cell-state context
-        3: [
+    3: [
         "expr-baseline",
         "expr-inducibility",
         "expr-localization",
@@ -266,7 +266,7 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
         "assoc-bulk-prot",
         "assoc-omics-phosphoproteomics",
         "assoc-hpa-pathology",
-    ]
+    ],
     # D4: Druggability & modality tractability
     4: [
         "mech-structure",
