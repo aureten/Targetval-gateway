@@ -29,6 +29,17 @@ _OT_GQL = "https://api.platform.opentargets.org/api/v4/graphql"
 _ENS_XREF = "https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{symbol}?content-type=application/json"
 _IEU_BASE = "https://gwas-api.mrcieu.ac.uk/"
 
+# Define external API base URLs in one place.  If a service changes its base
+# endpoint, updating this dictionary will propagate the change to all callers.
+EXTERNAL_URLS: Dict[str, str] = {
+    "opentargets_graphql": _OT_GQL,
+    "ensembl_xref": _ENS_XREF,
+    "open_gwas": _IEU_BASE,
+    # Metabolomics Workbench REST API base.  See documentation for context and input
+    # specifications: https://www.metabolomicsworkbench.org/tools/mw_rest.php【525009751346078†L40-L89】
+    "metabolomics_workbench": "https://www.metabolomicsworkbench.org/rest/",
+}
+
 async def _httpx_json_post(url: str, payload: dict, timeout: float = 45.0):
     # Prefer existing _post_json (budgeted/retry); fallback to raw httpx
     try:
@@ -73,7 +84,7 @@ async def _efo_lookup(condition: Optional[str]) -> Optional[str]:
     query($q:String!){
       search(query:$q){ diseases{ id name score } }
     }"""
-    js = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"q": condition}})
+    js = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"q": condition}})
     try:
         diseases = (((js or {}).get("data") or {}).get("search") or {}).get("diseases") or []
         diseases.sort(key=lambda d: d.get("score", 0) or 0, reverse=True)
@@ -1265,10 +1276,41 @@ async def assoc_omics_phosphoproteomics(symbol: Optional[str] = Query(None), gen
 
 @router.get("/assoc/omics-metabolites", response_model=Evidence)
 async def assoc_omics_metabolites(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
+    """
+    Return metabolite associations for a given gene symbol.  The function first
+    attempts to retrieve curated associations via the Metabolomics Workbench
+    REST API (gene context).  If that call fails or returns no data, it
+    performs a literature search as a fallback.
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    citations: List[str] = []
+    # Try live fetch from the Metabolomics Workbench gene endpoint.  This API
+    # returns metabolite associations for a gene symbol.  See the MW REST
+    # documentation for details【525009751346078†L40-L89】.
+    if sym:
+        mw_url = f"{EXTERNAL_URLS['metabolomics_workbench']}gene/gene_symbol/{urllib.parse.quote(sym)}/all"
+        try:
+            mw_data = await _get_json(mw_url, tries=2)
+            citations.append(mw_url)
+            if mw_data:
+                # Successful live fetch – package and return.  The result may be a
+                # list of metabolite records or a dictionary depending on the MW API.
+                n = len(mw_data) if isinstance(mw_data, list) else 1
+                return Evidence(status="OK", source="Metabolomics Workbench", fetched_n=n,
+                                data={"metabolomics": mw_data}, citations=citations, fetched_at=_now())
+        except Exception:
+            # If the API call fails (e.g. network error or service unavailable),
+            # fall back to literature below.
+            pass
+    # Fallback: query MetaboLights/HMDB via Europe PMC when live fetch yields
+    # nothing.  Use a broad query to capture metabolomics studies.
     q = f"{sym} {condition or ''} metabolomics OR metabolite OR HMDB OR Nightingale"
-    hits, cites = await _epmc_search(q, size=80)
-    return Evidence(status="OK", source="MetaboLights, HMDB", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    hits, lit_cites = await _epmc_search(q, size=80)
+    citations.extend(lit_cites)
+    source = "Metabolomics Workbench" if citations else "MetaboLights, HMDB"
+    return Evidence(status=("OK" if hits else "NO_DATA"), source=source,
+                    fetched_n=len(hits), data={"query": q, "hits": hits},
+                    citations=citations, fetched_at=_now())
 
 @router.get("/assoc/hpa-pathology", response_model=Evidence)
 async def assoc_hpa_pathology(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -1377,14 +1419,25 @@ async def genetics_l2g(symbol: Optional[str] = Query(None),
         datasourceScores{ id score }
       }
     }"""
-    js = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
-    assoc = (((js or {}).get("data") or {}).get("associationByEntity") or {})
-    if not assoc:
-        return Evidence(status="NO_DATA", source="OpenTargets", fetched_n=0,
-                        data={"ensg": ensg, "efo": efo},
-                        citations=cites, fetched_at=_now())
-    return Evidence(status="OK", source="OpenTargets", fetched_n=1,
-                    data={"ensg": ensg, "efo": efo, **assoc},
+    # Attempt GraphQL live fetch.  If the call fails (e.g. API changes or
+    # network error) or returns no association, fall back to a literature
+    # search for locus-to-gene evidence.
+    try:
+        js = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+        assoc = (((js or {}).get("data") or {}).get("associationByEntity") or {})
+        if assoc:
+            return Evidence(status="OK", source="OpenTargets", fetched_n=1,
+                            data={"ensg": ensg, "efo": efo, **assoc},
+                            citations=cites, fetched_at=_now())
+    except Exception:
+        # ignore and fall back
+        pass
+    # Fallback: literature search for locus-to-gene or colocalisation evidence
+    fallback_query = f"{sym} {condition or ''} locus to gene OR l2g OR colocalisation"
+    hits, lit_cites = await _epmc_search(fallback_query, size=60)
+    cites.extend(lit_cites)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (fallback)",
+                    fetched_n=len(hits), data={"query": fallback_query, "hits": hits},
                     citations=cites, fetched_at=_now())
 
 
@@ -1392,6 +1445,7 @@ async def genetics_l2g(symbol: Optional[str] = Query(None),
 async def genetics_coloc(symbol: Optional[str] = Query(None),
                          gene: Optional[str] = Query(None),
                          condition: Optional[str] = Query(None)) -> Evidence:
+    # Normalize inputs and compute identifiers
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     ensg = await _ensg_from_symbol(sym) or sym
     efo  = await _efo_lookup(condition)
@@ -1401,19 +1455,36 @@ async def genetics_coloc(symbol: Optional[str] = Query(None),
                         fetched_n=0,
                         data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
                         citations=cites, fetched_at=_now())
+    # GraphQL query for datasource scores.  Some deployments of the OpenTargets API
+    # may rename or deprecate fields; wrap the call in a try/except so that
+    # failures fall back to literature search.
     q = """
     query($ensg:String!, $efo:String!){
       associationByEntity(targetId:$ensg, diseaseId:$efo){
         datasourceScores{ id score }
       }
-    }"""
-    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
-    dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
-    coloc_keys = {"ot_genetics_portal","gwas_catalog","uk_biobank","finngen"}
-    coloc = [x for x in dss if (str(x.get("id","")).lower() in coloc_keys) and (x.get("score") or 0) > 0]
-    return Evidence(status=("OK" if coloc else "NO_DATA"), source="OpenTargets",
-                    fetched_n=len(coloc),
-                    data={"ensg": ensg, "efo": efo, "datasourceScores": dss, "coloc_like": coloc},
+    }
+    """
+    try:
+        js  = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+        dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
+        coloc_keys = {"ot_genetics_portal","gwas_catalog","uk_biobank","finngen"}
+        coloc = [x for x in dss if (str(x.get("id",""))).lower() in coloc_keys and (x.get("score") or 0) > 0]
+        if coloc:
+            return Evidence(status="OK", source="OpenTargets",
+                            fetched_n=len(coloc),
+                            data={"ensg": ensg, "efo": efo, "datasourceScores": dss, "coloc_like": coloc},
+                            citations=cites, fetched_at=_now())
+    except Exception:
+        # ignore and fall back
+        pass
+    # Fallback: search Europe PMC for colocalisation evidence when the live call
+    # fails or returns no meaningful hits.  The search includes both UK and US spellings.
+    fallback_query = f"{sym} {condition or ''} colocalisation OR colocalization OR colocalised"
+    hits, lit_cites = await _epmc_search(fallback_query, size=60)
+    cites.extend(lit_cites)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (fallback)",
+                    fetched_n=len(hits), data={"query": fallback_query, "hits": hits},
                     citations=cites, fetched_at=_now())
 
 
@@ -4269,13 +4340,26 @@ async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
         datasourceScores{ id score }
       }
     }"""
-    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
-    dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
-    keys  = {"uk_biobank","finngen","gwas_catalog"}
-    cons  = [x for x in dss if (str(x.get("id","")).lower() in keys) and (x.get("score") or 0) > 0]
-    return Evidence(status=("OK" if cons else "NO_DATA"), source="OpenTargets",
-                    fetched_n=len(cons),
-                    data={"ensg": ensg, "efo": efo, "consortia": cons, "datasourceScores": dss},
+    # Attempt live fetch via GraphQL; fall back on failure or empty response.
+    try:
+        js  = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+        dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
+        keys  = {"uk_biobank","finngen","gwas_catalog"}
+        cons  = [x for x in dss if (str(x.get("id",""))).lower() in keys and (x.get("score") or 0) > 0]
+        if cons:
+            return Evidence(status="OK", source="OpenTargets",
+                            fetched_n=len(cons),
+                            data={"ensg": ensg, "efo": efo, "consortia": cons, "datasourceScores": dss},
+                            citations=cites, fetched_at=_now())
+    except Exception:
+        pass
+    # Fallback: search for UK Biobank/FinnGen/GWAS catalog evidence via literature
+    fallback_query = f"{sym} {condition or ''} UK Biobank OR FinnGen OR GWAS catalog"
+    hits, lit_cites = await _epmc_search(fallback_query, size=60)
+    cites.extend(lit_cites)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (fallback)",
+                    fetched_n=len(hits),
+                    data={"query": fallback_query, "hits": hits},
                     citations=cites, fetched_at=_now())
 
 
@@ -4299,7 +4383,7 @@ async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
         datasourceScores{ id score }
       }
     }"""
-    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    js  = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
     dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
     qtl_like = [x for x in dss if any(s in str(x.get("id","")).lower() for s in ["eqtl","pqtl","molecular","qtl"]) and (x.get("score") or 0) > 0]
     return Evidence(status=("OK" if qtl_like else "NO_DATA"), source="OpenTargets",
@@ -4331,7 +4415,7 @@ async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
         datasourceScores{ id score }
       }
     }"""
-    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    js  = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
     dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
     keys  = {"uk_biobank","finngen","gwas_catalog"}
     cons  = [x for x in dss if (str(x.get("id","")).lower() in keys) and (x.get("score") or 0) > 0]
@@ -4362,7 +4446,7 @@ async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
         datasourceScores{ id score }
       }
     }"""
-    js  = await _httpx_json_post(_OT_GQL, {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    js  = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
     dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
     qtl_like = [x for x in dss if any(s in str(x.get("id","")).lower() for s in ["eqtl","pqtl","molecular","qtl"]) and (x.get("score") or 0) > 0]
     return Evidence(status=("OK" if qtl_like else "NO_DATA"), source="OpenTargets",
@@ -4557,7 +4641,3 @@ def _find_duplicate_routes() -> List[Dict[str, Any]]:
 async def _debug_routes() -> Dict[str, Any]:
     dups = _find_duplicate_routes()
     return {"routes": len(getattr(router, "routes", [])), "duplicates": dups}  # type: ignore[name-defined]
-
-_add_if_missing("/debug/routes", _debug_routes, ["GET"], None)
-
-# ================= END FIXUP BLOCK ============================================
