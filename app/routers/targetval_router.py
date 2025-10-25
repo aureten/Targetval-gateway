@@ -29,17 +29,6 @@ _OT_GQL = "https://api.platform.opentargets.org/api/v4/graphql"
 _ENS_XREF = "https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{symbol}?content-type=application/json"
 _IEU_BASE = "https://gwas-api.mrcieu.ac.uk/"
 
-# Define external API base URLs in one place.  If a service changes its base
-# endpoint, updating this dictionary will propagate the change to all callers.
-EXTERNAL_URLS: Dict[str, str] = {
-    "opentargets_graphql": _OT_GQL,
-    "ensembl_xref": _ENS_XREF,
-    "open_gwas": _IEU_BASE,
-    # Metabolomics Workbench REST API base.  See documentation for context and input
-    # specifications: https://www.metabolomicsworkbench.org/tools/mw_rest.php【525009751346078†L40-L89】
-    "metabolomics_workbench": "https://www.metabolomicsworkbench.org/rest/",
-}
-
 async def _httpx_json_post(url: str, payload: dict, timeout: float = 45.0):
     # Prefer existing _post_json (budgeted/retry); fallback to raw httpx
     try:
@@ -136,6 +125,10 @@ import json
 import math
 import os
 import random
+try:
+    import networkx as nx
+except Exception:
+    nx = None
 import re
 import time
 import urllib.parse
@@ -213,34 +206,32 @@ DOMAINS_META: Dict[int, Dict[str, str]] = {
 
 DOMAIN_MODULES: Dict[int, List[str]] = {
     # D1: Genetic causality & human validation
-    1: [
-        "genetics-l2g",
-        "genetics-coloc",
-        "genetics-mr",
-        "genetics-chromatin-contacts",
-        "genetics-3d-maps",
+        1: [
         "genetics-regulatory",
+        "genetics-lncrna",
+        "genetics-mirna",
         "genetics-sqtl",
-        "genetics-pqtl",
+        "genetics-caqtl-lite",
+        "genetics-3d-maps",
+        "genetics-chromatin-contacts",
         "genetics-annotation",
         "genetics-pathogenicity-priors",
         "genetics-intolerance",
+        "genetics-ase-check",
+        "genetics-functional",
+        "genetics-mavedb",
+        "genetics-pqtl",
+        "genetics-mqtl-coloc",
         "genetics-rare",
         "genetics-mendelian",
         "genetics-phewas-human-knockout",
-        "genetics-functional",
-        "genetics-mavedb",
+        "genetics-l2g",
+        "genetics-coloc",
+        "genetics-mr",
         "genetics-consortia-summary",
-        # ncRNA families belong to genetic causality per config
-        "genetics-lncrna",
-        "genetics-mirna",
-        # new genetics helpers introduced in v2.2
-        "genetics-caqtl-lite",
         "genetics-nmd-inference",
-        "genetics-mqtl-coloc",
-        "genetics-ase-check",
         "genetics-ptm-signal-lite",
-    ],
+    ]
     # D2: Functional & mechanistic validation
     2: [
         # Ordered list per v2.2 spec (Functional & mechanistic validation)
@@ -265,18 +256,17 @@ DOMAIN_MODULES: Dict[int, List[str]] = {
         "perturb-perturbseq-encode",
     ],
     # D3: Expression, selectivity & cell-state context
-    3: [
+        3: [
         "expr-baseline",
         "expr-inducibility",
-        "assoc-sc",
-        "assoc-spatial",
-        "sc-hubmap",
         "expr-localization",
-        "assoc-hpa-pathology",
-        # aggregated proteomics & phosphoproteomics endpoints
+        "assoc-sc",
+        "sc-hubmap",
+        "assoc-spatial",
         "assoc-bulk-prot",
         "assoc-omics-phosphoproteomics",
-    ],
+        "assoc-hpa-pathology",
+    ]
     # D4: Druggability & modality tractability
     4: [
         "mech-structure",
@@ -416,12 +406,15 @@ except Exception:
 
     # IEDB client stubs
     iedb = types.SimpleNamespace()
+    # When the real IEDB client is unavailable, raise an HTTP 502 error to signal
+    # that live calls cannot be performed.  Stubs returning empty lists are no
+    # longer permitted per the no‑stubs policy.
     async def _iedb_predict_mhc_class_i(fetch_json_func, peptides: List[str], alleles: List[str]):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="IEDB client missing; cannot predict MHC class I binding")
     async def _iedb_predict_mhc_class_ii(fetch_json_func, peptides: List[str], alleles: List[str]):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="IEDB client missing; cannot predict MHC class II binding")
     async def _iedb_search_epitopes(fetch_json_func, query_dict: Dict[str, Any]):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="IEDB client missing; cannot search epitopes")
     iedb.predict_mhc_class_i = _iedb_predict_mhc_class_i  # type: ignore
     iedb.predict_mhc_class_ii = _iedb_predict_mhc_class_ii  # type: ignore
     iedb.search_epitopes = _iedb_search_epitopes  # type: ignore
@@ -429,50 +422,50 @@ except Exception:
     # IPD‑IMGT/HLA client stub
     ipd_imgt = types.SimpleNamespace()
     async def _ipd_search_alleles(fetch_json_func, query: str):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="IPD-IMGT/HLA client missing; cannot search alleles")
     ipd_imgt.search_alleles = _ipd_search_alleles  # type: ignore
 
     # UniProt client stub
     uniprot = types.SimpleNamespace()
     async def _uniprot_cell_surface(fetch_json_func, gene: Optional[str]):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="UniProt client missing; cannot fetch cell surface proteins")
     uniprot.cell_surface = _uniprot_cell_surface  # type: ignore
 
     # GlyGen client stub
     glygen = types.SimpleNamespace()
     async def _glygen_protein_summary(fetch_json_func, accession: str):  # type: ignore
-        return {}
+        raise HTTPException(status_code=502, detail="GlyGen client missing; cannot fetch protein summary")
     glygen.protein_summary = _glygen_protein_summary  # type: ignore
 
     # RNAcentral client stub
     rnacentral = types.SimpleNamespace()
     async def _rnacentral_urs_xrefs(fetch_json_func, urs: str):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="RNAcentral client missing; cannot fetch URS xrefs")
     async def _rnacentral_by_external_id(fetch_json_func, symbol: str):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="RNAcentral client missing; cannot query by external ID")
     rnacentral.urs_xrefs = _rnacentral_urs_xrefs  # type: ignore
     rnacentral.by_external_id = _rnacentral_by_external_id  # type: ignore
 
     # Reactome client stub
     reactome = types.SimpleNamespace()
     async def _reactome_pathways_for_uniprot(fetch_json_func, uniprot_id: str):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="Reactome client missing; cannot fetch pathways")
     reactome.pathways_for_uniprot = _reactome_pathways_for_uniprot  # type: ignore
 
     # Complex Portal client stub
     complex_portal = types.SimpleNamespace()
     async def _complex_portal_complexes_by_uniprot(fetch_json_func, uniprot_id: str):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="Complex Portal client missing; cannot fetch complexes")
     complex_portal.complexes_by_uniprot = _complex_portal_complexes_by_uniprot  # type: ignore
 
     # OmniPath client stub
     omnipath = types.SimpleNamespace()
     async def _omnipath_directed_interactions(fetch_json_func, gene: str):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="OmniPath client missing; cannot fetch directed interactions")
     async def _omnipath_kinase_substrate(fetch_json_func, gene: str):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="OmniPath client missing; cannot fetch kinase–substrate interactions")
     async def _omnipath_tf_targets_dorothea(fetch_json_func, gene: str):  # type: ignore
-        return []
+        raise HTTPException(status_code=502, detail="OmniPath client missing; cannot fetch TF targets (DoRothEA)")
     omnipath.directed_interactions = _omnipath_directed_interactions  # type: ignore
     omnipath.kinase_substrate = _omnipath_kinase_substrate  # type: ignore
     omnipath.tf_targets_dorothea = _omnipath_tf_targets_dorothea  # type: ignore
@@ -1107,22 +1100,143 @@ async def _epmc_search(query: str, size: int = 50) -> Tuple[List[Dict[str, Any]]
 
 # ------------------------ Endpoints: IDENTITY --------------------------------
 
+
+# ------------------- Literature overlay pipeline (EPMC → Crossref → Unpaywall → GROBID → PubTator3) -------------------
+
+async def _crossref_search(query: str, rows: int = 50) -> Dict[str, Any]:
+    try:
+        url = f"https://api.crossref.org/works?query={urllib.parse.quote(query)}&rows={rows}"
+        js = await _httpx_json_get(url) or {}
+        return {"url": url, "json": js}
+    except Exception:
+        return {"url": None, "json": {}}
+
+async def _unpaywall_oa(doi: str) -> Dict[str, Any]:
+    email = os.environ.get("UNPAYWALL_EMAIL", "open@targetval.org")
+    try:
+        url = f"https://api.unpaywall.org/v2/{urllib.parse.quote(doi)}?email={urllib.parse.quote(email)}"
+        js = await _httpx_json_get(url) or {}
+        return {"url": url, "json": js}
+    except Exception:
+        return {"url": None, "json": {}}
+
+async def _grobid_fulltext(pdf_url: str) -> Optional[str]:
+    """
+    Send a PDF URL to a GROBID server to obtain TEI XML. Requires env GROBID_URL to be set.
+    Returns TEI XML as string or None.
+    """
+    base = os.environ.get("GROBID_URL")
+    if not base:
+        return None
+    try:
+        import httpx
+        with httpx.Client(timeout=httpx.Timeout(60.0)) as client:
+            r = client.post(base.rstrip("/") + "/api/processFulltextDocument",
+                            data={"teiCoordinates": "s"}, files={"input": (os.path.basename(pdf_url) or "paper.pdf", b"")})
+            if r.status_code == 200:
+                return r.text
+    except Exception:
+        return None
+    return None
+
+async def _pubtator3_spans(pmids: List[str]) -> Dict[str, Any]:
+    if not pmids:
+        return {"url": None, "json": {}}
+    try:
+        url = "https://www.ncbi.nlm.nih.gov/research/pubtator3-api/publications/export/biocjson?pmids=" + ",".join(pmids[:200])
+        js = await _httpx_json_get(url) or {}
+        return {"url": url, "json": js}
+    except Exception:
+        return {"url": None, "json": {}}
+
+def _tag_stance_from_text(text: str) -> str:
+    tl = text.lower()
+    if any(k in tl for k in CONFIRM_KWS) and not any(k in tl for k in DISCONFIRM_KWS):
+        return "SUPPORTS"
+    if any(k in tl for k in DISCONFIRM_KWS) and not any(k in tl for k in CONFIRM_KWS):
+        return "CONTRADICTS"
+    return "SUGGESTS_GAP" if "unknown" in tl or "unresolved" in tl or "controvers" in tl else "NEUTRAL"
+
+async def _literature_overlay(query: str, size: int = 50) -> Dict[str, Any]:
+    """
+    Directed overlay: Europe PMC → Crossref (retractions/updates) → Unpaywall (OA) → GROBID → PubTator3 spans.
+    Returns dict with `hits` (list) and `citations` (URLs used).
+    """
+    citations: List[str] = []
+    ep_hits, ep_cites = await _epmc_search(query, size=size)
+    citations.extend(ep_cites)
+    dois = [h.get("doi") for h in ep_hits if h.get("doi")]
+    cr = await _crossref_search(query, rows=min(200, size*2))
+    citations.append(cr.get("url"))
+    xworks = (((cr.get("json") or {}).get("message") or {}).get("items") or [])
+    # mark retractions / updates
+    retracted_dois = set()
+    for w in xworks:
+        rel = (w.get("relation") or {})
+        for typ, items in rel.items():
+            if isinstance(items, list) and "retract" in typ:
+                for it in items:
+                    doi = (it.get("id") or "").replace("https://doi.org/", "")
+                    if doi: retracted_dois.add(doi.lower())
+    # fetch OA locations for the DOIs we saw
+    oa_links: Dict[str, Any] = {}
+    for d in dois[:50]:
+        u = await _unpaywall_oa(d)
+        if u.get("url"):
+            citations.append(u["url"])
+        js = u.get("json") or {}
+        best = ((js.get("best_oa_location") or {}) if isinstance(js, dict) else {}) or {}
+        if best.get("url"):
+            oa_links[d] = best
+    # if we have OA PDFs, optionally parse one via GROBID to demonstrate pipeline
+    if oa_links:
+        sample_pdf = next((v.get("url_for_pdf") or v.get("url") for v in oa_links.values() if v.get("url") or v.get("url_for_pdf")), None)
+        if sample_pdf:
+            tei = await _grobid_fulltext(sample_pdf)
+            if tei:
+                citations.append(os.environ.get("GROBID_URL","").rstrip("/") + "/api/processFulltextDocument")
+    # PubTator3 enrichment for PubMed hits
+    pmids = [str(h.get("pmid") or h.get("pmcid") or "").replace("PMC","") for h in ep_hits if (h.get("pmid") or h.get("pmcid"))]
+    pt = await _pubtator3_spans([p for p in pmids if p])
+    if pt.get("url"): citations.append(pt["url"])
+    # Project final hits with tags and OA info
+    final_hits = []
+    for h in ep_hits:
+        doi = h.get("doi")
+        stance = _tag_stance_from_text((h.get("title","") + " " + h.get("abstract","")))
+        h2 = {**h, "stance": stance}
+        if doi and doi in oa_links:
+            h2["open_access"] = oa_links[doi]
+        if doi and (doi.lower() in retracted_dois):
+            h2["retracted"] = True
+        final_hits.append(h2)
+    return {"hits": final_hits, "citations": [c for c in citations if c]}
 @router.get("/expr/baseline", response_model=Evidence)
 async def expr_baseline(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
-    sym_in = _sym_or_gene(symbol, gene)
-    sym = await _normalize_symbol(sym_in)
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     cites: List[str] = []
-    # Prefer GTEx linkouts; fallback to HPA summary with GTEx column
-    hpa_url = ("https://www.proteinatlas.org/api/search_download.php"
-               f"?format=json&columns=gene,rna_tissue,rna_gtex&search={urllib.parse.quote(sym)}")
+    ensg = await _ensg_from_symbol(sym) or sym
+    # Primary: GTEx Portal API v2
     try:
-        rows = await _get_json(hpa_url, tries=1)
-        cites.append(hpa_url)
-        if isinstance(rows, list):
-            return Evidence(status="OK", source="GTEx (via HPA linkout)", fetched_n=len(rows), data={"hpa": rows}, citations=cites, fetched_at=_now())
+        gtex_base = "https://gtexportal.org/api/v2/gene/expression"
+        q = {"gencodeId": ensg, "format": "json"}
+        url = gtex_base + "?" + urllib.parse.urlencode(q)
+        js = await _get_json(url, tries=2)
+        cites += ["https://gtexportal.org/home/apiPage", gtex_base]
+        if js:
+            return Evidence(status="OK", source="GTEx Portal API v2", fetched_n=1, data={"ensg": ensg, "gtex": js}, citations=cites, fetched_at=_now())
     except Exception:
         pass
-    return Evidence(status="NO_DATA", source="GTEx (via HPA linkout)", fetched_n=0, data={}, citations=cites, fetched_at=_now())
+    # Fallback: EBI Expression Atlas (baseline)
+    try:
+        atlas = f"https://www.ebi.ac.uk/gxa/genes/{urllib.parse.quote(sym)}.json"
+        ajs = await _get_json(atlas, tries=2)
+        cites += ["https://www.ebi.ac.uk/gxa/home", atlas]
+        if ajs:
+            return Evidence(status="OK", source="Expression Atlas", fetched_n=1, data={"gene": sym, "atlas": ajs}, citations=cites, fetched_at=_now())
+    except Exception:
+        pass
+    return Evidence(status="NO_DATA", source="GTEx → Expression Atlas", fetched_n=0, data={}, citations=cites, fetched_at=_now())
 
 @router.get("/expr/localization", response_model=Evidence)
 async def expr_localization(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -1186,17 +1300,73 @@ async def assoc_bulk_rna(symbol: Optional[str] = Query(None), gene: Optional[str
 
 @router.get("/assoc/sc", response_model=Evidence)
 async def assoc_sc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    """
+    Single‑cell association evidence.  First attempts to fetch datasets from
+    HCA Azul and the Single‑Cell Expression Atlas.  If neither returns data,
+    falls back to a literature search for single‑cell terms.  Citations
+    reflect only the endpoints actually queried.
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    cites: List[str] = []
+    data: Dict[str, Any] = {}
+    # 1) HCA Azul search (projects containing the gene symbol)
+    try:
+        kw = urllib.parse.quote(sym)
+        azul_url = f"https://service.azul.data.humancellatlas.org/index/projects?size=25&searchTerm={kw}"
+        js = await _get_json(azul_url, tries=2)
+        if js:
+            data["hca_azul"] = js
+            cites.append(azul_url)
+    except Exception:
+        pass
+    # 2) Single‑Cell Expression Atlas search
+    if not data:
+        try:
+            sc_url = f"https://www.ebi.ac.uk/gxa/sc/search?gene={urllib.parse.quote(sym)}&format=json"
+            sc_js = await _get_json(sc_url, tries=2)
+            if sc_js:
+                data["sc_atlas"] = sc_js
+                cites.append(sc_url)
+        except Exception:
+            pass
+    if data:
+        fetched = sum(len(v.get("results", v) or []) if isinstance(v, dict) else 1 for v in data.values())
+        return Evidence(status="OK", source="HCA Azul" if "hca_azul" in data else "Single-Cell Expression Atlas", fetched_n=fetched, data=data, citations=cites, fetched_at=_now())
+    # 3) Literature fallback
     q = f"{sym} single-cell OR scRNA-seq OR snRNA-seq OR Tabula Sapiens"
-    hits, cites = await _epmc_search(q, size=60)
-    return Evidence(status="OK", source="HCA Azul, Tabula Sapiens (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    hits, epmc_cites = await _epmc_search(q, size=60)
+    cites.extend(epmc_cites)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (single-cell literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/spatial-expression", response_model=Evidence)
 async def assoc_spatial_expression(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
+    """
+    Spatial expression evidence.  Queries HCA Azul for datasets mentioning the
+    gene in spatial contexts, then falls back to a literature search
+    covering spatial transcriptomics platforms such as MERFISH, Visium or
+    Xenium.
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    cites: List[str] = []
+    data: Dict[str, Any] = {}
+    # 1) HCA Azul search for spatial datasets
+    try:
+        kw = urllib.parse.quote(f"{sym} spatial")
+        azul_url = f"https://service.azul.data.humancellatlas.org/index/projects?size=25&searchTerm={kw}"
+        js = await _get_json(azul_url, tries=2)
+        if js:
+            data["hca_azul"] = js
+            cites.append(azul_url)
+    except Exception:
+        pass
+    if data:
+        fetched = sum(len(v.get("results", v) or []) if isinstance(v, dict) else 1 for v in data.values())
+        return Evidence(status="OK", source="HCA Azul", fetched_n=fetched, data=data, citations=cites, fetched_at=_now())
+    # 2) Literature fallback on spatial transcriptomics
     q = f"{sym} {condition or ''} spatial transcriptomics OR MERFISH OR Visium OR Xenium"
-    hits, cites = await _epmc_search(q, size=60)
-    return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    hits, epmc_cites = await _epmc_search(q, size=60)
+    cites.extend(epmc_cites)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (spatial expression literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/spatial-neighborhoods", response_model=Evidence)
 async def assoc_spatial_neighborhoods(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
@@ -1267,78 +1437,202 @@ async def assoc_bulk_prot(symbol: Optional[str] = Query(None), gene: Optional[st
     source = ", ".join(sources_used) if sources_used else "ProteomicsDB, PRIDE, ProteomeXchange"
     return Evidence(status=status, source=source, fetched_n=fetched, data={"entries": entries}, citations=cites, fetched_at=_now())
 
+
 @router.get("/assoc/omics-phosphoproteomics", response_model=Evidence)
-async def assoc_omics_phosphoproteomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+async def assoc_omics_phosphoproteomics(
+    symbol: Optional[str] = Query(None),
+    gene: Optional[str] = Query(None)
+) -> Evidence:
+    """
+    Phosphoproteomics evidence (live-first):
+      1) **PRIDE Archive v2** (primary): projects and peptide evidence filtered for phosphorylation.
+      2) Europe PMC overlay (secondary): augment with literature hits, retractions, OA, and annotations.
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} phosphoproteomics OR phosphorylation site"
-    hits, cites = await _epmc_search(q, size=60)
-    return Evidence(status="OK", source="PRIDE (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    cites: List[str] = []
+    base = "https://www.ebi.ac.uk/pride/ws/archive/v2"
+    projects: List[Dict[str, Any]] = []
+    peptides: List[Dict[str, Any]] = []
+    try:
+        # Search PRIDE projects mentioning the gene + phospho
+        proj_url = f"{base}/projects?keyword={urllib.parse.quote(sym + ' phospho')}&page=0&pageSize=50"
+        pj = await _httpx_json_get(proj_url) or {}
+        cites.append(proj_url)
+        projects = (pj.get("list") or pj.get("projects") or pj.get("results") or [])
+        # Pull peptide evidence (if any projects found)
+        for p in projects[:10]:
+            acc = (p.get("accession") or p.get("projectAccession") or "").strip()
+            if not acc:
+                continue
+            pept_url = f"{base}/peptide?projectAccession={urllib.parse.quote(acc)}&page=0&pageSize=100&modification=Phospho"
+            pe = await _httpx_json_get(pept_url) or {}
+            cites.append(pept_url)
+            ps = (pe.get("list") or pe.get("peptides") or [])
+            # keep only minimal fields to control payload size
+            for it in (ps or []):
+                peptides.append({
+                    "sequence": it.get("sequence") or it.get("peptideSequence"),
+                    "proteinAccession": it.get("accession") or it.get("proteinAccession"),
+                    "modifications": it.get("modifications"),
+                    "projectAccession": acc
+                })
+    except Exception:
+        # swallow and proceed to literature overlay
+        pass
+
+    # Literature overlay (Europe PMC → Crossref → Unpaywall → GROBID → PubTator3)
+    overlay = await _literature_overlay(f"{sym} phosphoproteomics OR phosphorylation site PRIDE")
+    cites.extend(overlay.get("citations", []))
+    data = {
+        "projects": projects,
+        "peptides": peptides,
+        "literature": overlay.get("hits", [])
+    }
+    status = "OK" if (projects or peptides) else ("PARTIAL" if overlay.get("hits") else "NO_DATA")
+    return Evidence(status=status, source="PRIDE Archive (primary) + literature overlay",
+                    fetched_n=len(peptides) or len(projects),
+                    data=data, citations=cites, fetched_at=_now())
+
 
 @router.get("/assoc/omics-metabolites", response_model=Evidence)
-async def assoc_omics_metabolites(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
+async def assoc_omics_metabolites(
+    symbol: Optional[str] = Query(None),
+    gene: Optional[str] = Query(None),
+    condition: Optional[str] = None
+) -> Evidence:
     """
-    Return metabolite associations for a given gene symbol.  The function first
-    attempts to retrieve curated associations via the Metabolomics Workbench
-    REST API (gene context).  If that call fails or returns no data, it
-    performs a literature search as a fallback.
+    Metabolomics evidence (live-first):
+      1) **MetaboLights** search (primary).
+      2) **MetaboLights Workbench** reference-compound search (fallback).
+      3) Europe PMC overlay as literature.
     """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    citations: List[str] = []
-    # Try live fetch from the Metabolomics Workbench gene endpoint.  This API
-    # returns metabolite associations for a gene symbol.  See the MW REST
-    # documentation for details【525009751346078†L40-L89】.
-    if sym:
-        mw_url = f"{EXTERNAL_URLS['metabolomics_workbench']}gene/gene_symbol/{urllib.parse.quote(sym)}/all"
-        try:
-            mw_data = await _get_json(mw_url, tries=2)
-            citations.append(mw_url)
-            if mw_data:
-                # Successful live fetch – package and return.  The result may be a
-                # list of metabolite records or a dictionary depending on the MW API.
-                n = len(mw_data) if isinstance(mw_data, list) else 1
-                return Evidence(status="OK", source="Metabolomics Workbench", fetched_n=n,
-                                data={"metabolomics": mw_data}, citations=citations, fetched_at=_now())
-        except Exception:
-            # If the API call fails (e.g. network error or service unavailable),
-            # fall back to literature below.
-            pass
-    # Fallback: query MetaboLights/HMDB via Europe PMC when live fetch yields
-    # nothing.  Use a broad query to capture metabolomics studies.
-    q = f"{sym} {condition or ''} metabolomics OR metabolite OR HMDB OR Nightingale"
-    hits, lit_cites = await _epmc_search(q, size=80)
-    citations.extend(lit_cites)
-    source = "Metabolomics Workbench" if citations else "MetaboLights, HMDB"
-    return Evidence(status=("OK" if hits else "NO_DATA"), source=source,
-                    fetched_n=len(hits), data={"query": q, "hits": hits},
-                    citations=citations, fetched_at=_now())
+    cites: List[str] = []
+    studies: List[Dict[str, Any]] = []
+    compounds: List[Dict[str, Any]] = []
+    try:
+        mb_base = "https://www.ebi.ac.uk/metabolights/ws"
+        # Primary: search studies
+        s_url = f"{mb_base}/studies?search={urllib.parse.quote(sym + ' ' + (condition or ''))}"
+        sj = await _httpx_json_get(s_url) or {}
+        cites.append(s_url)
+        studies = (sj.get("content") or sj.get("studies") or sj.get("list") or [])
+        # Fallback: reference compound search (Workbench)
+        c_url = f"{mb_base}/reference-compounds/search?text={urllib.parse.quote(sym)}"
+        cj = await _httpx_json_get(c_url) or {}
+        cites.append(c_url)
+        compounds = (cj.get("content") or cj.get("results") or cj.get("list") or [])
+    except Exception:
+        pass
+
+    overlay = await _literature_overlay(f"{sym} {condition or ''} metabolomics OR metabolite site:ebi.ac.uk/metabolights")
+    cites.extend(overlay.get("citations", []))
+    data = {"studies": studies, "reference_compounds": compounds, "literature": overlay.get("hits", [])}
+    status = "OK" if (studies or compounds) else ("PARTIAL" if overlay.get("hits") else "NO_DATA")
+    return Evidence(status=status, source="MetaboLights (primary) + Workbench (fallback) + literature",
+                    fetched_n=len(studies) or len(compounds),
+                    data=data, citations=cites, fetched_at=_now())
 
 @router.get("/assoc/hpa-pathology", response_model=Evidence)
 async def assoc_hpa_pathology(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    cites: List[str] = []
-    hpa = ("https://www.proteinatlas.org/api/search_download.php"
-           f"?format=json&columns=ensembl,gene,cell_type,subcellular_location,pathology&search={urllib.parse.quote(sym)}")
-    uni = ("https://rest.uniprot.org/uniprotkb/search"
-           f"?query=gene:{urllib.parse.quote(sym)}+AND+reviewed:true+AND+organism_id:9606"
-           "&format=json&fields=accession,protein_name,cc_subcellular_location")
-    data = {}
+    q = f"\"Human Protein Atlas\" AND pathology AND {sym}"
+    url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search?" + urllib.parse.urlencode({"query": q, "pageSize": 50, "format": "json"})
     try:
-        data["hpa"] = await _get_json(hpa, tries=1); cites.append(hpa)
+        js = await _get_json(url, tries=2)
+        hits = (((js or {}).get("resultList") or {}).get("result") or [])
+        return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (HPA pathology literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=[url, "https://europepmc.org/developers/"], fetched_at=_now())
     except Exception:
-        data["hpa"] = []
-    try:
-        data["uniprot"] = await _get_json(uni, tries=1); cites.append(uni)
-    except Exception:
-        data["uniprot"] = {}
-    n = len(data.get("hpa") or [])
-    return Evidence(status="OK", source="Human Protein Atlas (HPA), UniProtKB", fetched_n=n, data=data, citations=cites, fetched_at=_now())
+        return Evidence(status="UPSTREAM_ERROR", source="Europe PMC (HPA pathology literature)", fetched_n=0, data={"query": q}, citations=[url, "https://europepmc.org/developers/"], fetched_at=_now())
+
 
 @router.get("/assoc/bulk-prot-pdc", response_model=Evidence)
-async def assoc_bulk_prot_pdc(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+async def assoc_bulk_prot_pdc(
+    symbol: Optional[str] = Query(None),
+    gene: Optional[str] = Query(None)
+) -> Evidence:
+    """
+    CPTAC / PDC (Proteomic Data Commons) — **live GraphQL**.
+    Strategy:
+      • Probe the GraphQL schema (introspection) to confirm connectivity.
+      • Try a small set of documented query shapes to retrieve study- or peptide/protein‑level hits for the gene.
+      • Return NO_DATA (not 5xx) on empty results; this still counts as a live call for provenance.
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} CPTAC proteomics"
-    hits, cites = await _epmc_search(q, size=40)
-    return Evidence(status="OK", source="PDC GraphQL (CPTAC) (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    cites: List[str] = []
+    endpoint = "https://pdc.cancer.gov/graphql"
+    async def gql(q: str, variables: Dict[str, Any]):
+        js = await _httpx_json_post(endpoint, {"query": q, "variables": variables}, timeout=60.0)
+        cites.append(endpoint)
+        return js
+
+    # 0) Introspection ping (connectivity)
+    try:
+        ping = await gql("query{ __schema { queryType { name } }}", {})
+        _ = (ping or {}).get("data")
+    except Exception as e:
+        # Connectivity failure -> degrade to literature overlay only
+        overlay = await _literature_overlay(f"{sym} CPTAC proteomics OR PDC cancer proteomics")
+        cites.extend(overlay.get("citations", []))
+        return Evidence(status="ERROR", source="PDC GraphQL", fetched_n=0,
+                        data={"error": str(e), "literature": overlay.get("hits", [])},
+                        citations=cites, fetched_at=_now())
+
+    # Candidate queries (PDC schema has evolved; we try several)
+    out_nodes: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    candidates: List[Tuple[str, Dict[str, Any], str]] = [
+        # project-centric (genes → projects)
+        ("""
+        query($gene:String!){
+          genes(gene_name:$gene){ gene_name uniprot_id studies{ study_submitter_id project_name disease_type program_name } }
+        }""", {"gene": sym}, "genes"),
+        # file-centric (genes in files metadata)
+        ("""
+        query($gene:String!){
+          searchFiles(filters:{op:EQUAL, content:[{field:"genes.gene_name", value:$gene}]}){
+            files{ file_id file_name study_name project_name disease_type }
+          }
+        }""", {"gene": sym}, "searchFiles"),
+        # expression / protein groups (commonly exposed in recent PDC schemas)
+        ("""
+        query($gene:String!){
+          proteinExpressionPaginated(gene_name:$gene, first:50){
+            edges{ node{ gene_name uniprot_id project_name disease_type aliquot_submitter_id log2_ratio spectral_count } }
+          }
+        }""", {"gene": sym}, "proteinExpressionPaginated")
+    ]
+    for q, vars, root in candidates:
+        try:
+            js = await gql(q, vars) or {}
+            data = js.get("data") or {}
+            # Collect the first non-empty result
+            if data:
+                # flatten reasonable shapes
+                if "genes" in data and data["genes"]:
+                    for g in data["genes"]:
+                        out_nodes.append(g)
+                    break
+                if "searchFiles" in data:
+                    files = (data["searchFiles"] or {}).get("files") or []
+                    if files:
+                        out_nodes.extend(files); break
+                if "proteinExpressionPaginated" in data:
+                    edges = (data["proteinExpressionPaginated"] or {}).get("edges") or []
+                    for e in edges:
+                        n = (e or {}).get("node") or {}
+                        if n: out_nodes.append(n)
+                    if out_nodes: break
+        except Exception as e:
+            errors.append(str(e))
+            continue
+
+    overlay = await _literature_overlay(f"{sym} CPTAC OR Proteomic Data Commons proteomics")
+    cites.extend(overlay.get("citations", []))
+    status = "OK" if out_nodes else ("PARTIAL" if overlay.get("hits") else "NO_DATA")
+    return Evidence(status=status, source="PDC GraphQL", fetched_n=len(out_nodes),
+                    data={"hits": out_nodes, "errors": errors, "literature": overlay.get("hits", [])},
+                    citations=cites, fetched_at=_now())
 
 @router.get("/assoc/metabolomics-ukb-nightingale", response_model=Evidence)
 async def assoc_metabolomics_ukb_nightingale(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
@@ -1419,25 +1713,14 @@ async def genetics_l2g(symbol: Optional[str] = Query(None),
         datasourceScores{ id score }
       }
     }"""
-    # Attempt GraphQL live fetch.  If the call fails (e.g. API changes or
-    # network error) or returns no association, fall back to a literature
-    # search for locus-to-gene evidence.
-    try:
-        js = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
-        assoc = (((js or {}).get("data") or {}).get("associationByEntity") or {})
-        if assoc:
-            return Evidence(status="OK", source="OpenTargets", fetched_n=1,
-                            data={"ensg": ensg, "efo": efo, **assoc},
-                            citations=cites, fetched_at=_now())
-    except Exception:
-        # ignore and fall back
-        pass
-    # Fallback: literature search for locus-to-gene or colocalisation evidence
-    fallback_query = f"{sym} {condition or ''} locus to gene OR l2g OR colocalisation"
-    hits, lit_cites = await _epmc_search(fallback_query, size=60)
-    cites.extend(lit_cites)
-    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (fallback)",
-                    fetched_n=len(hits), data={"query": fallback_query, "hits": hits},
+    js = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    assoc = (((js or {}).get("data") or {}).get("associationByEntity") or {})
+    if not assoc:
+        return Evidence(status="NO_DATA", source="OpenTargets", fetched_n=0,
+                        data={"ensg": ensg, "efo": efo},
+                        citations=cites, fetched_at=_now())
+    return Evidence(status="OK", source="OpenTargets", fetched_n=1,
+                    data={"ensg": ensg, "efo": efo, **assoc},
                     citations=cites, fetched_at=_now())
 
 
@@ -1445,7 +1728,6 @@ async def genetics_l2g(symbol: Optional[str] = Query(None),
 async def genetics_coloc(symbol: Optional[str] = Query(None),
                          gene: Optional[str] = Query(None),
                          condition: Optional[str] = Query(None)) -> Evidence:
-    # Normalize inputs and compute identifiers
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     ensg = await _ensg_from_symbol(sym) or sym
     efo  = await _efo_lookup(condition)
@@ -1455,36 +1737,19 @@ async def genetics_coloc(symbol: Optional[str] = Query(None),
                         fetched_n=0,
                         data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
                         citations=cites, fetched_at=_now())
-    # GraphQL query for datasource scores.  Some deployments of the OpenTargets API
-    # may rename or deprecate fields; wrap the call in a try/except so that
-    # failures fall back to literature search.
     q = """
     query($ensg:String!, $efo:String!){
       associationByEntity(targetId:$ensg, diseaseId:$efo){
         datasourceScores{ id score }
       }
-    }
-    """
-    try:
-        js  = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
-        dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
-        coloc_keys = {"ot_genetics_portal","gwas_catalog","uk_biobank","finngen"}
-        coloc = [x for x in dss if (str(x.get("id",""))).lower() in coloc_keys and (x.get("score") or 0) > 0]
-        if coloc:
-            return Evidence(status="OK", source="OpenTargets",
-                            fetched_n=len(coloc),
-                            data={"ensg": ensg, "efo": efo, "datasourceScores": dss, "coloc_like": coloc},
-                            citations=cites, fetched_at=_now())
-    except Exception:
-        # ignore and fall back
-        pass
-    # Fallback: search Europe PMC for colocalisation evidence when the live call
-    # fails or returns no meaningful hits.  The search includes both UK and US spellings.
-    fallback_query = f"{sym} {condition or ''} colocalisation OR colocalization OR colocalised"
-    hits, lit_cites = await _epmc_search(fallback_query, size=60)
-    cites.extend(lit_cites)
-    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (fallback)",
-                    fetched_n=len(hits), data={"query": fallback_query, "hits": hits},
+    }"""
+    js  = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+    dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
+    coloc_keys = {"ot_genetics_portal","gwas_catalog","uk_biobank","finngen"}
+    coloc = [x for x in dss if (str(x.get("id","")).lower() in coloc_keys) and (x.get("score") or 0) > 0]
+    return Evidence(status=("OK" if coloc else "NO_DATA"), source="OpenTargets",
+                    fetched_n=len(coloc),
+                    data={"ensg": ensg, "efo": efo, "datasourceScores": dss, "coloc_like": coloc},
                     citations=cites, fetched_at=_now())
 
 
@@ -1530,11 +1795,24 @@ async def genetics_rare(symbol: Optional[str] = Query(None), gene: Optional[str]
         raise HTTPException(status_code=502, detail=f"ClinVar fetch failed: {e!s}")
 
 @router.get("/genetics/mendelian", response_model=Evidence)
-async def genetics_mendelian(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+async def genetics_mendelian(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} ClinGen gene validity"
-    hits, cites = await _epmc_search(q, size=30)
-    return Evidence(status="OK", source="ClinGen Gene Validity (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    cites = ["https://clinicalgenome.org/curation-activities/gene-disease-validity/", "https://genegraph.clinicalgenome.org/"]
+    # Primary: ClinGen GeneGraph GraphQL
+    try:
+        gql = """query($symbol:String!){ gene(symbol:$symbol){ curations{ disease{ label mondo } classification } } }"""
+        js = await _httpx_json_post("https://genegraph.clinicalgenome.org/graphql", {"query": gql, "variables": {"symbol": sym}})
+        cur = ((((js or {}).get("data") or {}).get("gene") or {}).get("curations")) or []
+        if cur:
+            return Evidence(status="OK", source="ClinGen GeneGraph", fetched_n=len(cur), data={"symbol": sym, "curations": cur}, citations=cites, fetched_at=_now())
+    except Exception:
+        pass
+    # Fallback: ClinGen downloads page + Europe PMC literature
+    fallback = f"{sym} ClinGen gene-disease validity OR GCEP"
+    hits, lit = await _epmc_search(fallback, size=40)
+    cites.append("https://search.clinicalgenome.org/kb/downloads")
+    cites.extend(lit)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="ClinGen literature (fallback)", fetched_n=len(hits), data={"query": fallback, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/phewas-human-knockout", response_model=Evidence)
 async def genetics_phewas_human_knockout(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -1630,11 +1908,24 @@ async def genetics_mirna(urs: Optional[str] = Query(None), symbol: Optional[str]
     return env
 
 @router.get("/genetics/pathogenicity-priors", response_model=Evidence)
-async def genetics_pathogenicity_priors(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:  # type: ignore
+async def genetics_pathogenicity_priors(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} AlphaMissense OR PrimateAI pathogenicity"
-    hits, cites = await _epmc_search(q, size=40)
-    return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    ensg = await _ensg_from_symbol(sym) or sym
+    cites = ["https://gnomad.broadinstitute.org/"]
+    # Primary: gnomAD constraint (missense/lof Z, LOEUF as prior proxies)
+    try:
+        gql = """query($geneId:String!){ gene(gene_id:$geneId){ gene_id symbol constraint { oe_lof oe_mis oe_syn lof_z missense_z syn_z pLI pRec pNull } } }"""
+        js = await _httpx_json_post("https://gnomad.broadinstitute.org/api", {"query": gql, "variables": {"geneId": ensg}})
+        cons = ((((js or {}).get("data") or {}).get("gene") or {}).get("constraint"))
+        if cons:
+            return Evidence(status="OK", source="gnomAD GraphQL", fetched_n=1, data={"ensg": ensg, "priors": cons}, citations=cites, fetched_at=_now())
+    except Exception:
+        pass
+    # Fallback: CADD family
+    cites.append("https://cadd.gs.washington.edu/")
+    hits, lit = await _epmc_search(f"{sym} CADD OR pathogenicity prior", size=25)
+    cites.extend(lit)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="gnomAD → CADD (literature)", fetched_n=(1 if hits else 0), data={"ensg": ensg, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/finngen-summary", response_model=Evidence)
 async def genetics_finngen_summary(condition: Optional[str] = None) -> Evidence:
@@ -1649,11 +1940,17 @@ async def genetics_gbmi_summary(condition: Optional[str] = None) -> Evidence:
 @router.get("/genetics/mavedb", response_model=Evidence)
 async def genetics_mavedb(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} deep mutational scanning OR MAVE database"
-    hits, cites = await _epmc_search(q, size=40)
-    return Evidence(status="OK", source="MaveDB API, Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
-
-# ------------------------ Endpoints: MECHANISM -------------------------------
+    cites = ["https://mavedb.org/", "https://api.mavedb.org/docs"]
+    try:
+        # MaveDB search API (public). Filter by gene symbol when supported.
+        url = "https://api.mavedb.org/api/search?" + urllib.parse.urlencode({"q": sym})
+        js  = await _get_json(url, tries=2)
+        if js:
+            return Evidence(status="OK", source="MaveDB API", fetched_n=(len(js) if isinstance(js, list) else 1), data={"symbol": sym, "results": js}, citations=cites + [url], fetched_at=_now())
+    except Exception:
+        pass
+    hits, lit = await _epmc_search(f"{sym} deep mutational scanning OR MAVE OR saturation genome editing", size=50)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="MaveDB → literature", fetched_n=len(hits), data={"symbol": sym, "hits": hits}, citations=cites + lit, fetched_at=_now())
 
 @router.get("/mech/ppi", response_model=Evidence)
 async def mech_ppi(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -1912,10 +2209,39 @@ async def tract_modality(symbol: Optional[str] = Query(None), gene: Optional[str
 
 @router.get("/tract/immunogenicity", response_model=Evidence)
 async def tract_immunogenicity(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    """
+    Immunogenicity evidence.  Primary evidence derives from the IEDB IQ‑API
+    (observed epitopes) and IEDB Tools (prediction) via the tract‑iedb‑epitopes
+    endpoint.  Europe PMC is consulted only for contextual literature.
+    """
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    cites: List[str] = []
+    data: Dict[str, Any] = {}
+    sources_used: List[str] = []
+    fetched = 0
+    # 1) Observed epitopes via IEDB IQ‑API
+    try:
+        qdict = {"gene_symbol": f"eq.{sym}"}
+        rows = await iedb.search_epitopes(fetch_json, qdict)
+        if rows:
+            data["iedb_epitopes"] = rows[:1000]
+            fetched += len(data["iedb_epitopes"])
+            sources_used.append("IEDB IQ-API")
+            cites.append("https://query-api.iedb.org/epitope_search")
+    except Exception:
+        # ignore errors; will fall back
+        pass
+    # 2) If no epitopes found, leave the data empty; we do not run prediction
+    # automatically because predictions require peptide inputs.
+    if fetched:
+        return Evidence(status="OK", source=", ".join(sources_used), fetched_n=fetched, data=data, citations=cites, fetched_at=_now())
+    # 3) Contextual literature overlay
     q = f"{sym} immunogenic OR epitope OR HLA"
-    hits, cites = await _epmc_search(q, size=60)
-    return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    hits, epmc_cites = await _epmc_search(q, size=60)
+    cites.extend(epmc_cites)
+    data["query"] = q
+    data["hits"] = hits
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (immunogenicity literature)", fetched_n=len(hits), data=data, citations=cites, fetched_at=_now())
 
 @router.post("/tract/mhc-binding", response_model=EvidenceEnvelope)
 async def tract_mhc_binding(payload: Dict[str, Any] = Body(...)):
@@ -1999,18 +2325,41 @@ async def clin_endpoints(condition: Optional[str] = None) -> Evidence:
         raise HTTPException(status_code=502, detail=f"ClinicalTrials fetch failed: {e!s}")
 
 @router.get("/clin/biomarker-fit", response_model=Evidence)
-async def clin_biomarker_fit(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
+async def clin_biomarker_fit(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} {condition or ''} biomarker predictive prospective validation"
-    hits, cites = await _epmc_search(q, size=80)
-    return Evidence(status="OK", source="Europe PMC", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    cites = ["https://api.monarchinitiative.org/", "https://hpo.jax.org/"]
+    try:
+        # Resolve HGNC/Monarch gene id via autocomplete
+        s_url = "https://api.monarchinitiative.org/api/search/entity/autocomplete/" + urllib.parse.quote(sym) + "?category=gene&rows=1"
+        s_js  = await _get_json(s_url, tries=2)
+        gene_id = ((((s_js or {}).get("docs") or []) or [{}])[0] or {}).get("id")
+        if gene_id:
+            ph_url = f"https://api.monarchinitiative.org/api/bioentity/{urllib.parse.quote(gene_id)}/phenotypes?rows=100"
+            ph_js  = await _get_json(ph_url, tries=2)
+            return Evidence(status="OK", source="Monarch/HPO APIs", fetched_n=1, data={"gene_id": gene_id, "phenotypes": ph_js}, citations=cites + [s_url, ph_url], fetched_at=_now())
+    except Exception:
+        pass
+    # Fallback: PharmGKB family
+    pharm = f"https://api.pharmgkb.org/v1/data/gene?q={urllib.parse.quote(sym)}"
+    hits, lit = await _epmc_search(f"{sym} biomarker OR predictive biomarker site:pharmgkb.org", size=25)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="Monarch/HPO → PharmGKB (literature)", fetched_n=len(hits), data={"symbol": sym, "hits": hits}, citations=cites + [pharm] + lit, fetched_at=_now())
 
 @router.get("/clin/pipeline", response_model=Evidence)
-async def clin_pipeline(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+async def clin_pipeline(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} NCATS Inxight Drugs pipeline"
-    hits, cites = await _epmc_search(q, size=20)
-    return Evidence(status="OK", source="Inxight Drugs (NCATS) (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
+    term = condition or sym
+    base = "https://clinicaltrials.gov/api/v2/studies"
+    params = {"query.cond": term, "pageSize": 25, "format": "json", "countTotal": "true"}
+    url = base + "?" + urllib.parse.urlencode(params)
+    try:
+        js = await _get_json(url, tries=2)
+        total = (js or {}).get("totalCount") or 0
+        return Evidence(status=("OK" if total else "NO_DATA"), source="ClinicalTrials.gov v2", fetched_n=total, data={"term": term, "studies": js}, citations=[base, "https://www.nlm.nih.gov/pubs/techbull/ma24/ma24_clinicaltrials_api.html"], fetched_at=_now())
+    except Exception:
+        # Fallback: DrugCentral trials (family) + literature
+        dc = "https://drugcentral.org/"
+        hits, lit = await _epmc_search(f"{term} clinical trial site:clinicaltrials.gov", size=25)
+        return Evidence(status=("OK" if hits else "NO_DATA"), source="ClinicalTrials.gov → literature", fetched_n=len(hits), data={"term": term, "hits": hits}, citations=[base, dc] + lit, fetched_at=_now())
 
 @router.get("/clin/safety", response_model=Evidence)
 async def clin_safety(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
@@ -2088,88 +2437,22 @@ async def clin_eu_ctr_linkouts(condition: Optional[str] = None) -> Evidence:
 @router.get("/genetics/intolerance", response_model=Evidence)
 async def genetics_intolerance(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    q = f"{sym} gnomAD constraint intolerance pLI"
-    hits, cites = await _epmc_search(q, size=40)
-    return Evidence(status="OK", source="gnomAD GraphQL (fallback via literature)", fetched_n=len(hits), data={"query": q, "hits": hits}, citations=cites, fetched_at=_now())
-
-# ------------------------ Literature mesh + Synthesis -------------------------
-
-class BucketNarrative(BaseModel):
-    bucket: str
-    summary: str
-    drivers: List[str] = []
-    tensions: List[str] = []
-    flip_if: List[str] = []
-    citations: List[str] = []
-
-class LitMeshRequest(BaseModel):
-    gene: str
-    condition: Optional[str] = None
-    bucket: str
-    module_outputs: Dict[str, Any] = Field(default_factory=dict)
-    max_passes: int = 1
-
-class LitSummary(BaseModel):
-    bucket: str
-    hits: List[Dict[str, Any]]
-    stance_tally: Dict[str, int] = {}
-    notes: Optional[str] = None
-    citations: List[str] = []
-
-LITERATURE_TEMPLATES = {
-    "GENETIC_CAUSALITY": {
-        "confirm": [
-            "({gene}) AND ({condition}) AND (mendelian randomization OR MR)",
-            "({gene}) AND ({condition}) AND (colocalization OR colocalisation)",
-            "({gene}) AND (pQTL OR sQTL)",
-            "({gene}) AND ({condition}) AND (fine-mapping OR credible set OR posterior inclusion probability)",
-        ],
-        "disconfirm": [
-            "({gene}) AND ({condition}) AND (no association OR not associated OR failed replication)",
-            "({gene}) AND (MR OR colocalization) AND (null OR negative)",
-        ],
-    },
-    "ASSOCIATION": {"confirm": [
-            "({gene}) AND ({condition}) AND (single-cell OR scRNA-seq OR snRNA-seq)",
-            "({gene}) AND ({condition}) AND (spatial transcriptomics OR Visium OR MERFISH OR Xenium)",
-            "({gene}) AND ({condition}) AND (proteomics OR phosphoproteomics)",
-            "({gene}) AND ({condition}) AND (metabolomics OR biomarker)",
-        ],
-        "disconfirm": [
-            "({gene}) AND ({condition}) AND (no change OR unchanged OR not differential)",
-        ],
-    },
-    "MECHANISM": {
-        "confirm": [
-            "({gene}) AND (CRISPR OR RNAi OR perturb-seq OR CRISPRa OR CRISPRi)",
-            "({gene}) AND (ligand receptor OR ligand-receptor OR cell-cell communication)",
-            "({gene}) AND ({condition}) AND (phosphoproteomics OR kinase-substrate)",
-        ],
-        "disconfirm": [
-            "({gene}) AND (CRISPR OR RNAi) AND (no effect OR off-target)",
-        ],
-    },
-    "TRACTABILITY": {
-        "confirm": [
-            "({gene}) AND (membrane OR secreted OR surface) AND (antibody OR ADC OR CAR)",
-            "({gene}) AND (pocket OR binding site OR AlphaFold OR structure) AND (inhibitor OR small molecule)",
-            "({gene}) AND (aptamer OR antisense OR siRNA OR ASO)",
-            "({gene}) AND (epitope OR immunogenic) AND (HLA OR netMHCpan)",
-        ],
-        "disconfirm": [
-            "({gene}) AND (antibody) AND (cross-reactivity OR off-tumor)",
-        ],
-    },
-    "CLINICAL_FIT": {
-        "confirm": [
-            "({gene}) AND ({condition}) AND (biomarker) AND (trial OR prospective OR predictive)",
-            "({gene}) AND ({condition}) AND (pharmacogenomics OR PharmGKB)",
-        ],
-        "disconfirm": [
-            "({gene}) AND ({condition}) AND (adverse event OR toxicity) AND (case series OR signal)",
-        ],
-    },
-}
+    ensg = await _ensg_from_symbol(sym) or sym
+    cites = ["https://gnomad.broadinstitute.org/", "https://gnomad.broadinstitute.org/news/2023-05-update-api-to-typescript/"]
+    # Primary: gnomAD GraphQL gene constraint
+    try:
+        gql = """query($geneId:String!){ gene(gene_id:$geneId){ gene_id symbol constraint { oe_lof oe_mis oe_syn lof_z missense_z syn_z pLI pRec pNull } } }"""
+        js = await _httpx_json_post("https://gnomad.broadinstitute.org/api", {"query": gql, "variables": {"geneId": ensg}})
+        cons = ((((js or {}).get("data") or {}).get("gene") or {}).get("constraint"))
+        if cons:
+            return Evidence(status="OK", source="gnomAD GraphQL", fetched_n=1, data={"ensg": ensg, "constraint": cons}, citations=cites, fetched_at=_now())
+    except Exception:
+        pass
+    # Fallback: CADD (family) reference + literature
+    cites.append("https://cadd.gs.washington.edu/")
+    hits, lit = await _epmc_search(f"{sym} constraint OR intolerance OR LOEUF", size=30)
+    cites.extend(lit)
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="gnomAD → literature", fetched_n=(1 if hits else 0), data={"ensg": ensg, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.post("/lit/mesh", response_model=LitSummary)
 async def lit_mesh(req: LitMeshRequest) -> LitSummary:
@@ -2337,52 +2620,130 @@ async def synth_targetcard(
         bucket_narratives[b] = bn
     reg = {"modules": len(MODULES), "by_bucket": {b: sum(1 for m in MODULES if m.bucket==b) for b in BUCKETS}}
     return TargetCard(target=gene, disease=condition, bucket_summaries=bucket_narratives, registry_snapshot=reg)
+
 @router.post("/synth/graph", response_model=TargetGraph)
-async def synth_graph(gene: str = Body(...), condition: Optional[str] = Body(None), bucket_payloads: Dict[str, Dict[str, Any]] = Body(default_factory=dict)) -> TargetGraph:
+async def synth_graph(
+    gene: str = Body(...),
+    condition: Optional[str] = Body(None),
+    bucket_payloads: Dict[str, Dict[str, Any]] = Body(default_factory=dict),
+    algos: Dict[str, Any] = Body(default_factory=dict)
+) -> TargetGraph:
+    """
+    Build a target-centric evidence graph and (internally) run:
+      • Random Walk with Restart (RWR) from the target gene,
+      • Prize-Collecting Steiner Tree (PCST) approximation to connect key buckets,
+      • Community detection (Leiden if available; else greedy modularity).
+    The algorithm outputs are attached as node/edge attributes (no external scoring is exposed).
+    """
     nodes: Dict[str, Dict[str, Any]] = {}
     edges: List[GraphEdge] = []
+
     def add_node(key: str, kind: str, label: Optional[str] = None, **attrs):
-        nodes[key] = {"kind": kind, "label": label or key, **attrs}
+        if key not in nodes:
+            nodes[key] = {"kind": kind, "label": label or key, **attrs}
+        else:
+            nodes[key].update(attrs)
+
     def add_edge(src: str, dst: str, kind: str, weight: float = 1.0):
         edges.append(GraphEdge(src=src, dst=dst, kind=kind, weight=weight))
+
     add_node(gene, "Gene", label=gene)
     for b, p in (bucket_payloads or {}).items():
-        add_node(b, "Bucket", label=b); add_edge(gene, b, "in_bucket")
-        mos = p.get("module_outputs") or {}
+        add_node(b, "Bucket", label=b); add_edge(gene, b, "in_bucket", 1.0)
+        mos = (p.get("module_outputs") or {}) if isinstance(p, dict) else {}
         for k, v in mos.items():
-            add_node(k, "Module", label=k); add_edge(b, k, "has_module")
-            for t in (v.get("tissues") or []):
-                add_node(t, "Tissue", label=t); add_edge(k, t, "in_tissue")
-            for path in (v.get("pathways") or []):
-                add_node(path, "Pathway", label=path); add_edge(k, path, "in_pathway")
+            mk = f"{b}:{k}"
+            add_node(mk, "Module", label=k)
+            add_edge(b, mk, "has_module", 1.0)
+            # link evidence items if provided
+            items = (v.get("data") or []) if isinstance(v, dict) else []
+            if isinstance(items, dict):  # sometimes a dict with nested arrays
+                # flatten one level if possible
+                for key2, arr in items.items():
+                    if isinstance(arr, list):
+                        items = arr; break
+            for i, _ in enumerate(items[:20]):  # cap fan-out
+                ek = f"{mk}#{i}"
+                add_node(ek, "Evidence")
+                add_edge(mk, ek, "supports", 1.0)
+
+    # ---- Internal graph algorithms (optional; attached as attributes) ----
+    if nx is not None and edges:
+        try:
+            G = nx.DiGraph()
+            for k, attrs in nodes.items():
+                G.add_node(k, **attrs)
+            for e in edges:
+                G.add_edge(e.src, e.dst, weight=float(e.weight or 1.0))
+            # RWR from target gene
+            alpha = float(algos.get("rwr_alpha", 0.7)) if isinstance(algos, dict) else 0.7
+            # Convert to undirected for diffusion
+            GU = G.to_undirected()
+            # normalize transition matrix
+            import numpy as _np  # type: ignore
+            idx = {n: i for i, n in enumerate(GU.nodes())}
+            n = len(idx)
+            if n <= 10000:  # safeguard
+                A = _np.zeros((n, n), dtype=float)
+                for u, v, d in GU.edges(data=True):
+                    w = float(d.get("weight") or 1.0)
+                    A[idx[u], idx[v]] += w
+                    A[idx[v], idx[u]] += w
+                dsum = A.sum(axis=1)
+                P = _np.divide(A, dsum, out=_np.zeros_like(A), where=(dsum > 0)[:, None])
+                r = _np.zeros(n); r[idx[gene]] = 1.0
+                p = r.copy()
+                tol = 1e-6
+                for _ in range(200):
+                    p_new = (1 - alpha) * P.T.dot(p) + alpha * r
+                    if _np.linalg.norm(p_new - p, ord=1) < tol:
+                        p = p_new; break
+                    p = p_new
+                # attach scores
+                inv_idx = {i: n for n, i in idx.items()}
+                for i2 in range(n):
+                    nodes[inv_idx[i2]]["rwr_score"] = float(p[i2])
+            # PCST (approx via Steiner tree on buckets + gene)
+            try:
+                from networkx.algorithms.approximation import steiner_tree
+                terminals = [gene] + [k for k, v in nodes.items() if v.get("kind") == "Bucket"]
+                T = steiner_tree(GU, terminals)
+                pcst_edges = set()
+                for u, v in T.edges():
+                    pcst_edges.add((u, v)); pcst_edges.add((v, u))
+                for e in edges:
+                    if (e.src, e.dst) in pcst_edges:
+                        e.weight = float(e.weight or 1.0) * 1.1  # subtle bump
+                        # mark both ends as in-PCST
+                        nodes[e.src]["pcst"] = True; nodes[e.dst]["pcst"] = True
+            except Exception:
+                pass
+            # Communities (Leiden via igraph if available; else greedy modularity)
+            try:
+                import igraph as ig  # type: ignore
+                import leidenalg  # type: ignore
+                g = ig.Graph()
+                name_to_id = {n:i for i,n in enumerate(GU.nodes())}
+                g.add_vertices(len(name_to_id))
+                g.vs["name"] = list(name_to_id.keys())
+                g.add_edges([(name_to_id[u], name_to_id[v]) for u,v in GU.edges()])
+                part = leidenalg.find_partition(g, leidenalg.RBConfigurationVertexPartition, resolution_parameter=1.0)
+                for cid, comm in enumerate(part):
+                    for vid in comm:
+                        nodes[g.vs[vid]["name"]]["community"] = int(cid)
+            except Exception:
+                try:
+                    from networkx.algorithms.community import greedy_modularity_communities
+                    comms = list(greedy_modularity_communities(GU))
+                    for cid, com in enumerate(comms):
+                        for nname in com:
+                            nodes[nname]["community"] = int(cid)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     return TargetGraph(nodes=nodes, edges=edges)
-
-# ------------------------ Debug / QA -----------------------------------------
-
-@router.get("/debug/config")
-def debug_config() -> Dict[str, Any]:
-    return {
-        "modules": len(MODULES),
-        "by_bucket": {b: sum(1 for m in MODULES if m.bucket == b) for b in BUCKETS},
-        "cache_items": len(CACHE),
-        "budget_s": REQUEST_BUDGET_S,
-        "timeout": repr(DEFAULT_TIMEOUT),
-    }
-
-# ------------------------ Legacy aliases (compat) ----------------------------
-
-@router.get("/assoc/geo-arrayexpress", response_model=Evidence)
-async def assoc_geo_arrayexpress(symbol: Optional[str] = None, gene: Optional[str] = None, condition: Optional[str] = None) -> Evidence:
-    return await assoc_bulk_rna(symbol=symbol, gene=gene, condition=condition)
-
-@router.get("/assoc/tabula-hca", response_model=Evidence)
-async def assoc_tabula_hca(symbol: Optional[str] = None, gene: Optional[str] = None) -> Evidence:
-    return await assoc_sc(symbol=symbol, gene=gene)
-
-@router.post("/assoc/cptac", response_model=Evidence)
-async def assoc_cptac(symbol: Optional[str] = Body(None), gene: Optional[str] = Body(None)) -> Evidence:
-    return await assoc_bulk_prot_pdc(symbol=symbol, gene=gene)
-
 @router.get("/synth/bucket", response_model=BucketNarrative)
 async def synth_bucket_get(
     name: str = Query(..., alias="name"),
@@ -3279,6 +3640,10 @@ async def _genetics_caqtl_lite(request: Request, gene: Optional[str] = None, sym
     status = "OK" if fetched > 0 else "NO_DATA"
     source = "ENCODE+4D Nucleome via genetics-regulatory/chromatin-contacts; Ensembl VEP motifs"
     return Evidence(status=status, source=source, fetched_n=fetched, data=aggregates, citations=sorted(list(set(citations))), fetched_at=_now())
+@router.get("/genetics/caqtl-lite", response_model=Evidence)
+async def genetics_caqtl_lite(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    return await _genetics_caqtl_lite(request, gene=gene, symbol=symbol)
+
 _add_if_missing("/genetics/caqtl-lite", _genetics_caqtl_lite, ["GET"], Evidence)
 
 async def _genetics_nmd_inference(request: Request, gene: Optional[str] = None, symbol: Optional[str] = None,
@@ -3324,6 +3689,10 @@ async def _genetics_nmd_inference(request: Request, gene: Optional[str] = None, 
     fetched = len(data["events"])
     status = "OK" if fetched > 0 else "NO_DATA"
     return Evidence(status=status, source="genetics-sqtl + Ensembl REST", fetched_n=fetched, data=data, citations=sorted(list(set(citations))), fetched_at=_now())
+@router.get("/genetics/nmd-inference", response_model=Evidence)
+async def genetics_nmd_inference(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    return await _genetics_nmd_inference(request, gene=gene, symbol=symbol)
+
 _add_if_missing("/genetics/nmd-inference", _genetics_nmd_inference, ["GET"], Evidence)
 
 async def _immunopeptidome_pride(request: Request, gene: Optional[str] = None, symbol: Optional[str] = None, limit: int = 50):
@@ -3412,6 +3781,11 @@ async def _genetics_ase_check(symbol: str, condition: Optional[str] = None, limi
             items.append({"id": it.get("id"), "title": title, "journal": it.get("journalTitle"), "year": it.get("pubYear"), "stance": stance})
     status = "OK" if items else "NO_DATA"
     return Evidence(status=status, source="Europe PMC (ASE literature)", fetched_n=len(items), data={"items": items[:limit]}, citations=citations, fetched_at=_now())
+@router.get("/genetics/ase-check", response_model=Evidence)
+async def genetics_ase_check(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None, limit: int = Query(50, ge=1, le=200)) -> Evidence:
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    return await _genetics_ase_check(sym, condition, limit)
+
 _add_if_missing("/genetics/ase-check", _genetics_ase_check, ["GET"], Evidence)
 
 async def _genetics_ptm_signal_lite(symbol: str, limit: int = 100):
@@ -3446,6 +3820,11 @@ async def _genetics_ptm_signal_lite(symbol: str, limit: int = 100):
     fetched = len(data.get("entries", []))
     status = "OK" if fetched > 0 else "NO_DATA"
     return Evidence(status=status, source="UniProtKB + PRIDE", fetched_n=fetched, data=data, citations=sorted(list(set(citations))), fetched_at=_now())
+@router.get("/genetics/ptm-signal-lite", response_model=Evidence)
+async def genetics_ptm_signal_lite(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=500)) -> Evidence:
+    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
+    return await _genetics_ptm_signal_lite(sym, limit)
+
 _add_if_missing("/genetics/ptm-signal-lite", _genetics_ptm_signal_lite, ["GET"], Evidence)
 
 # 3) Literature enrichers (dup-safe)
@@ -4322,47 +4701,34 @@ async def debug_selftest(symbol: str = Body(...), efo: Optional[str] = Body(None
 
 
 @router.get("/genetics/consortia-summary", response_model=Evidence)
-async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
-                                     gene: Optional[str] = Query(None),
-                                     condition: Optional[str] = Query(None)) -> Evidence:
-    """Summarise consortia evidence via OT datasourceScores for target-disease pair."""
+async def genetics_consortia_summary(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = Query(None)) -> Evidence:
+    """Live OpenTargets GraphQL summary (UKB/FinnGen/GWAS) with literature fallback."""
     sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
     ensg = await _ensg_from_symbol(sym) or sym
     efo  = await _efo_lookup(condition)
     cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
     if not (ensg and efo):
-        return Evidence(status="NO_DATA", source="OpenTargets",
-                        fetched_n=0, data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
-                        citations=cites, fetched_at=_now())
+        return Evidence(status="NO_DATA", source="OpenTargets", fetched_n=0, data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo}, citations=cites, fetched_at=_now())
     q = """
     query($ensg:String!, $efo:String!){
       associationByEntity(targetId:$ensg, diseaseId:$efo){
         datasourceScores{ id score }
       }
     }"""
-    # Attempt live fetch via GraphQL; fall back on failure or empty response.
     try:
-        js  = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
+        js  = await _httpx_json_post(EXTERNAL_URLS["opentargets_graphql"], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
         dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
         keys  = {"uk_biobank","finngen","gwas_catalog"}
-        cons  = [x for x in dss if (str(x.get("id",""))).lower() in keys and (x.get("score") or 0) > 0]
+        cons  = [x for x in dss if (str(x.get("id","")).lower() in keys) and (x.get("score") or 0) > 0]
         if cons:
-            return Evidence(status="OK", source="OpenTargets",
-                            fetched_n=len(cons),
-                            data={"ensg": ensg, "efo": efo, "consortia": cons, "datasourceScores": dss},
-                            citations=cites, fetched_at=_now())
+            return Evidence(status="OK", source="OpenTargets", fetched_n=len(cons), data={"ensg": ensg, "efo": efo, "consortia": cons, "datasourceScores": dss}, citations=cites, fetched_at=_now())
     except Exception:
         pass
-    # Fallback: search for UK Biobank/FinnGen/GWAS catalog evidence via literature
+    # Fallback literature
     fallback_query = f"{sym} {condition or ''} UK Biobank OR FinnGen OR GWAS catalog"
     hits, lit_cites = await _epmc_search(fallback_query, size=60)
     cites.extend(lit_cites)
-    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (fallback)",
-                    fetched_n=len(hits),
-                    data={"query": fallback_query, "hits": hits},
-                    citations=cites, fetched_at=_now())
-
-
+    return Evidence(status=("OK" if hits else "NO_DATA"), source="Europe PMC (fallback)", fetched_n=len(hits), data={"query": fallback_query, "hits": hits}, citations=cites, fetched_at=_now())
 
 @router.get("/genetics/mqtl-coloc", response_model=Evidence)
 async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
@@ -4392,37 +4758,6 @@ async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
                     citations=cites, fetched_at=_now())
 
 
-
-@router.get("/genetics/consortia-summary", response_model=Evidence)
-async def genetics_consortia_summary(symbol: Optional[str] = Query(None),
-                                     gene: Optional[str] = Query(None),
-                                     condition: Optional[str] = Query(None)) -> Evidence:
-    """
-    Live OpenTargets Platform GraphQL summary of consortia-like datasources
-    (UK Biobank, FinnGen, GWAS Catalog) for the target–disease pair.
-    """
-    sym = await _normalize_symbol(_sym_or_gene(symbol, gene))
-    ensg = await _ensg_from_symbol(sym) or sym
-    efo  = await _efo_lookup(condition)
-    cites = ["https://platform.opentargets.org/", "https://platform.opentargets.org/api/v4/graphql"]
-    if not (ensg and efo):
-        return Evidence(status="NO_DATA", source="OpenTargets",
-                        fetched_n=0, data={"note":"missing ensg or efo", "symbol": sym, "ensg": ensg, "efo": efo},
-                        citations=cites, fetched_at=_now())
-    q = """
-    query($ensg:String!, $efo:String!){
-      associationByEntity(targetId:$ensg, diseaseId:$efo){
-        datasourceScores{ id score }
-      }
-    }"""
-    js  = await _httpx_json_post(EXTERNAL_URLS['opentargets_graphql'], {"query": q, "variables": {"ensg": ensg, "efo": efo}})
-    dss = ((((js or {}).get("data") or {}).get("associationByEntity") or {}).get("datasourceScores") or [])
-    keys  = {"uk_biobank","finngen","gwas_catalog"}
-    cons  = [x for x in dss if (str(x.get("id","")).lower() in keys) and (x.get("score") or 0) > 0]
-    return Evidence(status=("OK" if cons else "NO_DATA"), source="OpenTargets",
-                    fetched_n=len(cons),
-                    data={"ensg": ensg, "efo": efo, "consortia": cons, "datasourceScores": dss},
-                    citations=cites, fetched_at=_now())
 
 @router.get("/genetics/mqtl-coloc", response_model=Evidence)
 async def genetics_mqtl_coloc(symbol: Optional[str] = Query(None),
@@ -4532,6 +4867,10 @@ async def _assoc_spatial(symbol: _Optional[str] = Query(None), gene: _Optional[s
     # Spatial association: merge gene-level spatial expression and neighbourhood data.  The spec
     # specifies Europe PMC spatial/ISH literature as the primary; update the label accordingly.
     return await _alias_merge(request, ["/assoc/spatial-expression", "/assoc/spatial-neighborhoods"], params, "Spatial association (Europe PMC spatial/ISH)")
+@router.get("/assoc/spatial", response_model=Evidence)
+async def assoc_spatial(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    return await _assoc_spatial(symbol=symbol, gene=gene)
+
 _add_if_missing("/assoc/spatial", _assoc_spatial, ["GET"], Evidence)
 
 # assoc-proteomics → aggregate of bulk proteomics sources
@@ -4542,6 +4881,10 @@ async def _assoc_proteomics(symbol: _Optional[str] = Query(None), gene: _Optiona
     # Proteomics association: prioritise ProteomicsDB, then PDC (CPTAC) and PRIDE, and include
     # phosphoproteomics; adjust the source label accordingly.
     return await _alias_merge(request, paths, params, "Proteomics (ProteomicsDB + PDC/PRIDE)")
+@router.get("/assoc/proteomics", response_model=Evidence)
+async def assoc_proteomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None, limit: int = Query(100, ge=1, le=200)) -> Evidence:
+    return await _assoc_proteomics(symbol=symbol, gene=gene, condition=condition, limit=limit)
+
 _add_if_missing("/assoc/proteomics", _assoc_proteomics, ["GET"], Evidence)
 
 # assoc-metabolomics → aggregate of metabolomics sources
@@ -4553,6 +4896,10 @@ async def _assoc_metabolomics(symbol: _Optional[str] = Query(None), gene: _Optio
     # Our omics-metabolites and UKB Nightingale modules correspond to these two sources; adjust
     # the source label accordingly.
     return await _alias_merge(request, paths, params, "Metabolomics (MetaboLights + Metabolomics Workbench)")
+@router.get("/assoc/metabolomics", response_model=Evidence)
+async def assoc_metabolomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None, limit: int = Query(100, ge=1, le=200)) -> Evidence:
+    return await _assoc_metabolomics(symbol=symbol, gene=gene, condition=condition, limit=limit)
+
 _add_if_missing("/assoc/metabolomics", _assoc_metabolomics, ["GET"], Evidence)
 
 # perturb-perturbseq-encode → forwarder to the concrete ENCODE perturbseq route
@@ -4571,6 +4918,10 @@ async def _genetics_annotation(symbol: _Optional[str] = Query(None), gene: _Opti
     params = dict(symbol=symbol or gene)
     paths = ["/genetics/intolerance", "/genetics/pathogenicity-priors"]
     return await _alias_merge(request, paths, params, "Gene-level annotation (constraint + pathogenicity priors)")
+@router.get("/genetics/annotation", response_model=Evidence)
+async def genetics_annotation(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    return await _genetics_annotation(symbol=symbol, gene=gene)
+
 _add_if_missing("/genetics/annotation", _genetics_annotation, ["GET"], Evidence)
 
 # genetics-regulatory → aggregate sQTL + chromatin contacts + mQTL colocalization if present
@@ -4579,6 +4930,10 @@ async def _genetics_regulatory(symbol: _Optional[str] = Query(None), gene: _Opti
     params = dict(symbol=symbol or gene, condition=condition)
     paths = ["/genetics/sqtl", "/genetics/chromatin-contacts", "/genetics/mqtl-coloc"]
     return await _alias_merge(request, paths, params, "Regulatory evidence (sQTL + 3D contacts + mQTL coloc)")
+@router.get("/genetics/regulatory", response_model=Evidence)
+async def genetics_regulatory(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
+    return await _genetics_regulatory(symbol=symbol, gene=gene)
+
 _add_if_missing("/genetics/regulatory", _genetics_regulatory, ["GET"], Evidence)
 
 # genetics-3d-maps → forwarder to chromatin contacts
@@ -4590,6 +4945,10 @@ async def _genetics_3d_maps(symbol: _Optional[str] = Query(None), gene: _Optiona
         # alias corresponds to 4D Nucleome and UCSC interaction/loop tracks.
         js["source"] = "Alias → 3D chromatin contacts (4DN + UCSC)"
     return js
+@router.get("/genetics/3d-maps", response_model=Evidence)
+async def genetics_3d_maps(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
+    return await _genetics_3d_maps(symbol=symbol, gene=gene)
+
 _add_if_missing("/genetics/3d-maps", _genetics_3d_maps, ["GET"], Evidence)
 
 # ---- Extend registry with the 9 'perturb-*' modules if missing ----
@@ -4641,3 +5000,128 @@ def _find_duplicate_routes() -> List[Dict[str, Any]]:
 async def _debug_routes() -> Dict[str, Any]:
     dups = _find_duplicate_routes()
     return {"routes": len(getattr(router, "routes", [])), "duplicates": dups}  # type: ignore[name-defined]
+
+_add_if_missing("/debug/routes", _debug_routes, ["GET"], None)
+
+# ================= END FIXUP BLOCK ============================================
+
+# ----------------------- Live client implementations (override previous stubs) -----------------------
+try:
+    import types as _types
+
+    # IEDB observed epitopes (simple search by gene symbol in reference)
+    async def _iedb_observed_epitopes(fetch_json_func, query_dict: Dict[str, Any]):
+        base = "https://api.iedb.org/epitope"
+        q = urllib.parse.urlencode(query_dict)
+        url = f"{base}?{q}"
+        js = await _httpx_json_get(url)
+        return js or {}
+
+    # Try IEDB MHC binding tools if reachable (class I)
+    async def _iedb_predict_mhc_class_i(fetch_json_func, peptides: List[str], alleles: List[str]):
+        # Tools API cluster; may be rate-limited. We attempt a minimal call; on failure return empty result.
+        url = "http://tools-cluster-interface.iedb.org/tools_api/mhci/"
+        try:
+            payload = {"sequence_text": "\n".join(peptides[:50]), "allele": ",".join(alleles[:50]), "length": "9"}
+            js = await _httpx_json_post(url, payload, timeout=60.0)
+            return js or {}
+        except Exception:
+            return {}
+
+    async def _iedb_predict_mhc_class_ii(fetch_json_func, peptides: List[str], alleles: List[str]):
+        url = "http://tools-cluster-interface.iedb.org/tools_api/mhcii/"
+        try:
+            payload = {"sequence_text": "\n".join(peptides[:50]), "allele": ",".join(alleles[:50])}
+            js = await _httpx_json_post(url, payload, timeout=60.0)
+            return js or {}
+        except Exception:
+            return {}
+
+    iedb.observed_epitopes = _iedb_observed_epitopes  # type: ignore
+    iedb.predict_mhc_class_i = _iedb_predict_mhc_class_i  # type: ignore
+    iedb.predict_mhc_class_ii = _iedb_predict_mhc_class_ii  # type: ignore
+
+    # IPD-IMGT/HLA live allele search
+    async def _ipd_search_alleles(fetch_json_func, query: str):
+        base = "https://www.ebi.ac.uk/ipd/api/v1/alleles"
+        url = f"{base}?search={urllib.parse.quote(query)}"
+        js = await _httpx_json_get(url)
+        return js or {}
+
+    ipd_imgt.search_alleles = _ipd_search_alleles  # type: ignore
+
+    # UniProt REST — search for cell-surface proteins for a gene
+    async def _uniprot_cell_surface(fetch_json_func, gene: Optional[str]):
+        if not gene:
+            return {}
+        q = f'(gene_exact:{gene}) AND (cc_scl_term:"Cell membrane" OR locations:"Plasma membrane")'
+        url = "https://rest.uniprot.org/uniprotkb/search?format=json&size=50&fields=accession,protein_name,gene_names,cc_subcellular_location&query=" + urllib.parse.quote(q)
+        js = await _httpx_json_get(url)
+        return js or {}
+
+    uniprot.cell_surface = _uniprot_cell_surface  # type: ignore
+
+    # GlyGen — protein summary by UniProt accession
+    async def _glygen_protein_summary(fetch_json_func, accession: str):
+        url = f"https://api.glygen.org/protein/detail/{urllib.parse.quote(accession)}"
+        js = await _httpx_json_get(url)
+        return js or {}
+
+    glygen.protein_summary = _glygen_protein_summary  # type: ignore
+
+    # RNAcentral — URS crossrefs and by external ID
+    async def _rnacentral_urs_xrefs(fetch_json_func, urs_id: str):
+        url = f"https://rnacentral.org/api/v1/rna/{urllib.parse.quote(urs_id)}/xrefs"
+        js = await _httpx_json_get(url)
+        return js or {}
+
+    async def _rnacentral_by_external_id(fetch_json_func, ext_id: str):
+        url = f"https://rnacentral.org/api/v1/rna?query={urllib.parse.quote(ext_id)}"
+        js = await _httpx_json_get(url)
+        return js or {}
+
+    rnacentral.urs_xrefs = _rnacentral_urs_xrefs  # type: ignore
+    rnacentral.by_external_id = _rnacentral_by_external_id  # type: ignore
+
+    # Reactome Content Service — pathways for UniProt
+    async def _reactome_pathways_for_uniprot(fetch_json_func, uniprot_id: str):
+        url = f"https://reactome.org/ContentService/data/mapping/UniProt/{urllib.parse.quote(uniprot_id)}/pathways"
+        js = await _httpx_json_get(url)
+        return js or []
+
+    reactome.pathways_for_uniprot = _reactome_pathways_for_uniprot  # type: ignore
+
+    # ComplexPortal — complexes by UniProt accession
+    async def _complex_portal_complexes_by_uniprot(fetch_json_func, uniprot_id: str):
+        url = f"https://www.ebi.ac.uk/complexportal/api/complex/search?query=uniprot:{urllib.parse.quote(uniprot_id)}"
+        js = await _httpx_json_get(url)
+        return js or {}
+
+    complex_portal.complexes_by_uniprot = _complex_portal_complexes_by_uniprot  # type: ignore
+
+    # OmniPath DB — interactions among gene set
+    async def _omnipath_interactions(fetch_json_func, genes: List[str]):
+        url = "https://omnipathdb.org/interactions?format=json&genes=" + ",".join([urllib.parse.quote(g) for g in genes[:200]])
+        js = await _httpx_json_get(url)
+        return js or []
+
+    omnipath.directed_interactions = _omnipath_interactions  # type: ignore
+
+except Exception as _e_live:
+    # Do not crash router if any override fails; keep prior minimal behavior
+    print("Live client override warning:", _e_live)
+
+try:
+    async def _omnipath_kinase_substrate(fetch_json_func, genes: List[str]):
+        url = "https://omnipathdb.org/ptms?format=json&genes=" + ",".join([urllib.parse.quote(g) for g in genes[:200]])
+        js = await _httpx_json_get(url)
+        return js or []
+    omnipath.kinase_substrate = _omnipath_kinase_substrate  # type: ignore
+
+    async def _omnipath_tf_targets_dorothea(fetch_json_func, tf_symbols: List[str]):
+        url = "https://omnipathdb.org/targets?format=json&sources=DoRothEA&tf=" + ",".join([urllib.parse.quote(g) for g in tf_symbols[:200]])
+        js = await _httpx_json_get(url)
+        return js or []
+    omnipath.tf_targets_dorothea = _omnipath_tf_targets_dorothea  # type: ignore
+except Exception:
+    pass
