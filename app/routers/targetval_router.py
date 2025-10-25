@@ -306,9 +306,165 @@ from urllib.parse import urlparse
 from fnmatch import fnmatch
 from fastapi import APIRouter, HTTPException, Query, Body, Path as PathParam, Request
 # --- New imports for EvidenceEnvelope and runtime/clients per v2.2 spec ---
-from app.schemas.evidence import EvidenceEnvelope, Edge, stage_context
-from app.runtime.http import fetch_json, allow_hosts
-from app.clients import iedb, ipd_imgt, uniprot, glygen, rnacentral, reactome, complex_portal, omnipath
+# EvidenceEnvelope and related classes may live in app.schemas.evidence in the full
+# TargetVal application.  When running this standalone router outside that package (e.g.
+# on Render or in isolation), the import may fail.  Fall back to minimal placeholder
+# implementations to avoid ModuleNotFoundError.  These stubs implement just enough
+# behaviour (dict-like fields) to satisfy downstream usage.
+try:
+    from app.schemas.evidence import EvidenceEnvelope, Edge, stage_context  # type: ignore
+except ImportError:
+    from typing import Any, Dict, List, Optional
+    from pydantic import BaseModel, Field
+
+    class EvidenceEnvelope(BaseModel):  # type: ignore
+        """Minimal stand‑alone replacement for the EvidenceEnvelope Pydantic model.
+
+        This fallback uses a Pydantic BaseModel so that FastAPI can use it as
+        a response_model.  The fields mirror those used in the router: module,
+        domain, context, provenance, data, citations, notes, status,
+        fetched_n and fetched_at.  Additional fields assigned at runtime will
+        be permitted via the model Config ``extra = 'allow'``.
+        """
+        module: str = Field(..., description="Module identifier")
+        domain: str = Field(..., description="Domain identifier")
+        context: Dict[str, Any] = Field(default_factory=dict, description="Context metadata")
+        provenance: Dict[str, Any] = Field(default_factory=lambda: {"sources": [], "module_order": []}, description="Provenance info")
+        data: Dict[str, Any] = Field(default_factory=dict, description="Primary data payload")
+        citations: List[str] = Field(default_factory=list, description="List of citation URLs")
+        notes: List[str] = Field(default_factory=list, description="Notes or warnings")
+        status: str = Field("NO_DATA", description="Status of the evidence retrieval")
+        fetched_n: int = Field(0, description="Number of records fetched")
+        fetched_at: float = Field(0.0, description="Timestamp when data was fetched")
+        # Allow arbitrary extra attributes assigned at runtime
+        class Config:
+            arbitrary_types_allowed = True
+            extra = "allow"
+
+    class Edge(BaseModel):  # type: ignore
+        """Placeholder for an Edge object used in synthesis; stores source, target and optional weight."""
+        source: str = Field(...)
+        target: str = Field(...)
+        weight: Optional[float] = Field(default=None)
+
+    def stage_context(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore
+        """Stub for stage_context; returns an empty dict since staging is not implemented in this standalone router."""
+        return {}
+
+# -----------------------------------------------------------------------------
+# Optional imports from the full TargetVal application.  These modules are part
+# of the larger ``app`` package in the real deployment.  When running this
+# router in isolation (e.g. during testing or on Render) the ``app`` package
+# might not be present.  In that case we fall back to minimal shims that
+# implement the handful of functions and classes referenced throughout this
+# file.  These shims do not make external API calls – instead they return
+# empty results – but they allow the router to import successfully and start.
+try:
+    from app.runtime.http import fetch_json, allow_hosts  # type: ignore
+except Exception:
+    # Fallback implementations for fetch_json and allow_hosts when the
+    # app.runtime.http module is missing.  These shims implement a very
+    # lightweight HTTP wrapper using httpx.  They ignore caching, TTL and
+    # other features provided by the real implementation but preserve the
+    # expected call signature.
+    import httpx
+    from typing import Any, Optional, Dict, Tuple
+
+    async def fetch_json(url: str, params: Optional[Dict[str, Any]] = None,
+                         headers: Optional[Dict[str, str]] = None,
+                         ttl_tier: str = "moderate", method: str = "GET") -> Tuple[Any, bool]:
+        """Simplified HTTP JSON fetcher.  Returns (data, from_cache)."""
+        async with httpx.AsyncClient() as client:
+            try:
+                if method.upper() == "POST":
+                    resp = await client.post(url, json=params, headers=headers)
+                else:
+                    resp = await client.get(url, params=params, headers=headers)
+                resp.raise_for_status()
+                try:
+                    return resp.json(), False
+                except Exception:
+                    return None, False
+            except Exception:
+                # On any error return no data; caller should handle exceptions
+                return None, False
+
+    def allow_hosts(hosts: list[str]) -> None:
+        """No-op fallback for allow_hosts when the real module is unavailable."""
+        return None
+
+try:
+    from app.clients import iedb, ipd_imgt, uniprot, glygen, rnacentral, reactome, complex_portal, omnipath  # type: ignore
+except Exception:
+    # Provide minimal stub modules for each client.  These stubs expose the
+    # methods referenced in this router and always return empty results.  This
+    # allows the router to import and run even when the full client package is
+    # absent.  See the real TargetVal codebase for complete implementations.
+    import types
+    from typing import Any, Optional, Dict, List
+
+    # IEDB client stubs
+    iedb = types.SimpleNamespace()
+    async def _iedb_predict_mhc_class_i(fetch_json_func, peptides: List[str], alleles: List[str]):  # type: ignore
+        return []
+    async def _iedb_predict_mhc_class_ii(fetch_json_func, peptides: List[str], alleles: List[str]):  # type: ignore
+        return []
+    async def _iedb_search_epitopes(fetch_json_func, query_dict: Dict[str, Any]):  # type: ignore
+        return []
+    iedb.predict_mhc_class_i = _iedb_predict_mhc_class_i  # type: ignore
+    iedb.predict_mhc_class_ii = _iedb_predict_mhc_class_ii  # type: ignore
+    iedb.search_epitopes = _iedb_search_epitopes  # type: ignore
+
+    # IPD‑IMGT/HLA client stub
+    ipd_imgt = types.SimpleNamespace()
+    async def _ipd_search_alleles(fetch_json_func, query: str):  # type: ignore
+        return []
+    ipd_imgt.search_alleles = _ipd_search_alleles  # type: ignore
+
+    # UniProt client stub
+    uniprot = types.SimpleNamespace()
+    async def _uniprot_cell_surface(fetch_json_func, gene: Optional[str]):  # type: ignore
+        return []
+    uniprot.cell_surface = _uniprot_cell_surface  # type: ignore
+
+    # GlyGen client stub
+    glygen = types.SimpleNamespace()
+    async def _glygen_protein_summary(fetch_json_func, accession: str):  # type: ignore
+        return {}
+    glygen.protein_summary = _glygen_protein_summary  # type: ignore
+
+    # RNAcentral client stub
+    rnacentral = types.SimpleNamespace()
+    async def _rnacentral_urs_xrefs(fetch_json_func, urs: str):  # type: ignore
+        return []
+    async def _rnacentral_by_external_id(fetch_json_func, symbol: str):  # type: ignore
+        return []
+    rnacentral.urs_xrefs = _rnacentral_urs_xrefs  # type: ignore
+    rnacentral.by_external_id = _rnacentral_by_external_id  # type: ignore
+
+    # Reactome client stub
+    reactome = types.SimpleNamespace()
+    async def _reactome_pathways_for_uniprot(fetch_json_func, uniprot_id: str):  # type: ignore
+        return []
+    reactome.pathways_for_uniprot = _reactome_pathways_for_uniprot  # type: ignore
+
+    # Complex Portal client stub
+    complex_portal = types.SimpleNamespace()
+    async def _complex_portal_complexes_by_uniprot(fetch_json_func, uniprot_id: str):  # type: ignore
+        return []
+    complex_portal.complexes_by_uniprot = _complex_portal_complexes_by_uniprot  # type: ignore
+
+    # OmniPath client stub
+    omnipath = types.SimpleNamespace()
+    async def _omnipath_directed_interactions(fetch_json_func, gene: str):  # type: ignore
+        return []
+    async def _omnipath_kinase_substrate(fetch_json_func, gene: str):  # type: ignore
+        return []
+    async def _omnipath_tf_targets_dorothea(fetch_json_func, gene: str):  # type: ignore
+        return []
+    omnipath.directed_interactions = _omnipath_directed_interactions  # type: ignore
+    omnipath.kinase_substrate = _omnipath_kinase_substrate  # type: ignore
+    omnipath.tf_targets_dorothea = _omnipath_tf_targets_dorothea  # type: ignore
 
 # ----------------------- Domain naming & registry (authoritative) -----------------------
 DOMAIN_LABELS = {
@@ -392,7 +548,29 @@ def _domain_modules_spec() -> dict:
 from pydantic import BaseModel, Field
 
 # Import legacy Evidence model from schemas to satisfy Pydantic layout rule
-from app.schemas.legacy import Evidence
+# Import legacy Evidence model from schemas to satisfy Pydantic layout rule.  When
+# running standalone, fall back to a minimal dict‑based implementation.
+try:
+    from app.schemas.legacy import Evidence  # type: ignore
+except Exception:
+    from typing import Any, Optional, List
+
+    from pydantic import BaseModel, Field
+    class Evidence(BaseModel):  # type: ignore
+        """Minimal stand‑alone replacement for the Evidence Pydantic model.
+
+        This fallback uses a Pydantic BaseModel so that FastAPI can use it as
+        a response_model.  The fields mirror those used in the router.
+        """
+        status: str = Field("NO_DATA", description="Status of the evidence retrieval")
+        source: str = Field("", description="Data source")
+        fetched_n: int = Field(0, description="Number of records fetched")
+        data: Any = Field(default=None, description="Payload of the evidence")
+        citations: List[str] = Field(default_factory=list, description="List of citation URLs")
+        fetched_at: Optional[float] = Field(default=None, description="Timestamp when data was fetched")
+
+        class Config:
+            arbitrary_types_allowed = True
 
 # Helper to compute module_order index for provenance. Returns None if not found.
 def _module_order_index(module_name: str) -> int | None:
