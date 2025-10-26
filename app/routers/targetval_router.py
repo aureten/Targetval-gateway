@@ -306,6 +306,40 @@ import httpx
 from urllib.parse import urlparse
 from fnmatch import fnmatch
 from fastapi import APIRouter, HTTPException, Query, Body, Path as PathParam, Request
+
+# ---- Literature schema models (LitSummary, LitMeshRequest, BucketNarrative) ----
+# Some deployments of this router run outside the full TargetVal package where
+# app.schemas.lit may not be importable. Import if available; otherwise define
+# minimal Pydantic models so FastAPI can evaluate response_model at import time.
+try:
+    from app.schemas.lit import LitSummary, LitMeshRequest, BucketNarrative  # type: ignore
+except Exception:  # ModuleNotFoundError or ImportError
+    from typing import Any, Dict, List, Optional
+    try:
+        from pydantic import BaseModel, Field
+    except Exception as e:  # If Pydantic is missing, fail fast with a clear message
+        raise ImportError("pydantic is required for Lit* fallback schemas") from e
+
+    class LitMeshRequest(BaseModel):  # minimal request model used by /lit/mesh
+        gene: str
+        condition: Optional[str] = None
+        bucket: str
+
+    class LitSummary(BaseModel):  # minimal response model used by /lit/mesh
+        bucket: str
+        hits: List[Dict[str, Any]] = Field(default_factory=list)
+        stance_tally: Dict[str, int] = Field(default_factory=dict)
+        notes: Optional[str] = None
+        citations: List[str] = Field(default_factory=list)
+
+    class BucketNarrative(BaseModel):  # response model used by /synth/bucket
+        bucket: str
+        summary: str
+        drivers: List[str] = Field(default_factory=list)
+        tensions: List[str] = Field(default_factory=list)
+        flip_if: List[str] = Field(default_factory=list)
+        citations: List[str] = Field(default_factory=list)
+
 # --- New imports for EvidenceEnvelope and runtime/clients per v2.2 spec ---
 # EvidenceEnvelope and related classes may live in app.schemas.evidence in the full
 # TargetVal application.  When running this standalone router outside that package (e.g.
