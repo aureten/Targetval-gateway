@@ -1,4 +1,5 @@
 
+
 from __future__ import annotations
 
 # ---- Pydantic v2 typing prelude ----------------------------------------------
@@ -5162,20 +5163,27 @@ except Exception:
 
 
 # ============================================================================
-# Targetval Router — Surgical patch block (appended)
-# Fixes for genetics-{coloc,consortia-summary,l2g,mr,nmd-inference,rare,3d-maps,annotation,caqtl-lite,regulatory}
-# and mech-pathways to ensure live, keyless fetches as required by v2 config.
-#
-# NOTE: This block *does not* change other modules. It removes/overrides only
-# the endpoints listed above, leaving the rest of your router intact.
+# PATCH BLOCK (no __future__ imports here) — Live, keyless fixes for endpoints
 # ============================================================================
+# This block overrides ONLY the failing endpoints by replacing their routes with
+# direct calls to public APIs. Everything else above remains unchanged.
+# It also defines a safe EXTERNAL_URLS default if it wasn't defined earlier.
 
-from __future__ import annotations
-import asyncio, json, os, time
+# -- Safe guard for OpenTargets URL expected by some genetics handlers --------
+try:
+    EXTERNAL_URLS  # type: ignore[name-defined]
+except Exception:  # NameError
+    EXTERNAL_URLS = {
+        "opentargets_graphql": "https://api.platform.opentargets.org/api/v4/graphql"
+    }
+
+import asyncio
+import json
+import os
 from typing import Any, Dict, Optional, Tuple, List
+import httpx
 from fastapi import Query
 from fastapi.responses import JSONResponse
-import httpx
 
 # ---- minimal runtime with allowlist + per-host concurrency + backoff + Retry-After ---
 
@@ -5299,7 +5307,7 @@ def _tvfix_upstream_error(module: str, provenance: Dict[str, Any], code: int, er
 def _tvfix_auth_required(module: str, provenance: Dict[str, Any], note: str) -> JSONResponse:
     return JSONResponse({"status": "UPSTREAM_AUTH_REQUIRED", "module": module, "provenance": provenance, "note": note})
 
-# ---- basic resolvers ------------------------------------------------------------------
+# ---- resolvers -----------------------------------------------------------------------
 
 async def _tvfix_symbol_to_ensg(symbol: str) -> Optional[str]:
     url = f"https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{symbol}"
@@ -5606,7 +5614,7 @@ _tvfix_replace("/genetics/caqtl-lite", _tvfix_genetics_caqtl_lite)
 _tvfix_replace("/genetics/regulatory", _tvfix_genetics_regulatory)
 _tvfix_replace("/mech/pathways", _tvfix_mech_pathways)
 
-# dashed legacy aliases (so your probes never 404)
+# dashed legacy aliases (so legacy probes never 404)
 app.add_api_route("/genetics-coloc", _tvfix_genetics_coloc, methods=["GET"])
 app.add_api_route("/genetics-consortia-summary", _tvfix_genetics_consortia_summary, methods=["GET"])
 app.add_api_route("/genetics-l2g", _tvfix_genetics_l2g, methods=["GET"])
