@@ -5162,83 +5162,57 @@ except Exception:
 
 
 
-# ============================================================================
-# PATCH BLOCK (no __future__ imports here) — Live, keyless fixes for endpoints
-# ============================================================================
-# This block overrides ONLY the failing endpoints by replacing their routes with
-# direct calls to public APIs. Everything else above remains unchanged.
-# It also defines a safe EXTERNAL_URLS default if it wasn't defined earlier.
-
-# -- Safe guard for OpenTargets URL expected by some genetics handlers --------
+# =============================================================================
+# PATCH BLOCK (router-level, no __future__ imports) — Live, keyless fixes
+# =============================================================================
+# This block overrides ONLY the failing endpoints by replacing them on the
+# module-level APIRouter `router`. It does not touch working modules.
+# It also defines a safe EXTERNAL_URLS default if missing.
 try:
     EXTERNAL_URLS  # type: ignore[name-defined]
-except Exception:  # NameError
+except Exception:
     EXTERNAL_URLS = {
         "opentargets_graphql": "https://api.platform.opentargets.org/api/v4/graphql"
     }
 
-import asyncio
-import json
-import os
+import asyncio, json, os
 from typing import Any, Dict, Optional, Tuple, List
 import httpx
 from fastapi import Query
 from fastapi.responses import JSONResponse
 
-# ---- minimal runtime with allowlist + per-host concurrency + backoff + Retry-After ---
-
+# ---- minimal runtime with allowlist + per-host concurrency + backoff + Retry-After
 _TVFIX_DEFAULT_TIMEOUT = httpx.Timeout(12.0, connect=6.0)
 _TVFIX_MAX_TRIES = 4
-_TVFIX_BACKOFF_BASE = 0.6  # seconds
+_TVFIX_BACKOFF_BASE = 0.6
 _TVFIX_PER_HOST = int(os.getenv("PER_HOST_LIMIT", "4"))
-
 _TVFIX_ALLOW = {
-    "api.platform.opentargets.org",
-    "rest.ensembl.org",
-    "eutils.ncbi.nlm.nih.gov",
-    "reactome.org",
-    "analysis.reactome.org",
-    "www.encodeproject.org",
-    "data.4dnucleome.org",
-    "www.ebi.ac.uk",                # MetaboLights
-    "www.metabolomicsworkbench.org",
-    "api.opengwas.io",              # status only (MR endpoints now auth-gated)
-    "gwas-api.mrcieu.ac.uk",        # legacy
+    "api.platform.opentargets.org", "rest.ensembl.org", "eutils.ncbi.nlm.nih.gov",
+    "reactome.org", "analysis.reactome.org", "www.encodeproject.org",
+    "data.4dnucleome.org", "www.ebi.ac.uk", "www.metabolomicsworkbench.org",
+    "api.opengwas.io", "gwas-api.mrcieu.ac.uk",
 }
-
 _TVFIX_SEMAPHORES: Dict[str, asyncio.Semaphore] = {}
 
 def _tvfix_netloc(url: str) -> str:
     from urllib.parse import urlparse
     return urlparse(url).netloc
 
-async def _tvfix_fetch_json(
-    url: str,
-    *,
-    method: str = "GET",
-    params: Optional[Dict[str, Any]] = None,
-    headers: Optional[Dict[str, str]] = None,
-    json_body: Optional[Dict[str, Any]] = None,
-    data: Optional[str] = None,
-    allow_status: Tuple[int, ...] = (200, 204),
-) -> Tuple[str, int, Optional[Dict[str, Any]]]:
-    """
-    Returns (status_label, http_status, json_or_None).
-    status_label ∈ {"OK","NO_DATA","UPSTREAM_ERROR","UPSTREAM_AUTH_REQUIRED"}.
-    """
+async def _tvfix_fetch_json(url: str, *, method: str = "GET",
+                            params: Optional[Dict[str, Any]] = None,
+                            headers: Optional[Dict[str, str]] = None,
+                            json_body: Optional[Dict[str, Any]] = None,
+                            data: Optional[str] = None,
+                            allow_status: Tuple[int, ...] = (200, 204)) -> Tuple[str, int, Optional[Dict[str, Any]]]:
     nl = _tvfix_netloc(url)
     if nl not in _TVFIX_ALLOW:
         return "UPSTREAM_ERROR", 403, {"error": f"Host not allowlisted: {nl}"}
-
     sem = _TVFIX_SEMAPHORES.setdefault(nl, asyncio.Semaphore(_TVFIX_PER_HOST))
-
     headers = headers or {}
     if "accept" not in {k.lower() for k in headers}:
         headers["Accept"] = "application/json"
-
     tries = 0
     last_exc = None
-
     async with sem:
         async with httpx.AsyncClient(timeout=_TVFIX_DEFAULT_TIMEOUT) as client:
             while tries < _TVFIX_MAX_TRIES:
@@ -5255,8 +5229,6 @@ async def _tvfix_fetch_json(
                             resp = await client.post(url, headers=headers)
                     else:
                         resp = await client.request(method.upper(), url, params=params, json=json_body, headers=headers, content=data)
-
-                    # Honor Retry-After for 429/503
                     if resp.status_code in (429, 503):
                         ra = resp.headers.get("Retry-After")
                         sleep_s = _TVFIX_BACKOFF_BASE * (2 ** (tries - 1))
@@ -5267,367 +5239,279 @@ async def _tvfix_fetch_json(
                             except Exception:
                                 pass
                         if tries < _TVFIX_MAX_TRIES:
-                            await asyncio.sleep(sleep_s)
-                            continue
-
+                            await asyncio.sleep(sleep_s); continue
                     if resp.status_code in allow_status:
                         if resp.status_code == 204:
                             return "NO_DATA", resp.status_code, None
                         try:
                             return "OK", resp.status_code, resp.json()
                         except Exception:
-                            return "NO_DATA", resp.status_code, {"note": "Non-JSON response", "text": resp.text[:1000]}
-
+                            return "NO_DATA", resp.status_code, {"note":"Non-JSON", "text": resp.text[:1000]}
                     if resp.status_code == 401 and ("opengwas" in nl or "gwas-api" in nl):
-                        return "UPSTREAM_AUTH_REQUIRED", resp.status_code, {"error": "OpenGWAS requires JWT for MR endpoints"}
-
+                        return "UPSTREAM_AUTH_REQUIRED", resp.status_code, {"error":"OpenGWAS requires JWT"}
                     if 400 <= resp.status_code < 600 and tries < _TVFIX_MAX_TRIES:
-                        await asyncio.sleep(_TVFIX_BACKOFF_BASE * (2 ** (tries - 1)))
-                        continue
-
+                        await asyncio.sleep(_TVFIX_BACKOFF_BASE * (2 ** (tries - 1))); continue
                     return "UPSTREAM_ERROR", resp.status_code, {"error": resp.text[:1000]}
                 except (httpx.TimeoutException, httpx.HTTPError) as e:
                     last_exc = str(e)
                     if tries < _TVFIX_MAX_TRIES:
-                        await asyncio.sleep(_TVFIX_BACKOFF_BASE * (2 ** (tries - 1)))
-                        continue
+                        await asyncio.sleep(_TVFIX_BACKOFF_BASE * (2 ** (tries - 1))); continue
                     return "UPSTREAM_ERROR", 599, {"error": last_exc}
 
 def _tvfix_ok(payload: Dict[str, Any], module: str) -> JSONResponse:
-    payload.setdefault("status", "OK")
-    payload.setdefault("module", module)
-    return JSONResponse(payload)
-
+    payload.setdefault("status", "OK"); payload.setdefault("module", module); return JSONResponse(payload)
 def _tvfix_no_data(module: str, provenance: Dict[str, Any], note: str = "") -> JSONResponse:
-    return JSONResponse({"status": "NO_DATA", "module": module, "provenance": provenance, "note": note})
-
+    return JSONResponse({"status":"NO_DATA","module":module,"provenance":provenance,"note":note})
 def _tvfix_upstream_error(module: str, provenance: Dict[str, Any], code: int, err: str) -> JSONResponse:
-    return JSONResponse({"status": "UPSTREAM_ERROR", "module": module, "provenance": provenance, "http_status": code, "error": err})
-
+    return JSONResponse({"status":"UPSTREAM_ERROR","module":module,"provenance":provenance,"http_status":code,"error":err})
 def _tvfix_auth_required(module: str, provenance: Dict[str, Any], note: str) -> JSONResponse:
-    return JSONResponse({"status": "UPSTREAM_AUTH_REQUIRED", "module": module, "provenance": provenance, "note": note})
-
-# ---- resolvers -----------------------------------------------------------------------
+    return JSONResponse({"status":"UPSTREAM_AUTH_REQUIRED","module":module,"provenance":provenance,"note":note})
 
 async def _tvfix_symbol_to_ensg(symbol: str) -> Optional[str]:
     url = f"https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{symbol}"
-    status, code, js = await _tvfix_fetch_json(url, params={"content-type": "application/json"})
-    if status != "OK" or not isinstance(js, list):
-        return None
-    for row in js:
-        if row.get("type") == "gene" and str(row.get("id","")).startswith("ENSG"):
-            return row["id"]
+    s, c, j = await _tvfix_fetch_json(url, params={"content-type": "application/json"})
+    if s != "OK" or not isinstance(j, list): return None
+    for row in j:
+        if row.get("type") == "gene" and str(row.get("id","")).startswith("ENSG"): return row["id"]
     return None
 
-async def _tvfix_efo_lookup(condition: str) -> Optional[str]:
+async def _tvfix_efo_lookup(term: str) -> Optional[str]:
     url = "https://www.ebi.ac.uk/ols4/api/search"
-    status, code, js = await _tvfix_fetch_json(url, params={"q": condition, "ontology": "efo", "rows": 1, "queryFields": "label,synonym"})
+    s, c, j = await _tvfix_fetch_json(url, params={"q": term, "ontology":"efo", "rows":1, "queryFields":"label,synonym"})
     try:
-        docs = js.get("response", {}).get("docs", []) if js else []
-        if docs:
-            return docs[0].get("iri") or docs[0].get("obo_id") or docs[0].get("short_form")
-    except Exception:
-        pass
+        docs = j.get("response", {}).get("docs", []) if j else []
+        if docs: return docs[0].get("iri") or docs[0].get("obo_id") or docs[0].get("short_form")
+    except Exception: pass
     return None
-
-# ---- OpenTargets GraphQL --------------------------------------------------------------
 
 _TVFIX_OT_GQL = "https://api.platform.opentargets.org/api/v4/graphql"
-
-async def _tvfix_ot_graphql(query: str, variables: Dict[str, Any]) -> Tuple[str, int, Optional[Dict[str, Any]]]:
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+async def _tvfix_ot_graphql(query: str, variables: Dict[str, Any]):
+    headers = {"Content-Type":"application/json","Accept":"application/json"}
     return await _tvfix_fetch_json(_TVFIX_OT_GQL, method="POST", headers=headers, json_body={"query": query, "variables": variables})
 
-# ---- route replacement helpers --------------------------------------------------------
-
-def _tvfix_remove_route(path: str):
+# -- helper to replace routes on APIRouter
+def _tvfix_router_remove(path: str):
     new_routes = []
-    for r in app.router.routes:
+    for r in list(router.routes):
         try:
-            if getattr(r, "path", None) == path:
+            if getattr(r, "path", None) == path: 
                 continue
         except Exception:
             pass
         new_routes.append(r)
-    app.router.routes = new_routes
+    router.routes = new_routes
 
-def _tvfix_replace(path: str, handler):
-    _tvfix_remove_route(path)
-    app.add_api_route(path, handler, methods=["GET"])
+def _tvfix_router_replace(path: str, handler):
+    _tvfix_router_remove(path)
+    router.add_api_route(path, handler, methods=["GET"])
 
-# ---- endpoints -----------------------------------------------------------------------
-
-# genetics/coloc
-async def _tvfix_genetics_coloc(symbol: str = Query(...), condition: Optional[str] = Query(None)):
+# ---- endpoint implementations (same as prior patch, registered on router) ----
+async def _tvfix_ep_genetics_coloc(symbol: str = Query(...), condition: Optional[str] = Query(None)):
     module = "genetics-coloc"
     ensg = await _tvfix_symbol_to_ensg(symbol)
-    if not ensg:
-        return _tvfix_no_data(module, {"resolver": "ensembl xrefs"}, f"Cannot resolve symbol={symbol} to Ensembl ID")
-
-    efo = None
-    if condition:
-        efo = await _tvfix_efo_lookup(condition)
-
-    query = """
-    query geneCredibleSets($ensg: String!, $page: Pagination){
-      target(ensemblId: $ensg){
-        credibleSets(page: $page){
-          rows{
-            studyLocusId
-            colocalisation(page:{index:0,size:50}){
-              rows{
-                h4
-                clpp
-                rightStudyType
-                otherStudyLocus{
-                  studyId
-                  study{ traitFromSource traitFromSourceMappedIds }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+    if not ensg: return _tvfix_no_data(module, {"resolver":"ensembl xrefs"}, f"Cannot resolve symbol={symbol}")
+    efo = await _tvfix_efo_lookup(condition) if condition else None
+    q = """
+    query Q($ensg:String!,$page:Pagination){ target(ensemblId:$ensg){ credibleSets(page:$page){ rows{
+      studyLocusId colocalisation(page:{index:0,size:50}){ rows{
+        h4 clpp rightStudyType otherStudyLocus{ studyId study{ traitFromSource traitFromSourceMappedIds } }
+      } } } } } }
     """
-    status, code, js = await _tvfix_ot_graphql(query, {"ensg": ensg, "page": {"index": 0, "size": 40}})
-    if status != "OK":
-        return _tvfix_upstream_error(module, {"host": "api.platform.opentargets.org"}, code, json.dumps(js)[:500])
-
-    rows = (((js or {}).get("data") or {}).get("target") or {}).get("credibleSets", {}).get("rows", []) or []
-    out = []
+    s,c,j = await _tvfix_ot_graphql(q, {"ensg": ensg, "page":{"index":0,"size":40}})
+    if s != "OK": return _tvfix_upstream_error(module, {"host":"api.platform.opentargets.org"}, c, json.dumps(j)[:500])
+    rows = (((j or {}).get("data") or {}).get("target") or {}).get("credibleSets", {}).get("rows", []) or []
+    out=[]
     for r in rows:
-        coloc_rows = ((r.get("colocalisation") or {}).get("rows") or [])
-        for c in coloc_rows:
-            other = c.get("otherStudyLocus", {})
-            study = (other or {}).get("study", {}) or {}
+        for c2 in (r.get("colocalisation") or {}).get("rows", []) or []:
+            other = c2.get("otherStudyLocus", {}) or {}
+            study = other.get("study", {}) or {}
             efo_ids = study.get("traitFromSourceMappedIds") or []
-            if efo and not any(efo_id == efo or (efo and efo in (efo_id or "")) for efo_id in efo_ids):
-                continue
+            if efo and not any(x==efo or (efo and efo in (x or "")) for x in efo_ids): continue
             out.append({
-                "study_locus_id": r.get("studyLocusId"),
-                "h4": c.get("h4"),
-                "clpp": c.get("clpp"),
-                "right_study_type": c.get("rightStudyType"),
-                "other_study_id": other.get("studyId"),
-                "other_trait": study.get("traitFromSource"),
-                "other_trait_efo": efo_ids,
+                "study_locus_id": r.get("studyLocusId"), "h4": c2.get("h4"), "clpp": c2.get("clpp"),
+                "right_study_type": c2.get("rightStudyType"), "other_study_id": other.get("studyId"),
+                "other_trait": study.get("traitFromSource"), "other_trait_efo": efo_ids,
             })
+    if not out: return _tvfix_no_data(module, {"host":"api.platform.opentargets.org","target":ensg, "efo": efo}, "No colocalisations")
+    return _tvfix_ok({"records": out, "provenance":{"host":"api.platform.opentargets.org"}}, module)
 
-    if not out:
-        return _tvfix_no_data(module, {"host": "api.platform.opentargets.org", "target": ensg, "efo": efo or None}, "No colocalisations found")
-    return _tvfix_ok({"records": out, "provenance": {"host": "api.platform.opentargets.org"}}, module)
-
-# genetics/l2g
-async def _tvfix_genetics_l2g(symbol: str = Query(...)):
+async def _tvfix_ep_genetics_l2g(symbol: str = Query(...)):
     module = "genetics-l2g"
     ensg = await _tvfix_symbol_to_ensg(symbol)
-    if not ensg:
-        return _tvfix_no_data(module, {"resolver": "ensembl xrefs"}, f"Cannot resolve symbol={symbol} to Ensembl ID")
-    query = """
-    query geneL2G($ensg: String!){
-      target(ensemblId: $ensg){
-        credibleSets(page:{index:0,size:50}){
-          rows{
-            studyLocusId
-            l2GPredictions(page:{index:0,size:25}){
-              rows{ id score }
-            }
-          }
-        }
-      }
-    }
+    if not ensg: return _tvfix_no_data(module, {"resolver":"ensembl xrefs"}, f"Cannot resolve symbol={symbol}")
+    q = """
+    query Q($ensg:String!){ target(ensemblId:$ensg){ credibleSets(page:{index:0,size:50}){ rows{
+      studyLocusId l2GPredictions(page:{index:0,size:25}){ rows{ id score } }
+    } } } }
     """
-    status, code, js = await _tvfix_ot_graphql(query, {"ensg": ensg})
-    if status != "OK":
-        return _tvfix_upstream_error(module, {"host":"api.platform.opentargets.org"}, code, json.dumps(js)[:500])
-    rows = (((js or {}).get("data") or {}).get("target") or {}).get("credibleSets", {}).get("rows", []) or []
-    scores: List[Dict[str, Any]] = []
+    s,c,j = await _tvfix_ot_graphql(q, {"ensg": ensg})
+    if s != "OK": return _tvfix_upstream_error(module, {"host":"api.platform.opentargets.org"}, c, json.dumps(j)[:500])
+    rows = (((j or {}).get("data") or {}).get("target") or {}).get("credibleSets", {}).get("rows", []) or []
+    scores=[]
     for r in rows:
         for p in (r.get("l2GPredictions") or {}).get("rows", []) or []:
-            if p.get("id") == ensg:
-                scores.append({"study_locus_id": r.get("studyLocusId"), "l2g": p.get("score")})
-    if not scores:
-        return _tvfix_no_data(module, {"host":"api.platform.opentargets.org","target":ensg}, "No L2G predictions")
-    return _tvfix_ok({"target": ensg, "predictions": scores, "provenance": {"host":"api.platform.opentargets.org"}}, module)
+            if p.get("id") == ensg: scores.append({"study_locus_id": r.get("studyLocusId"), "l2g": p.get("score")})
+    if not scores: return _tvfix_no_data(module, {"host":"api.platform.opentargets.org","target":ensg}, "No L2G predictions")
+    return _tvfix_ok({"target": ensg, "predictions": scores, "provenance":{"host":"api.platform.opentargets.org"}}, module)
 
-# genetics/consortia-summary
-async def _tvfix_genetics_consortia_summary(condition: str = Query(...)):
+async def _tvfix_ep_genetics_consortia_summary(condition: str = Query(...)):
     module = "genetics-consortia-summary"
     efo = await _tvfix_efo_lookup(condition)
-    if not efo:
-        return _tvfix_no_data(module, {"resolver":"EFO OLS4"}, f"Cannot map condition={condition} to EFO")
-    query = """
-    query diseaseStudies($efo: String!){
-      studies(diseaseIds: [$efo], enableIndirect: true, page:{index:0,size:50}){
-        rows{
-          projectId
-          studyType
-          cohorts
-        }
-      }
-    }
+    if not efo: return _tvfix_no_data(module, {"resolver":"EFO OLS4"}, f"Cannot map condition={condition}")
+    q = """
+    query Q($efo:String!){ studies(diseaseIds:[$efo], enableIndirect:true, page:{index:0,size:50}){ rows{
+      projectId studyType cohorts
+    } } }
     """
-    status, code, js = await _tvfix_ot_graphql(query, {"efo": efo})
-    if status != "OK":
-        return _tvfix_upstream_error(module, {"host":"api.platform.opentargets.org"}, code, json.dumps(js)[:500])
-    rows = (((js or {}).get("data") or {}).get("studies") or {}).get("rows", []) or []
-    if not rows:
-        return _tvfix_no_data(module, {"host":"api.platform.opentargets.org","efo":efo}, "No studies found")
-    by_proj: Dict[str, Dict[str, Any]] = {}
-    for s in rows:
-        proj = s.get("projectId") or "unknown"
-        d = by_proj.setdefault(proj, {"projectId": proj, "n":0, "types":set(), "cohorts":set()})
-        d["n"] += 1
-        if s.get("studyType"): d["types"].add(s["studyType"])
-        for c in s.get("cohorts") or []: d["cohorts"].add(c)
-    out = [{"projectId":k, "n_studies":v["n"], "studyTypes":sorted(list(v["types"])), "cohorts":sorted(list(v["cohorts"]))[:20]} for k,v in by_proj.items()]
+    s,c,j = await _tvfix_ot_graphql(q, {"efo": efo})
+    if s != "OK": return _tvfix_upstream_error(module, {"host":"api.platform.opentargets.org"}, c, json.dumps(j)[:500])
+    rows = (((j or {}).get("data") or {}).get("studies") or {}).get("rows", []) or []
+    if not rows: return _tvfix_no_data(module, {"host":"api.platform.opentargets.org","efo":efo}, "No studies found")
+    by={}
+    for srow in rows:
+        proj = srow.get("projectId") or "unknown"
+        entry = by.setdefault(proj, {"projectId": proj, "n":0, "types":set(), "cohorts":set()})
+        entry["n"] += 1
+        if srow.get("studyType"): entry["types"].add(srow["studyType"])
+        for ccc in srow.get("cohorts") or []: entry["cohorts"].add(ccc)
+    out=[{"projectId":k,"n_studies":v["n"],"studyTypes":sorted(list(v["types"])),"cohorts":sorted(list(v["cohorts"]))[:20]} for k,v in by.items()]
     out.sort(key=lambda x: x["n_studies"], reverse=True)
-    return _tvfix_ok({"efo": efo, "summary": out, "provenance":{"host":"api.platform.opentargets.org"}}, module)
+    return _tvfix_ok({"efo":efo, "summary":out, "provenance":{"host":"api.platform.opentargets.org"}}, module)
 
-# genetics/mr (keyless honesty)
-async def _tvfix_genetics_mr(exposure: Optional[str] = Query(None), outcome: Optional[str] = Query(None)):
-    module = "genetics-mr"
-    status, code, js = await _tvfix_fetch_json("https://api.opengwas.io/api/status")
-    if status != "OK":
-        return _tvfix_upstream_error(module, {"host": "api.opengwas.io"}, code, json.dumps(js)[:500])
-    return _tvfix_auth_required(module, {"host":"api.opengwas.io"}, "OpenGWAS MR endpoints require JWT; keyless router will not call them. Provide MR results or an access token if policy changes.")
+async def _tvfix_ep_genetics_mr(exposure: Optional[str] = Query(None), outcome: Optional[str] = Query(None)):
+    module="genetics-mr"
+    s,c,j = await _tvfix_fetch_json("https://api.opengwas.io/api/status")
+    if s != "OK": return _tvfix_upstream_error(module, {"host":"api.opengwas.io"}, c, json.dumps(j)[:500])
+    return _tvfix_auth_required(module, {"host":"api.opengwas.io"}, "OpenGWAS MR endpoints require JWT; router is keyless per spec.")
 
-# genetics/rare
-async def _tvfix_genetics_rare(symbol: str = Query(...)):
-    module = "genetics-rare"
-    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-    term = f"({symbol}[gene]) AND Homo sapiens[organism]"
-    s1, c1, j1 = await _tvfix_fetch_json(f"{base}/esearch.fcgi", params={"db":"clinvar","retmode":"json","term":term,"retmax":20})
-    if s1 != "OK": return _tvfix_upstream_error(module, {"host":"eutils.ncbi.nlm.nih.gov"}, c1, json.dumps(j1)[:500])
-    ids = (j1 or {}).get("esearchresult", {}).get("idlist", []) or []
+async def _tvfix_ep_genetics_rare(symbol: str = Query(...)):
+    module="genetics-rare"
+    base="https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    term=f"({symbol}[gene]) AND Homo sapiens[organism]"
+    s1,c1,j1 = await _tvfix_fetch_json(f"{base}/esearch.fcgi", params={"db":"clinvar","retmode":"json","term":term,"retmax":20})
+    if s1!="OK": return _tvfix_upstream_error(module, {"host":"eutils.ncbi.nlm.nih.gov"}, c1, json.dumps(j1)[:500])
+    ids=(j1 or {}).get("esearchresult", {}).get("idlist", []) or []
     if not ids: return _tvfix_no_data(module, {"host":"eutils.ncbi.nlm.nih.gov"}, "No ClinVar records for gene")
-    s2, c2, j2 = await _tvfix_fetch_json(f"{base}/esummary.fcgi", params={"db":"clinvar","retmode":"json","id":",".join(ids)})
-    if s2 != "OK": return _tvfix_upstream_error(module, {"host":"eutils.ncbi.nlm.nih.gov"}, c2, json.dumps(j2)[:500])
-    docs = (j2 or {}).get("result", {})
-    out = []
+    s2,c2,j2 = await _tvfix_fetch_json(f"{base}/esummary.fcgi", params={"db":"clinvar","retmode":"json","id":",".join(ids)})
+    if s2!="OK": return _tvfix_upstream_error(module, {"host":"eutils.ncbi.nlm.nih.gov"}, c2, json.dumps(j2)[:500])
+    docs=(j2 or {}).get("result", {}); out=[]
     for uid in (docs.get("uids", []) or [])[:20]:
-        rec = docs.get(uid, {})
-        out.append({"uid": uid, "title": rec.get("title"), "clinical_significance": (rec.get("clinical_significance", {}) or {}).get("description"), "rcv_accession": rec.get("accessionversion")})
+        rec=docs.get(uid, {}); out.append({"uid":uid,"title":rec.get("title"),"clinical_significance":(rec.get("clinical_significance", {}) or {}).get("description"),"rcv_accession":rec.get("accessionversion")})
     return _tvfix_ok({"records": out, "provenance":{"host":"eutils.ncbi.nlm.nih.gov"}}, module)
 
-# assoc/metabolomics
-async def _tvfix_assoc_metabolomics(symbol: str = Query(...)):
-    module = "assoc-metabolomics"
+async def _tvfix_ep_assoc_metabolomics(symbol: str = Query(...)):
+    module="assoc-metabolomics"
     s1,c1,j1 = await _tvfix_fetch_json("https://www.ebi.ac.uk/metabolights/ws/studies", params={"searchQuery": symbol})
     s2,c2,j2 = await _tvfix_fetch_json("https://www.metabolomicsworkbench.org/rest/study/study_id/organism", params={"study_id":"all"})
-    hits = []
-    if s1 == "OK" and isinstance(j1, dict):
-        content = j1.get("content") or j1.get("studies") or []
+    hits=[]
+    if s1=="OK" and isinstance(j1, dict):
+        content=j1.get("content") or j1.get("studies") or []
         for s in content:
             if symbol.upper() in json.dumps(s).upper():
                 hits.append({"source":"MetaboLights","study": s.get("acc") or s.get("accno") or s.get("studyIdentifier")})
-    if s2 == "OK" and isinstance(j2, list):
+    if s2=="OK" and isinstance(j2, list):
         for s in j2:
             if symbol.upper() in json.dumps(s).upper():
                 hits.append({"source":"MetabolomicsWorkbench","study": s.get("study_id")})
-    if not hits:
-        return _tvfix_no_data(module, {"hosts":["ebi.ac.uk","metabolomicsworkbench.org"]}, "No gene mentions in metabolomics study metadata")
+    if not hits: return _tvfix_no_data(module, {"hosts":["ebi.ac.uk","metabolomicsworkbench.org"]}, "No gene mentions in metabolomics metadata")
     return _tvfix_ok({"records": hits, "provenance":{"hosts":["ebi.ac.uk","metabolomicsworkbench.org"]}}, module)
 
-# genetics/3d-maps
-async def _tvfix_genetics_3d_maps(symbol: str = Query(...)):
-    module = "genetics-3d-maps"
+async def _tvfix_ep_genetics_3d_maps(symbol: str = Query(...)):
+    module="genetics-3d-maps"
     s,c,j = await _tvfix_fetch_json("https://data.4dnucleome.org/search/", params={"type":"ExperimentHiC","limit":25,"searchTerm":symbol})
-    if s != "OK": return _tvfix_upstream_error(module, {"host":"data.4dnucleome.org"}, c, json.dumps(j)[:500])
-    items = j.get("@graph", []) if isinstance(j, dict) else []
-    out = []
+    if s!="OK": return _tvfix_upstream_error(module, {"host":"data.4dnucleome.org"}, c, json.dumps(j)[:500])
+    items=j.get("@graph", []) if isinstance(j, dict) else []
+    out=[]
     for it in items:
         if symbol.upper() in json.dumps(it).upper():
             out.append({"uuid": it.get("uuid"), "accession": it.get("accession"), "lab": (it.get("lab", {}) or {}).get("title")})
     if not out: return _tvfix_no_data(module, {"host":"data.4dnucleome.org"}, "No matching 3D mapping experiments")
     return _tvfix_ok({"records": out, "provenance":{"host":"data.4dnucleome.org"}}, module)
 
-# genetics/annotation
-async def _tvfix_genetics_annotation(symbol: str = Query(...)):
-    module = "genetics-annotation"
+async def _tvfix_ep_genetics_annotation(symbol: str = Query(...)):
+    module="genetics-annotation"
     s,c,j = await _tvfix_fetch_json(f"https://rest.ensembl.org/lookup/symbol/homo_sapiens/{symbol}", params={"expand":"1"})
-    if s != "OK": return _tvfix_upstream_error(module, {"host":"rest.ensembl.org"}, c, json.dumps(j)[:500])
+    if s!="OK": return _tvfix_upstream_error(module, {"host":"rest.ensembl.org"}, c, json.dumps(j)[:500])
     if not j: return _tvfix_no_data(module, {"host":"rest.ensembl.org"}, "No annotation for gene")
-    keep = {k: j.get(k) for k in ["id","display_name","biotype","seq_region_name","start","end","strand","version"]}
+    keep={k: j.get(k) for k in ["id","display_name","biotype","seq_region_name","start","end","strand","version"]}
     return _tvfix_ok({"record": keep, "provenance":{"host":"rest.ensembl.org"}}, module)
 
-# genetics/caqtl-lite (composite loopback)
-async def _tvfix_genetics_caqtl_lite(symbol: str = Query(...)):
-    module = "genetics-caqtl-lite"
+async def _tvfix_ep_genetics_caqtl_lite(symbol: str = Query(...), tissue: Optional[str] = Query(None)):
+    module="genetics-caqtl-lite"
+    # Composite loopback into our own endpoints (if present)
     try:
         async with httpx.AsyncClient(timeout=_TVFIX_DEFAULT_TIMEOUT) as client:
             r1 = await client.get("http://127.0.0.1:8000/genetics/regulatory", params={"symbol": symbol})
             r2 = await client.get("http://127.0.0.1:8000/genetics/chromatin-contacts", params={"symbol": symbol})
-            data = []
-            if r1.status_code == 200:
-                d1 = r1.json()
-                if isinstance(d1, dict) and d1.get("status") == "OK":
-                    data.extend(d1.get("records", []))
-            if r2.status_code == 200:
-                d2 = r2.json()
-                if isinstance(d2, dict) and d2.get("status") == "OK":
-                    data.extend(d2.get("records", []))
-            if not data:
-                return _tvfix_no_data(module, {"loopback":True}, "No regulatory/chromatin contacts available")
+            data=[]
+            if r1.status_code==200:
+                d1=r1.json(); 
+                if isinstance(d1, dict) and d1.get("status")=="OK": data.extend(d1.get("records", []))
+            if r2.status_code==200:
+                d2=r2.json();
+                if isinstance(d2, dict) and d2.get("status")=="OK": data.extend(d2.get("records", []))
+            if not data: return _tvfix_no_data(module, {"loopback": True}, "No regulatory/chromatin contacts available")
             return _tvfix_ok({"records": data[:50], "provenance":{"composed":["genetics/regulatory","genetics/chromatin-contacts"]}}, module)
     except Exception as e:
-        return _tvfix_no_data(module, {"loopback":True}, f"Composite call failed: {e}")
+        return _tvfix_no_data(module, {"loopback": True}, f"Composite failed: {e}")
 
-# genetics/regulatory (ENCODE best-effort)
-async def _tvfix_genetics_regulatory(symbol: str = Query(...)):
-    module = "genetics-regulatory"
+async def _tvfix_ep_genetics_regulatory(symbol: str = Query(...)):
+    module="genetics-regulatory"
     s,c,j = await _tvfix_fetch_json("https://www.encodeproject.org/search/", params={"type":"Experiment","assay_title":"ChIP-seq","searchTerm":symbol})
-    if s != "OK": return _tvfix_upstream_error(module, {"host":"www.encodeproject.org"}, c, json.dumps(j)[:500])
-    items = j.get("@graph", []) if isinstance(j, dict) else []
-    out = []
+    if s!="OK": return _tvfix_upstream_error(module, {"host":"www.encodeproject.org"}, c, json.dumps(j)[:500])
+    items=j.get("@graph", []) if isinstance(j, dict) else []
+    out=[]
     for it in items:
-        tgt = (it.get("target") or {}).get("label") if isinstance(it.get("target"), dict) else None
+        tgt=(it.get("target") or {}).get("label") if isinstance(it.get("target"), dict) else None
         if (tgt and symbol.upper() in str(tgt).upper()) or (symbol.upper() in json.dumps(it).upper()):
             out.append({"accession": it.get("accession"), "target": tgt, "biosample": (it.get("biosample_ontology") or {}).get("term_name")})
     if not out: return _tvfix_no_data(module, {"host":"www.encodeproject.org"}, "No regulatory ChIP-seq experiments matched")
     return _tvfix_ok({"records": out[:50], "provenance":{"host":"www.encodeproject.org"}}, module)
 
-# mech/pathways (Reactome AnalysisService)
-async def _tvfix_mech_pathways(symbol: str = Query(...)):
-    module = "mech-pathways"
-    headers = {"Content-Type": "text/plain", "Accept": "application/json"}
+async def _tvfix_ep_mech_pathways(symbol: str = Query(...), condition: Optional[str] = Query(None)):
+    module="mech-pathways"
+    headers={"Content-Type":"text/plain", "Accept":"application/json"}
     s,c,j = await _tvfix_fetch_json("https://reactome.org/AnalysisService/identifiers/projection", method="POST", headers=headers, data=symbol)
-    if s != "OK": return _tvfix_upstream_error(module, {"host":"reactome.org"}, c, json.dumps(j)[:500])
-    pathways = j.get("pathways") if isinstance(j, dict) else None
+    if s!="OK": return _tvfix_upstream_error(module, {"host":"reactome.org"}, c, json.dumps(j)[:500])
+    pathways=j.get("pathways") if isinstance(j, dict) else None
     if not pathways: return _tvfix_no_data(module, {"host":"reactome.org"}, "No pathways for symbol")
-    out = [{"stId": p.get("stId"), "name": p.get("name"), "entities": (p.get("entities", {}) or {}).get("found", 0)} for p in pathways[:50]]
+    out=[{"stId": p.get("stId"), "name": p.get("name"), "entities": (p.get("entities", {}) or {}).get("found", 0)} for p in pathways[:50]]
     return _tvfix_ok({"records": out, "provenance":{"host":"reactome.org"}}, module)
 
-# ---- register replacements -----------------------------------------------------------
+# ---- register replacements on APIRouter ----
+_tvfix_router_replace("/genetics/coloc", _tvfix_ep_genetics_coloc)
+_tvfix_router_replace("/genetics/consortia-summary", _tvfix_ep_genetics_consortia_summary)
+_tvfix_router_replace("/genetics/l2g", _tvfix_ep_genetics_l2g)
+_tvfix_router_replace("/genetics/mr", _tvfix_ep_genetics_mr)
+_tvfix_router_replace("/genetics/rare", _tvfix_ep_genetics_rare)
+_tvfix_router_replace("/genetics/3d-maps", _tvfix_ep_genetics_3d_maps)
+_tvfix_router_replace("/genetics/annotation", _tvfix_ep_genetics_annotation)
+_tvfix_router_replace("/genetics/caqtl-lite", _tvfix_ep_genetics_caqtl_lite)
+_tvfix_router_replace("/genetics/regulatory", _tvfix_ep_genetics_regulatory)
+_tvfix_router_replace("/mech/pathways", _tvfix_ep_mech_pathways)
 
-_tvfix_replace("/genetics/coloc", _tvfix_genetics_coloc)
-_tvfix_replace("/genetics/consortia-summary", _tvfix_genetics_consortia_summary)
-_tvfix_replace("/genetics/l2g", _tvfix_genetics_l2g)
-_tvfix_replace("/genetics/mr", _tvfix_genetics_mr)
-_tvfix_replace("/genetics/nmd-inference", lambda symbol: _tvfix_no_data("genetics-nmd-inference", {"note":"Composite requires sQTL + Ensembl coding context"}, "Not implemented in keyless patch"))
-_tvfix_replace("/genetics/rare", _tvfix_genetics_rare)
-_tvfix_replace("/assoc/metabolomics", _tvfix_assoc_metabolomics)
-_tvfix_replace("/genetics/3d-maps", _tvfix_genetics_3d_maps)
-_tvfix_replace("/genetics/annotation", _tvfix_genetics_annotation)
-_tvfix_replace("/genetics/caqtl-lite", _tvfix_genetics_caqtl_lite)
-_tvfix_replace("/genetics/regulatory", _tvfix_genetics_regulatory)
-_tvfix_replace("/mech/pathways", _tvfix_mech_pathways)
+# dashed legacy aliases on router (top-level)
+router.add_api_route("/genetics-coloc", _tvfix_ep_genetics_coloc, methods=["GET"])
+router.add_api_route("/genetics-consortia-summary", _tvfix_ep_genetics_consortia_summary, methods=["GET"])
+router.add_api_route("/genetics-l2g", _tvfix_ep_genetics_l2g, methods=["GET"])
+router.add_api_route("/genetics-mr", _tvfix_ep_genetics_mr, methods=["GET"])
+router.add_api_route("/genetics-rare", _tvfix_ep_genetics_rare, methods=["GET"])
+router.add_api_route("/genetics-3d-maps", _tvfix_ep_genetics_3d_maps, methods=["GET"])
+router.add_api_route("/genetics-annotation", _tvfix_ep_genetics_annotation, methods=["GET"])
+router.add_api_route("/genetics-caqtl-lite", _tvfix_ep_genetics_caqtl_lite, methods=["GET"])
+router.add_api_route("/genetics-regulatory", _tvfix_ep_genetics_regulatory, methods=["GET"])
+router.add_api_route("/mech-pathways", _tvfix_ep_mech_pathways, methods=["GET"])
 
-# dashed legacy aliases (so legacy probes never 404)
-app.add_api_route("/genetics-coloc", _tvfix_genetics_coloc, methods=["GET"])
-app.add_api_route("/genetics-consortia-summary", _tvfix_genetics_consortia_summary, methods=["GET"])
-app.add_api_route("/genetics-l2g", _tvfix_genetics_l2g, methods=["GET"])
-app.add_api_route("/genetics-mr", _tvfix_genetics_mr, methods=["GET"])
-app.add_api_route("/genetics-nmd-inference", lambda symbol: _tvfix_no_data("genetics-nmd-inference", {"note":"Composite requires sQTL + Ensembl coding context"}, "Not implemented in keyless patch"), methods=["GET"])
-app.add_api_route("/genetics-rare", _tvfix_genetics_rare, methods=["GET"])
-app.add_api_route("/assoc-metabolomics", _tvfix_assoc_metabolomics, methods=["GET"])
-app.add_api_route("/genetics-3d-maps", _tvfix_genetics_3d_maps, methods=["GET"])
-app.add_api_route("/genetics-annotation", _tvfix_genetics_annotation, methods=["GET"])
-app.add_api_route("/genetics-caqtl-lite", _tvfix_genetics_caqtl_lite, methods=["GET"])
-app.add_api_route("/genetics-regulatory", _tvfix_genetics_regulatory, methods=["GET"])
-app.add_api_route("/mech-pathways", _tvfix_mech_pathways, methods=["GET"])
+# health alias (router-level)
+router.add_api_route("/healthz", lambda: {"ok": True, "version": "2025.10", "patch": True, "router_level": True}, methods=["GET"])
+# =============================================================================
 
-# health alias
-app.add_api_route("/healthz", lambda : {"ok": True, "version": "2025.10", "patch": True}, methods=["GET"])
-# ============================================================================
+
+
+async def _tvfix_ep_genetics_nmd_inference(symbol: str = Query(...)):
+    module = "genetics-nmd-inference"
+    return _tvfix_no_data(module, {"note":"Composite requires sQTL + coding context; excluded in keyless patch"}, "Not implemented in keyless patch")
+
+# Register nmd-inference
+_tvfix_router_replace("/genetics/nmd-inference", _tvfix_ep_genetics_nmd_inference)
+router.add_api_route("/genetics-nmd-inference", _tvfix_ep_genetics_nmd_inference, methods=["GET"])
