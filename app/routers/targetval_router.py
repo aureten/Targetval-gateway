@@ -65,6 +65,12 @@ async def _httpx_json_get(url: str, timeout: float = 45.0):
                 await asyncio.sleep(1.5 * (attempt + 1))
     return None
 
+
+# External endpoint mappings used across modules
+EXTERNAL_URLS = {
+    "opentargets_graphql": "https://api.platform.opentargets.org/api/v4/graphql",
+}
+
 async def _efo_lookup(condition: Optional[str]) -> Optional[str]:
     """Free-text disease -> EFO via OpenTargets GraphQL search."""
     if not condition:
@@ -4847,6 +4853,48 @@ try:
             router.add_api_route(hyphen_path, globals()[fn_name], methods=["GET"])
 except Exception as _e:
     print("Alias registration warning:", _e)
+
+# ---------- Backward-compatibility: other legacy aliases ----------
+try:
+    _other_aliases = [
+        ("/assoc-proteomics-tissue", "assoc_bulk_prot"),
+        ("/assoc-transcriptomics-singlecell", "assoc_sc"),
+        ("/mech-kinase-network", "mech_kinase_substrate"),
+        ("/mech-gene-complexes", "mech_complexes"),
+        ("/genetics-epigenomic-footprint", "genetics_regulatory"),
+        ("/genetics-enhancer-activity", "genetics_regulatory"),
+        ("/genetics-annotation", "genetics_annotation"),
+        ("/genetics-regulatory", "genetics_regulatory"),
+        ("/genetics-3d-maps", "genetics_3d_maps"),
+        ("/genetics-chromatin-contacts", "genetics_chromatin_contacts"),
+    ]
+    for path_old, fn_name in _other_aliases:
+        if fn_name in globals():
+            router.add_api_route(path_old, globals()[fn_name], methods=["GET"])
+except Exception as _e:
+    print("Alias registration warning (other):", _e)
+
+# ---------- Optional convenience alias for health ----------
+try:
+    if "health" in globals():
+        router.add_api_route("/healthz", globals()["health"], methods=["GET"])
+except Exception as _e:
+    print("Healthz alias registration warning:", _e)
+
+# ---------- Multiomics harmonization convenience (legacy name -> aggregate) ----------
+from typing import Optional as _Optional
+async def _assoc_multiomics_harmonization(symbol: _Optional[str] = Query(None), gene: _Optional[str] = Query(None),
+                                          condition: _Optional[str] = None, limit: int = Query(100, ge=1, le=200)) -> Evidence:
+    params = dict(symbol=symbol or gene, condition=condition, limit=limit)
+    paths = ["/assoc/bulk-rna", "/assoc/sc", "/assoc/bulk-prot", "/assoc/omics-phosphoproteomics", "/assoc/spatial"]
+    return await _alias_merge(None, paths, params, "Multiomics harmonization (RNA, single-cell, protein, phospho, spatial)")
+
+@router.get("/assoc/multiomics-harmonization", response_model=Evidence)
+async def assoc_multiomics_harmonization(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None),
+                                         condition: Optional[str] = None, limit: int = Query(100, ge=1, le=200)) -> Evidence:
+    return await _assoc_multiomics_harmonization(symbol=symbol, gene=gene, condition=condition, limit=limit)
+
+_add_if_missing("/assoc/multiomics-harmonization", _assoc_multiomics_harmonization, ["GET"], Evidence)
 # -------------------------------------------------------------------------------
 
 
@@ -4900,7 +4948,7 @@ async def _assoc_spatial(symbol: _Optional[str] = Query(None), gene: _Optional[s
     params = dict(symbol=symbol or gene, condition=condition, limit=limit)
     # Spatial association: merge gene-level spatial expression and neighbourhood data.  The spec
     # specifies Europe PMC spatial/ISH literature as the primary; update the label accordingly.
-    return await _alias_merge(request, ["/assoc/spatial-expression", "/assoc/spatial-neighborhoods"], params, "Spatial association (Europe PMC spatial/ISH)")
+    return await _alias_merge(None, ["/assoc/spatial-expression", "/assoc/spatial-neighborhoods"], params, "Spatial association (Europe PMC spatial/ISH)")
 @router.get("/assoc/spatial", response_model=Evidence)
 async def assoc_spatial(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     return await _assoc_spatial(symbol=symbol, gene=gene)
@@ -4914,7 +4962,7 @@ async def _assoc_proteomics(symbol: _Optional[str] = Query(None), gene: _Optiona
     paths = ["/assoc/bulk-prot", "/assoc/bulk-prot-pdc", "/assoc/omics-phosphoproteomics"]
     # Proteomics association: prioritise ProteomicsDB, then PDC (CPTAC) and PRIDE, and include
     # phosphoproteomics; adjust the source label accordingly.
-    return await _alias_merge(request, paths, params, "Proteomics (ProteomicsDB + PDC/PRIDE)")
+    return await _alias_merge(None, paths, params, "Proteomics (ProteomicsDB + PDC/PRIDE)")
 @router.get("/assoc/proteomics", response_model=Evidence)
 async def assoc_proteomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None, limit: int = Query(100, ge=1, le=200)) -> Evidence:
     return await _assoc_proteomics(symbol=symbol, gene=gene, condition=condition, limit=limit)
@@ -4929,7 +4977,7 @@ async def _assoc_metabolomics(symbol: _Optional[str] = Query(None), gene: _Optio
     # The spec designates MetaboLights as the primary and Metabolomics Workbench as the fallback.
     # Our omics-metabolites and UKB Nightingale modules correspond to these two sources; adjust
     # the source label accordingly.
-    return await _alias_merge(request, paths, params, "Metabolomics (MetaboLights + Metabolomics Workbench)")
+    return await _alias_merge(None, paths, params, "Metabolomics (MetaboLights + Metabolomics Workbench)")
 @router.get("/assoc/metabolomics", response_model=Evidence)
 async def assoc_metabolomics(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None, limit: int = Query(100, ge=1, le=200)) -> Evidence:
     return await _assoc_metabolomics(symbol=symbol, gene=gene, condition=condition, limit=limit)
@@ -4951,7 +4999,7 @@ _add_if_missing("/perturb/perturbseq-encode", _perturb_perturbseq_encode, ["GET"
 async def _genetics_annotation(symbol: _Optional[str] = Query(None), gene: _Optional[str] = Query(None)) -> Evidence:
     params = dict(symbol=symbol or gene)
     paths = ["/genetics/intolerance", "/genetics/pathogenicity-priors"]
-    return await _alias_merge(request, paths, params, "Gene-level annotation (constraint + pathogenicity priors)")
+    return await _alias_merge(None, paths, params, "Gene-level annotation (constraint + pathogenicity priors)")
 @router.get("/genetics/annotation", response_model=Evidence)
 async def genetics_annotation(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None)) -> Evidence:
     return await _genetics_annotation(symbol=symbol, gene=gene)
@@ -4963,7 +5011,7 @@ async def _genetics_regulatory(symbol: _Optional[str] = Query(None), gene: _Opti
                                condition: _Optional[str] = Query(None)) -> Evidence:
     params = dict(symbol=symbol or gene, condition=condition)
     paths = ["/genetics/sqtl", "/genetics/chromatin-contacts", "/genetics/mqtl-coloc"]
-    return await _alias_merge(request, paths, params, "Regulatory evidence (sQTL + 3D contacts + mQTL coloc)")
+    return await _alias_merge(None, paths, params, "Regulatory evidence (sQTL + 3D contacts + mQTL coloc)")
 @router.get("/genetics/regulatory", response_model=Evidence)
 async def genetics_regulatory(symbol: Optional[str] = Query(None), gene: Optional[str] = Query(None), condition: Optional[str] = None) -> Evidence:
     return await _genetics_regulatory(symbol=symbol, gene=gene)
