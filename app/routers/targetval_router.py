@@ -5163,10 +5163,10 @@ except Exception:
 
 
 # ============================================================================
-# GENETICS DOMAIN FULL PATCH (APIRouter-level) — Keyless Live Endpoints
-# This block *only* modifies the `router` used by the main app via include_router.
-# It rebinds/overrides 22 genetics endpoints + mech-pathways with live public sources.
-# No "__future__" imports here. No changes to other modules.
+# GENETICS DOMAIN PATCH v2 (APIRouter-level) — Keyless Live Endpoints
+# Adds: lncrna, mirna; strengthens l2g (schema-flex), consortia-summary; ensures
+# 3d-maps, chromatin-contacts, annotation, caqtl-lite, functional, mavedb,
+# pathogenicity-priors are exposed on the public router. No "__future__" here.
 # ============================================================================
 
 from typing import Any, Dict, Optional, Tuple, List
@@ -5176,27 +5176,25 @@ from fastapi import Query
 from fastapi.responses import JSONResponse
 from fastapi import APIRouter
 
-# --- Resolve the target router object --------------------------------------------------
+# --- target router --------------------------------------------------------------------
 try:
     _RT: APIRouter = router  # type: ignore[name-defined]
 except Exception:
-    # Fallback: module didn't expose `router`; create one and attach to app if present.
     _RT = APIRouter()
     try:
         app.include_router(_RT)  # type: ignore[name-defined]
     except Exception:
         pass
-    router = _RT  # expose for importer
+    router = _RT
 
-# --- Safe default for OpenTargets GraphQL mapping used by genetics handlers -----------
+# --- OpenTargets GraphQL mapping -------------------------------------------------------
 try:
     EXTERNAL_URLS  # type: ignore[name-defined]
 except Exception:
     EXTERNAL_URLS = {"opentargets_graphql": "https://api.platform.opentargets.org/api/v4/graphql"}
-
 OT_GQL = EXTERNAL_URLS.get("opentargets_graphql", "https://api.platform.opentargets.org/api/v4/graphql")
 
-# --- Minimal runtime (per-host semaphores, backoff, Retry-After, allowlist) ----------
+# --- runtime helpers ------------------------------------------------------------------
 _DEFAULT_TIMEOUT = httpx.Timeout(12.0, connect=6.0)
 _MAX_TRIES = 4
 _BACKOFF = 0.6
@@ -5208,40 +5206,30 @@ _ALLOW = {
     "reactome.org",
     "analysis.reactome.org",
     "www.encodeproject.org",
-    "www.ebi.ac.uk",                # MetaboLights, eQTL Catalogue
-    "www.metabolomicsworkbench.org",
-    "api.opengwas.io",              # MR status only (JWT gated for MR)
-    "gwas-api.mrcieu.ac.uk",
     "data.4dnucleome.org",
+    "www.ebi.ac.uk",                # MetaboLights, Europe PMC, eQTL Catalogue
+    "www.metabolomicsworkbench.org",
+    "api.opengwas.io",
+    "gwas-api.mrcieu.ac.uk",
     "rest.uniprot.org",
     "gnomad.broadinstitute.org",
     "search.clinicalgenome.org",
     "api.mavedb.org",
-    "www.ebi.ac.uk",
-    "www.ebi.ac.uk",
-    "www.ebi.ac.uk",
-    "www.ebi.ac.uk",
-    "www.ebi.ac.uk",
-    "www.ebi.ac.uk",
-    "www.ebi.ac.uk",
+    "rnacentral.org",
 }
 
 _sem: Dict[str, asyncio.Semaphore] = {}
-
 def _netloc(url: str) -> str:
-    from urllib.parse import urlparse
-    return urlparse(url).netloc
+    from urllib.parse import urlparse; return urlparse(url).netloc
 
 async def _fetch_json(url: str, *, method: str = "GET", params: Optional[Dict[str, Any]] = None,
                       headers: Optional[Dict[str, str]] = None, json_body: Optional[Dict[str, Any]] = None,
                       data: Optional[str] = None, allow_status=(200, 204)) -> Tuple[str, int, Optional[Dict[str, Any]]]:
     nl = _netloc(url)
-    if nl not in _ALLOW:
-        return "UPSTREAM_ERROR", 403, {"error": f"Host not allowlisted: {nl}"}
+    if nl not in _ALLOW: return "UPSTREAM_ERROR", 403, {"error": f"Host not allowlisted: {nl}"}
     sem = _sem.setdefault(nl, asyncio.Semaphore(_PER_HOST))
     headers = headers or {}
-    if "accept" not in {k.lower() for k in headers}:
-        headers["Accept"] = "application/json"
+    if "accept" not in {k.lower() for k in headers}: headers["Accept"] = "application/json"
     tries = 0
     async with sem:
         async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
@@ -5263,49 +5251,36 @@ async def _fetch_json(url: str, *, method: str = "GET", params: Optional[Dict[st
                         sleep_s = _BACKOFF * (2 ** (tries - 1))
                         if ra:
                             try:
-                                ra_s = float(ra)
-                                sleep_s = max(sleep_s, min(ra_s, 30.0))
+                                ra_s = float(ra); sleep_s = max(sleep_s, min(ra_s, 30.0))
                             except Exception:
                                 pass
                         if tries < _MAX_TRIES:
-                            await asyncio.sleep(sleep_s)
-                            continue
+                            await asyncio.sleep(sleep_s); continue
 
                     if resp.status_code in allow_status:
-                        if resp.status_code == 204:
-                            return "NO_DATA", resp.status_code, None
-                        try:
-                            return "OK", resp.status_code, resp.json()
-                        except Exception:
-                            return "NO_DATA", resp.status_code, {"note": "Non-JSON response", "text": resp.text[:800]}
+                        if resp.status_code == 204: return "NO_DATA", 204, None
+                        try: return "OK", resp.status_code, resp.json()
+                        except Exception: return "NO_DATA", resp.status_code, {"note":"Non-JSON response","text":resp.text[:800]}
 
                     if resp.status_code == 401 and ("opengwas" in nl or "gwas-api" in nl):
-                        return "UPSTREAM_AUTH_REQUIRED", resp.status_code, {"error": "OpenGWAS MR requires JWT"}
+                        return "UPSTREAM_AUTH_REQUIRED", 401, {"error":"OpenGWAS MR requires JWT"}
 
                     if 400 <= resp.status_code < 600 and tries < _MAX_TRIES:
-                        await asyncio.sleep(_BACKOFF * (2 ** (tries - 1)))
-                        continue
+                        await asyncio.sleep(_BACKOFF * (2 ** (tries - 1))); continue
 
                     return "UPSTREAM_ERROR", resp.status_code, {"error": resp.text[:800]}
                 except (httpx.TimeoutException, httpx.HTTPError) as e:
-                    if tries < _MAX_TRIES:
-                        await asyncio.sleep(_BACKOFF * (2 ** (tries - 1)))
-                        continue
+                    if tries < _MAX_TRIES: await asyncio.sleep(_BACKOFF * (2 ** (tries - 1))); continue
                     return "UPSTREAM_ERROR", 599, {"error": str(e)}
 
 def _ok(payload: Dict[str, Any], module: str) -> JSONResponse:
-    payload.setdefault("status", "OK")
-    payload.setdefault("module", module)
-    return JSONResponse(payload)
-
+    payload.setdefault("status", "OK"); payload.setdefault("module", module); return JSONResponse(payload)
 def _no_data(module: str, prov: Dict[str, Any], note="") -> JSONResponse:
-    return JSONResponse({"status": "NO_DATA", "module": module, "provenance": prov, "note": note})
-
+    return JSONResponse({"status":"NO_DATA","module":module,"provenance":prov,"note":note})
 def _up_err(module: str, prov: Dict[str, Any], code: int, err: str) -> JSONResponse:
-    return JSONResponse({"status": "UPSTREAM_ERROR", "module": module, "provenance": prov, "http_status": code, "error": err})
-
+    return JSONResponse({"status":"UPSTREAM_ERROR","module":module,"provenance":prov,"http_status":code,"error":err})
 def _auth_required(module: str, prov: Dict[str, Any], note: str) -> JSONResponse:
-    return JSONResponse({"status": "UPSTREAM_AUTH_REQUIRED", "module": module, "provenance": prov, "note": note})
+    return JSONResponse({"status":"UPSTREAM_AUTH_REQUIRED","module":module,"provenance":prov,"note":note})
 
 # --- resolvers ------------------------------------------------------------------------
 async def _symbol_to_ensg(symbol: str) -> Optional[str]:
@@ -5320,37 +5295,28 @@ async def _efo(condition: str) -> Optional[str]:
     s,c,j = await _fetch_json("https://www.ebi.ac.uk/ols4/api/search", params={"q":condition,"ontology":"efo","rows":1,"queryFields":"label,synonym"})
     try:
         docs = j.get("response",{}).get("docs",[]) if j else []
-        if docs:
-            return docs[0].get("iri") or docs[0].get("obo_id") or docs[0].get("short_form")
-    except Exception:
-        return None
+        if docs: return docs[0].get("iri") or docs[0].get("obo_id") or docs[0].get("short_form")
+    except Exception: pass
     return None
 
 async def _ot_gql(query: str, variables: Dict[str, Any]):
     return await _fetch_json(OT_GQL, method="POST", headers={"Content-Type":"application/json","Accept":"application/json"},
                              json_body={"query": query, "variables": variables})
 
-# --- route utilities ------------------------------------------------------------------
+# --- route helpers --------------------------------------------------------------------
 def _replace_route(path: str, handler):
     new_routes = []
-    removed = False
     for r in list(_RT.routes):
         try:
-            p = getattr(r, "path", None)
-            if p == path:
-                removed = True
-                continue
-        except Exception:
-            pass
+            if getattr(r, "path", None) == path: continue
+        except Exception: pass
         new_routes.append(r)
     _RT.routes = new_routes
     _RT.add_api_route(path, handler, methods=["GET"])
+def _alias(path: str, handler): _RT.add_api_route(path, handler, methods=["GET"])
 
-def _alias(path: str, handler):
-    _RT.add_api_route(path, handler, methods=["GET"])
-
-# ------------------------- Domain 1 — Genetics (22 modules) ---------------------------
-# 1) genetics-l2g
+# ============================ Genetics endpoints (v2) =================================
+# l2g (schema-flex: supports rows{id score} OR rows{target{id approvedSymbol} score})
 async def _m_l2g(symbol: str = Query(...)):
     module = "genetics-l2g"
     ensg = await _symbol_to_ensg(symbol)
@@ -5361,25 +5327,27 @@ async def _m_l2g(symbol: str = Query(...)):
         credibleSets(page:{index:0,size:50}){
           rows{
             studyLocusId
-            l2GPredictions(page:{index:0,size:25}){ rows{ id score } }
+            l2GPredictions(page:{index:0,size:25}){
+              rows{ id score target{ id approvedSymbol } }
+            }
           }
         }
       }
-    }
-    """
+    }"""
     s,c,j = await _ot_gql(q, {"ensg": ensg})
     if s != "OK": return _up_err(module, {"host":"api.platform.opentargets.org"}, c, json.dumps(j)[:500])
     rows = (((j or {}).get("data") or {}).get("target") or {}).get("credibleSets", {}).get("rows", []) or []
     out = []
     for r in rows:
         for p in (r.get("l2GPredictions") or {}).get("rows", []) or []:
-            if p.get("id") == ensg:
-                out.append({"study_locus_id": r.get("studyLocusId"), "l2g": p.get("score")})
+            pid = p.get("id") or ((p.get("target") or {}).get("id"))
+            if pid == ensg:
+                out.append({"study_locus_id": r.get("studyLocusId"), "l2g": p.get("score"),
+                            "gene": (p.get("target") or {}).get("approvedSymbol")})
     return _ok({"target": ensg, "predictions": out, "provenance":{"host":"api.platform.opentargets.org"}}, module) if out else _no_data(module, {"host":"api.platform.opentargets.org","target":ensg}, "No L2G predictions")
-
 _replace_route("/genetics/l2g", _m_l2g); _alias("/genetics-l2g", _m_l2g)
 
-# 2) genetics-coloc
+# coloc (unchanged, ensure exposed)
 async def _m_coloc(symbol: str = Query(...), condition: Optional[str] = Query(None)):
     module = "genetics-coloc"
     ensg = await _symbol_to_ensg(symbol)
@@ -5418,190 +5386,9 @@ async def _m_coloc(symbol: str = Query(...), condition: Optional[str] = Query(No
                 "other_trait_efo": efo_ids
             })
     return _ok({"records": out, "provenance":{"host":"api.platform.opentargets.org","efo":efo}}, module) if out else _no_data(module, {"host":"api.platform.opentargets.org","target":ensg,"efo":efo}, "No colocalisations")
-
 _replace_route("/genetics/coloc", _m_coloc); _alias("/genetics-coloc", _m_coloc)
 
-# 3) genetics-mr
-async def _m_mr(exposure: Optional[str] = Query(None), outcome: Optional[str] = Query(None)):
-    module = "genetics-mr"
-    s,c,j = await _fetch_json("https://api.opengwas.io/api/status")
-    if s != "OK": return _up_err(module, {"host":"api.opengwas.io"}, c, json.dumps(j)[:500])
-    return _auth_required(module, {"host":"api.opengwas.io"}, "OpenGWAS MR endpoints require JWT; router stays keyless")
-
-_replace_route("/genetics/mr", _m_mr); _alias("/genetics-mr", _m_mr)
-
-# 4) genetics-chromatin-contacts (ENCODE Hi-C / ChIA-PET best-effort)
-async def _m_chrom_contacts(symbol: str = Query(...)):
-    module = "genetics-chromatin-contacts"
-    s,c,j = await _fetch_json("https://www.encodeproject.org/search/", params={"type":"Experiment","assay_title":"Hi-C","searchTerm":symbol})
-    if s != "OK": return _up_err(module, {"host":"www.encodeproject.org"}, c, json.dumps(j)[:500])
-    items = j.get("@graph", []) if isinstance(j, dict) else []
-    out = [{"accession":it.get("accession"),"lab":(it.get("lab") or {}).get("title")} for it in items if symbol.upper() in json.dumps(it).upper()]
-    return _ok({"records": out[:50], "provenance":{"host":"www.encodeproject.org"}}, module) if out else _no_data(module, {"host":"www.encodeproject.org"}, "No contacts matches")
-_replace_route("/genetics/chromatin-contacts", _m_chrom_contacts)
-
-# 5) genetics-3d-maps (4DN)
-async def _m_3d_maps(symbol: str = Query(...)):
-    module = "genetics-3d-maps"
-    s,c,j = await _fetch_json("https://data.4dnucleome.org/search/", params={"type":"ExperimentHiC","limit":25,"searchTerm":symbol})
-    if s != "OK": return _up_err(module, {"host":"data.4dnucleome.org"}, c, json.dumps(j)[:500])
-    items = j.get("@graph", []) if isinstance(j, dict) else []
-    out = [{"uuid":it.get("uuid"),"accession":it.get("accession"),"lab":(it.get("lab") or {}).get("title")} for it in items if symbol.upper() in json.dumps(it).upper()]
-    return _ok({"records": out, "provenance":{"host":"data.4dnucleome.org"}}, module) if out else _no_data(module, {"host":"data.4dnucleome.org"}, "No 3D maps")
-_replace_route("/genetics/3d-maps", _m_3d_maps); _alias("/genetics-3d-maps", _m_3d_maps)
-
-# 6) genetics-regulatory (ENCODE ChIP-seq)
-async def _m_regulatory(symbol: str = Query(...)):
-    module = "genetics-regulatory"
-    s,c,j = await _fetch_json("https://www.encodeproject.org/search/", params={"type":"Experiment","assay_title":"ChIP-seq","searchTerm":symbol})
-    if s != "OK": return _up_err(module, {"host":"www.encodeproject.org"}, c, json.dumps(j)[:500])
-    items = j.get("@graph", []) if isinstance(j, dict) else []
-    out = []
-    for it in items:
-        tgt = (it.get("target") or {}).get("label") if isinstance(it.get("target"), dict) else None
-        if (tgt and symbol.upper() in str(tgt).upper()) or (symbol.upper() in json.dumps(it).upper()):
-            out.append({"accession": it.get("accession"), "target": tgt, "biosample": (it.get("biosample_ontology") or {}).get("term_name")})
-    return _ok({"records": out[:50], "provenance":{"host":"www.encodeproject.org"}}, module) if out else _no_data(module, {"host":"www.encodeproject.org"}, "No regulatory matches")
-_replace_route("/genetics/regulatory", _m_regulatory)
-
-# 7) genetics-sqtl (eQTL Catalogue best-effort; gene-level)
-async def _m_sqtl(symbol: str = Query(...)):
-    module = "genetics-sqtl"
-    ensg = await _symbol_to_ensg(symbol)
-    if not ensg: return _no_data(module, {"resolver":"ensembl"}, f"Unknown symbol={symbol}")
-    # eQTL Catalogue gene endpoint (if unavailable, treat as NO_DATA)
-    s,c,j = await _fetch_json(f"https://www.ebi.ac.uk/eqtl/api/genes/{ensg}")
-    if s != "OK": return _no_data(module, {"host":"www.ebi.ac.uk","target":ensg}, "eQTL Catalogue gene endpoint not available")
-    return _ok({"record": j, "provenance":{"host":"www.ebi.ac.uk","target":ensg}}, module)
-_replace_route("/genetics/sqtl", _m_sqtl)
-
-# 8) genetics-pqtl (OT GraphQL colocs filtered for proteins)
-async def _m_pqtl(symbol: str = Query(...)):
-    module = "genetics-pqtl"
-    ensg = await _symbol_to_ensg(symbol)
-    if not ensg: return _no_data(module, {"resolver":"ensembl"}, f"Unknown symbol={symbol}")
-    q = """
-    query Q($ensg:String!){
-      target(ensemblId:$ensg){
-        credibleSets(page:{index:0,size:40}){
-          rows{
-            studyLocusId
-            colocalisation(page:{index:0,size:50}){
-              rows{
-                rightStudyType
-                otherStudyLocus{ study{ traitFromSource } }
-              }
-            }
-          }
-        }
-      }
-    }"""
-    s,c,j = await _ot_gql(q, {"ensg": ensg})
-    if s != "OK": return _up_err(module, {"host":"api.platform.opentargets.org"}, c, json.dumps(j)[:500])
-    rows = (((j or {}).get("data") or {}).get("target") or {}).get("credibleSets", {}).get("rows", []) or []
-    out = []
-    for r in rows:
-        for col in (r.get("colocalisation") or {}).get("rows", []) or []:
-            if col.get("rightStudyType") and "PROTEIN" in str(col.get("rightStudyType")).upper():
-                out.append({"study_locus_id": r.get("studyLocusId"), "type": col.get("rightStudyType"),
-                            "trait": ((col.get("otherStudyLocus") or {}).get("study") or {}).get("traitFromSource")})
-    return _ok({"records": out, "provenance":{"host":"api.platform.opentargets.org"}}, module) if out else _no_data(module, {"host":"api.platform.opentargets.org"}, "No pQTL colocs")
-_replace_route("/genetics/pqtl", _m_pqtl)
-
-# 9) genetics-annotation (Ensembl gene info)
-async def _m_annotation(symbol: str = Query(...)):
-    module = "genetics-annotation"
-    s,c,j = await _fetch_json(f"https://rest.ensembl.org/lookup/symbol/homo_sapiens/{symbol}", params={"expand":"1"})
-    if s != "OK": return _up_err(module, {"host":"rest.ensembl.org"}, c, json.dumps(j)[:500])
-    keep = {k: j.get(k) for k in ["id","display_name","biotype","seq_region_name","start","end","strand","version"]} if j else None
-    return _ok({"record": keep, "provenance":{"host":"rest.ensembl.org"}}, module) if keep else _no_data(module, {"host":"rest.ensembl.org"}, "No annotation")
-_replace_route("/genetics/annotation", _m_annotation); _alias("/genetics-annotation", _m_annotation)
-
-# 10) genetics-pathogenicity-priors (gnomAD constraint as 'priors')
-async def _m_path_priors(symbol: str = Query(...)):
-    module = "genetics-pathogenicity-priors"
-    ensg = await _symbol_to_ensg(symbol)
-    if not ensg: return _no_data(module, {"resolver":"ensembl"}, f"Unknown symbol={symbol}")
-    q = """
-    query($ensg:String!){
-      gene(gene_id:$ensg){ symbol gene_id constraint{ pLI pNull pRec oe_mis oe_lof } }
-    }"""
-    s,c,j = await _fetch_json("https://gnomad.broadinstitute.org/api", method="POST",
-                              headers={"Content-Type":"application/json","Accept":"application/json"},
-                              json_body={"query": q, "variables": {"ensg": ensg}})
-    if s != "OK": return _no_data(module, {"host":"gnomad.broadinstitute.org","target":ensg}, "Constraint endpoint unavailable")
-    g = ((j or {}).get("data") or {}).get("gene")
-    return _ok({"record": g, "provenance":{"host":"gnomad.broadinstitute.org"}}, module) if g else _no_data(module, {"host":"gnomad.broadinstitute.org"}, "No priors")
-_replace_route("/genetics/pathogenicity-priors", _m_path_priors)
-
-# 11) genetics-intolerance (gnomAD constraint)
-async def _m_intolerance(symbol: str = Query(...)):
-    module = "genetics-intolerance"
-    ensg = await _symbol_to_ensg(symbol)
-    if not ensg: return _no_data(module, {"resolver":"ensembl"}, f"Unknown symbol={symbol}")
-    q = "query($ensg:String!){ gene(gene_id:$ensg){ symbol gene_id constraint{ pLI pRec oe_lof oe_mis } } }"
-    s,c,j = await _fetch_json("https://gnomad.broadinstitute.org/api", method="POST",
-                              headers={"Content-Type":"application/json","Accept":"application/json"},
-                              json_body={"query": q, "variables": {"ensg": ensg}})
-    if s != "OK": return _no_data(module, {"host":"gnomad.broadinstitute.org","target":ensg}, "Constraint unavailable")
-    g = ((j or {}).get("data") or {}).get("gene")
-    return _ok({"constraint": g.get("constraint") if g else None, "provenance":{"host":"gnomad.broadinstitute.org"}}, module) if g else _no_data(module, {"host":"gnomad.broadinstitute.org"}, "No constraint")
-_replace_route("/genetics/intolerance", _m_intolerance)
-
-# 12) genetics-rare (ClinVar)
-async def _m_rare(symbol: str = Query(...)):
-    module = "genetics-rare"
-    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-    term = f"({symbol}[gene]) AND Homo sapiens[organism]"
-    s1,c1,j1 = await _fetch_json(f"{base}/esearch.fcgi", params={"db":"clinvar","retmode":"json","term":term,"retmax":20})
-    if s1 != "OK": return _up_err(module, {"host":"eutils.ncbi.nlm.nih.gov"}, c1, json.dumps(j1)[:500])
-    ids = (j1 or {}).get("esearchresult", {}).get("idlist", []) or []
-    if not ids: return _no_data(module, {"host":"eutils.ncbi.nlm.nih.gov"}, "No ClinVar records")
-    s2,c2,j2 = await _fetch_json(f"{base}/esummary.fcgi", params={"db":"clinvar","retmode":"json","id":",".join(ids)})
-    if s2 != "OK": return _up_err(module, {"host":"eutils.ncbi.nlm.nih.gov"}, c2, json.dumps(j2)[:500])
-    docs = (j2 or {}).get("result", {}); out=[]
-    for uid in (docs.get("uids", []) or [])[:20]:
-        rec = docs.get(uid, {}); out.append({"uid":uid,"title":rec.get("title"),"clinical_significance":(rec.get("clinical_significance",{}) or {}).get("description")})
-    return _ok({"records": out, "provenance":{"host":"eutils.ncbi.nlm.nih.gov"}}, module)
-_replace_route("/genetics/rare", _m_rare)
-
-# 13) genetics-mendelian (ClinGen search API best-effort)
-async def _m_mendelian(symbol: str = Query(...)):
-    module = "genetics-mendelian"
-    s,c,j = await _fetch_json("https://search.clinicalgenome.org/api/search/genes", params={"q": symbol, "rows": 10})
-    if s != "OK": return _no_data(module, {"host":"search.clinicalgenome.org"}, "ClinGen search unavailable")
-    hits = (j or {}).get("docs", []) or (j or {}).get("response", {}).get("docs", [])
-    return _ok({"records": hits, "provenance":{"host":"search.clinicalgenome.org"}}, module) if hits else _no_data(module, {"host":"search.clinicalgenome.org"}, "No ClinGen gene hits")
-_replace_route("/genetics/mendelian", _m_mendelian)
-
-# 14) genetics-phewas-human-knockout (PhenoScanner v2)
-async def _m_phewas_hko(symbol: str = Query(...)):
-    module = "genetics-phewas-human-knockout"
-    s,c,j = await _fetch_json("http://www.phenoscanner.medschl.cam.ac.uk/api", params={"gene": symbol, "catalog": "pQTL", "build": "37"})
-    if s != "OK": return _no_data(module, {"host":"phenoscanner"}, "PhenoScanner API may be unavailable or CORS limited")
-    return _ok({"record": j, "provenance":{"host":"phenoscanner"}}, module)
-_replace_route("/genetics/phewas-human-knockout", _m_phewas_hko)
-
-# 15) genetics-functional (Europe PMC literature proxy)
-async def _m_functional(symbol: str = Query(...)):
-    module = "genetics-functional"
-    q = f'"{symbol}" AND (functional variant OR regulatory variant) AND human'
-    s,c,j = await _fetch_json("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={"query": q, "format": "json", "pageSize": 25})
-    if s != "OK": return _up_err(module, {"host":"www.ebi.ac.uk"}, c, json.dumps(j)[:500])
-    hits = (((j or {}).get("resultList") or {}).get("result") or [])
-    return _ok({"hits": hits, "provenance":{"host":"europepmc"}}, module) if hits else _no_data(module, {"host":"europepmc"}, "No functional-variant literature hits")
-_replace_route("/genetics/functional", _m_functional)
-
-# 16) genetics-mavedb (MaveDB public API)
-async def _m_mavedb(symbol: str = Query(...)):
-    module = "genetics-mavedb"
-    s,c,j = await _fetch_json("https://api.mavedb.org/api/experiments", params={"gene": symbol, "page[size]": 25})
-    if s != "OK": return _no_data(module, {"host":"api.mavedb.org"}, "MaveDB API unavailable")
-    items = (j or {}).get("data", []) or []
-    return _ok({"records": items, "provenance":{"host":"api.mavedb.org"}}, module) if items else _no_data(module, {"host":"api.mavedb.org"}, "No MAVE experiments for gene")
-_replace_route("/genetics/mavedb", _m_mavedb)
-
-# 17) genetics-consortia-summary (OT GraphQL studies)
+# consortia-summary (OT GraphQL studies → consortium summary)
 async def _m_consortia_summary(condition: str = Query(...)):
     module = "genetics-consortia-summary"
     efo = await _efo(condition)
@@ -5615,41 +5402,69 @@ async def _m_consortia_summary(condition: str = Query(...)):
     for r in rows:
         pid = r.get("projectId") or "unknown"
         d = by.setdefault(pid, {"projectId": pid, "n":0, "types":set(), "cohorts":set()})
-        d["n"] += 1; 
+        d["n"] += 1
         if r.get("studyType"): d["types"].add(r["studyType"])
-        for ccc in r.get("cohorts") or []: d["cohorts"].add(ccc)
+        for cx in r.get("cohorts") or []: d["cohorts"].add(cx)
     out = [{"projectId":k,"n_studies":v["n"],"studyTypes":sorted(list(v["types"])),"cohorts":sorted(list(v["cohorts"]))[:20]} for k,v in by.items()]
     out.sort(key=lambda x:x["n_studies"], reverse=True)
     return _ok({"efo":efo,"summary":out,"provenance":{"host":"api.platform.opentargets.org"}}, module)
 _replace_route("/genetics/consortia-summary", _m_consortia_summary); _alias("/genetics-consortia-summary", _m_consortia_summary)
 
-# 18) genetics-caqtl-lite (composite loopback)
-async def _m_caqtl_lite(symbol: str = Query(...)):
-    module = "genetics-caqtl-lite"
-    try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-            r1 = await client.get("http://127.0.0.1:8000/genetics/regulatory", params={"symbol": symbol})
-            r2 = await client.get("http://127.0.0.1:8000/genetics/chromatin-contacts", params={"symbol": symbol})
-            data = []
-            if r1.status_code == 200 and (r1.json() or {}).get("status") == "OK":
-                data.extend((r1.json() or {}).get("records", []))
-            if r2.status_code == 200 and (r2.json() or {}).get("status") == "OK":
-                data.extend((r2.json() or {}).get("records", []))
-            if not data: return _no_data(module, {"loopback":True}, "No regulatory/chromatin contacts available")
-            return _ok({"records": data[:50], "provenance":{"composed":["genetics/regulatory","genetics/chromatin-contacts"]}}, module)
-    except Exception as e:
-        return _no_data(module, {"loopback":True}, f"Composite call failed: {e}")
-_replace_route("/genetics/caqtl-lite", _m_caqtl_lite); _alias("/genetics-caqtl-lite", _m_caqtl_lite)
+# mr (honest keyless)
+async def _m_mr(exposure: Optional[str] = Query(None), outcome: Optional[str] = Query(None)):
+    module = "genetics-mr"
+    s,c,j = await _fetch_json("https://api.opengwas.io/api/status")
+    if s != "OK": return _up_err(module, {"host":"api.opengwas.io"}, c, json.dumps(j)[:500])
+    return _auth_required(module, {"host":"api.opengwas.io"}, "OpenGWAS MR endpoints require JWT; router remains keyless")
+_replace_route("/genetics/mr", _m_mr); _alias("/genetics-mr", _m_mr)
 
-# 19) genetics-nmd-inference (honest placeholder until full compose implemented)
-async def _m_nmd_inference(symbol: str = Query(...)):
-    module = "genetics-nmd-inference"
-    return _no_data(module, {"note":"compose = sQTL + Ensembl CDS/NMD context"}, "Not implemented in keyless patch")
-_replace_route("/genetics/nmd-inference", _m_nmd_inference); _alias("/genetics-nmd-inference", _m_nmd_inference)
+# chromatin-contacts (ENCODE Hi-C search)
+async def _m_chrom_contacts(symbol: str = Query(...)):
+    module = "genetics-chromatin-contacts"
+    s,c,j = await _fetch_json("https://www.encodeproject.org/search/", params={"type":"Experiment","assay_title":"Hi-C","searchTerm":symbol})
+    if s != "OK": return _up_err(module, {"host":"www.encodeproject.org"}, c, json.dumps(j)[:500])
+    items = j.get("@graph", []) if isinstance(j, dict) else []
+    out = [{"accession":it.get("accession"),"lab":(it.get("lab") or {}).get("title")} for it in items if symbol.upper() in json.dumps(it).upper()]
+    return _ok({"records": out[:50], "provenance":{"host":"www.encodeproject.org"}}, module) if out else _no_data(module, {"host":"www.encodeproject.org"}, "No contacts")
+_replace_route("/genetics/chromatin-contacts", _m_chrom_contacts)
 
-# 20) genetics-mqtl-coloc (OT GraphQL; metabolite/lipid filtered)
-async def _m_mqtl_coloc(symbol: str = Query(...)):
-    module = "genetics-mqtl-coloc"
+# 3d-maps (4DN)
+async def _m_3d_maps(symbol: str = Query(...)):
+    module = "genetics-3d-maps"
+    s,c,j = await _fetch_json("https://data.4dnucleome.org/search/", params={"type":"ExperimentHiC","limit":25,"searchTerm":symbol})
+    if s != "OK": return _up_err(module, {"host":"data.4dnucleome.org"}, c, json.dumps(j)[:500])
+    items = j.get("@graph", []) if isinstance(j, dict) else []
+    out = [{"uuid":it.get("uuid"),"accession":it.get("accession"),"lab":(it.get("lab") or {}).get("title")} for it in items if symbol.upper() in json.dumps(it).upper()]
+    return _ok({"records": out, "provenance":{"host":"data.4dnucleome.org"}}, module) if out else _no_data(module, {"host":"data.4dnucleome.org"}, "No 3D maps")
+_replace_route("/genetics/3d-maps", _m_3d_maps); _alias("/genetics-3d-maps", _m_3d_maps)
+
+# regulatory (ENCODE ChIP-seq)
+async def _m_regulatory(symbol: str = Query(...)):
+    module = "genetics-regulatory"
+    s,c,j = await _fetch_json("https://www.encodeproject.org/search/", params={"type":"Experiment","assay_title":"ChIP-seq","searchTerm":symbol})
+    if s != "OK": return _up_err(module, {"host":"www.encodeproject.org"}, c, json.dumps(j)[:500])
+    items = j.get("@graph", []) if isinstance(j, dict) else []
+    out = []
+    for it in items:
+        tgt = (it.get("target") or {}).get("label") if isinstance(it.get("target"), dict) else None
+        if (tgt and symbol.upper() in str(tgt).upper()) or (symbol.upper() in json.dumps(it).upper()):
+            out.append({"accession": it.get("accession"), "target": tgt, "biosample": (it.get("biosample_ontology") or {}).get("term_name")})
+    return _ok({"records": out[:50], "provenance":{"host":"www.encodeproject.org"}}, module) if out else _no_data(module, {"host":"www.encodeproject.org"}, "No regulatory matches")
+_replace_route("/genetics/regulatory", _m_regulatory)
+
+# sqtl (eQTL Catalogue best-effort)
+async def _m_sqtl(symbol: str = Query(...)):
+    module = "genetics-sqtl"
+    ensg = await _symbol_to_ensg(symbol)
+    if not ensg: return _no_data(module, {"resolver":"ensembl"}, f"Unknown symbol={symbol}")
+    s,c,j = await _fetch_json(f"https://www.ebi.ac.uk/eqtl/api/genes/{ensg}")
+    if s != "OK": return _no_data(module, {"host":"www.ebi.ac.uk","target":ensg}, "eQTL Catalogue endpoint unavailable")
+    return _ok({"record": j, "provenance":{"host":"www.ebi.ac.uk","target":ensg}}, module)
+_replace_route("/genetics/sqtl", _m_sqtl)
+
+# pqtl (OT GraphQL protein study types)
+async def _m_pqtl(symbol: str = Query(...)):
+    module = "genetics-pqtl"
     ensg = await _symbol_to_ensg(symbol)
     if not ensg: return _no_data(module, {"resolver":"ensembl"}, f"Unknown symbol={symbol}")
     q = """
@@ -5672,46 +5487,193 @@ async def _m_mqtl_coloc(symbol: str = Query(...)):
     for r in rows:
         for col in (r.get("colocalisation") or {}).get("rows", []) or []:
             rst = str(col.get("rightStudyType") or "").upper()
-            if "METAB" in rst or "LIPID" in rst:
+            if "PROTEIN" in rst:
                 out.append({"study_locus_id": r.get("studyLocusId"), "type": col.get("rightStudyType"),
                             "trait": ((col.get("otherStudyLocus") or {}).get("study") or {}).get("traitFromSource")})
-    return _ok({"records": out, "provenance":{"host":"api.platform.opentargets.org"}}, module) if out else _no_data(module, {"host":"api.platform.opentargets.org"}, "No mQTL colocs")
-_replace_route("/genetics/mqtl-coloc", _m_mqtl_coloc)
+    return _ok({"records": out, "provenance":{"host":"api.platform.opentargets.org"}}, module) if out else _no_data(module, {"host":"api.platform.opentargets.org"}, "No pQTL colocs")
+_replace_route("/genetics/pqtl", _m_pqtl)
 
-# 21) genetics-ase-check (ASE literature)
-async def _m_ase(symbol: str = Query(...)):
-    module = "genetics-ase-check"
-    q = f'"{symbol}" AND ("allele-specific expression" OR ASE) AND human'
+# annotation (Ensembl gene info)
+async def _m_annotation(symbol: str = Query(...)):
+    module = "genetics-annotation"
+    s,c,j = await _fetch_json(f"https://rest.ensembl.org/lookup/symbol/homo_sapiens/{symbol}", params={"expand":"1"})
+    if s != "OK": return _up_err(module, {"host":"rest.ensembl.org"}, c, json.dumps(j)[:500])
+    keep = {k: j.get(k) for k in ["id","display_name","biotype","seq_region_name","start","end","strand","version"]} if j else None
+    return _ok({"record": keep, "provenance":{"host":"rest.ensembl.org"}}, module) if keep else _no_data(module, {"host":"rest.ensembl.org"}, "No annotation")
+_replace_route("/genetics/annotation", _m_annotation); _alias("/genetics-annotation", _m_annotation)
+
+# pathogenicity-priors (gnomAD GraphQL constraint)
+async def _m_path_priors(symbol: str = Query(...)):
+    module = "genetics-pathogenicity-priors"
+    ensg = await _symbol_to_ensg(symbol)
+    if not ensg: return _no_data(module, {"resolver":"ensembl"}, f"Unknown symbol={symbol}")
+    q = "query($ensg:String!){ gene(gene_id:$ensg){ symbol gene_id constraint{ pLI pRec pNull oe_mis oe_lof } } }"
+    s,c,j = await _fetch_json("https://gnomad.broadinstitute.org/api", method="POST",
+                              headers={"Content-Type":"application/json","Accept":"application/json"},
+                              json_body={"query": q, "variables": {"ensg": ensg}})
+    if s != "OK": return _no_data(module, {"host":"gnomad.broadinstitute.org","target":ensg}, "Constraint unavailable")
+    g = ((j or {}).get("data") or {}).get("gene")
+    return _ok({"record": g, "provenance":{"host":"gnomad.broadinstitute.org"}}, module) if g else _no_data(module, {"host":"gnomad.broadinstitute.org"}, "No priors")
+_replace_route("/genetics/pathogenicity-priors", _m_path_priors)
+
+# intolerance (gnomAD constraint)
+async def _m_intolerance(symbol: str = Query(...)):
+    module = "genetics-intolerance"
+    ensg = await _symbol_to_ensg(symbol)
+    if not ensg: return _no_data(module, {"resolver":"ensembl"}, f"Unknown symbol={symbol}")
+    q = "query($ensg:String!){ gene(gene_id:$ensg){ symbol gene_id constraint{ pLI pRec oe_lof oe_mis } } }"
+    s,c,j = await _fetch_json("https://gnomad.broadinstitute.org/api", method="POST",
+                              headers={"Content-Type":"application/json","Accept":"application/json"},
+                              json_body={"query": q, "variables": {"ensg": ensg}})
+    if s != "OK": return _no_data(module, {"host":"gnomad.broadinstitute.org","target":ensg}, "Constraint unavailable")
+    g = ((j or {}).get("data") or {}).get("gene")
+    return _ok({"constraint": g.get("constraint") if g else None, "provenance":{"host":"gnomad.broadinstitute.org"}}, module) if g else _no_data(module, {"host":"gnomad.broadinstitute.org"}, "No constraint")
+_replace_route("/genetics/intolerance", _m_intolerance)
+
+# rare (ClinVar)
+async def _m_rare(symbol: str = Query(...)):
+    module = "genetics-rare"
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    term = f"({symbol}[gene]) AND Homo sapiens[organism]"
+    s1,c1,j1 = await _fetch_json(f"{base}/esearch.fcgi", params={"db":"clinvar","retmode":"json","term":term,"retmax":20})
+    if s1 != "OK": return _up_err(module, {"host":"eutils.ncbi.nlm.nih.gov"}, c1, json.dumps(j1)[:500])
+    ids = (j1 or {}).get("esearchresult", {}).get("idlist", []) or []
+    if not ids: return _no_data(module, {"host":"eutils.ncbi.nlm.nih.gov"}, "No ClinVar records")
+    s2,c2,j2 = await _fetch_json(f"{base}/esummary.fcgi", params={"db":"clinvar","retmode":"json","id":",".join(ids)})
+    if s2 != "OK": return _up_err(module, {"host":"eutils.ncbi.nlm.nih.gov"}, c2, json.dumps(j2)[:500])
+    docs = (j2 or {}).get("result", {}); out=[]
+    for uid in (docs.get("uids", []) or [])[:20]:
+        rec = docs.get(uid, {}); out.append({"uid":uid,"title":rec.get("title"),"clinical_significance":(rec.get("clinical_significance",{}) or {}).get("description")})
+    return _ok({"records": out, "provenance":{"host":"eutils.ncbi.nlm.nih.gov"}}, module)
+_replace_route("/genetics/rare", _m_rare)
+
+# mendelian (ClinGen best-effort)
+async def _m_mendelian(symbol: str = Query(...)):
+    module = "genetics-mendelian"
+    s,c,j = await _fetch_json("https://search.clinicalgenome.org/api/search/genes", params={"q": symbol, "rows": 10})
+    if s != "OK": return _no_data(module, {"host":"search.clinicalgenome.org"}, "ClinGen search unavailable")
+    hits = (j or {}).get("docs", []) or (j or {}).get("response", {}).get("docs", [])
+    return _ok({"records": hits, "provenance":{"host":"search.clinicalgenome.org"}}, module) if hits else _no_data(module, {"host":"search.clinicalgenome.org"}, "No ClinGen gene hits")
+_replace_route("/genetics/mendelian", _m_mendelian)
+
+# phewas-human-knockout (best-effort probe)
+async def _m_phewas_hko(symbol: str = Query(...)):
+    module = "genetics-phewas-human-knockout"
+    s,c,j = await _fetch_json("http://www.phenoscanner.medschl.cam.ac.uk/api", params={"gene": symbol, "catalog": "pQTL", "build": "37"})
+    if s != "OK": return _no_data(module, {"host":"phenoscanner"}, "PhenoScanner may be unavailable")
+    return _ok({"record": j, "provenance":{"host":"phenoscanner"}}, module)
+_replace_route("/genetics/phewas-human-knockout", _m_phewas_hko)
+
+# functional (Europe PMC fallback)
+async def _m_functional(symbol: str = Query(...)):
+    module = "genetics-functional"
+    q = f'"{symbol}" AND (functional variant OR regulatory variant) AND human'
     s,c,j = await _fetch_json("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={"query": q, "format":"json", "pageSize": 25})
-    if s != "OK": return _up_err(module, {"host":"europepmc"}, c, json.dumps(j)[:500])
+    if s != "OK": return _up_err(module, {"host":"www.ebi.ac.uk"}, c, json.dumps(j)[:500])
     hits = (((j or {}).get("resultList") or {}).get("result") or [])
-    return _ok({"hits": hits, "provenance":{"host":"europepmc"}}, module) if hits else _no_data(module, {"host":"europepmc"}, "No ASE literature")
-_replace_route("/genetics/ase-check", _m_ase)
+    return _ok({"hits": hits, "provenance":{"host":"europepmc"}}, module) if hits else _no_data(module, {"host":"europepmc"}, "No functional-variant literature hits")
+_replace_route("/genetics/functional", _m_functional)
 
-# 22) genetics-ptm-signal-lite (UniProt PTM features)
-async def _m_ptm(symbol: str = Query(...)):
-    module = "genetics-ptm-signal-lite"
-    s,c,j = await _fetch_json("https://rest.uniprot.org/uniprotkb/search", params={"query": f'gene_exact:{symbol} AND organism_id:9606', "fields":"accession,feature(MOD_RES)" })
-    if s != "OK": return _no_data(module, {"host":"rest.uniprot.org"}, "UniProt REST unavailable")
-    return _ok({"record": j, "provenance":{"host":"rest.uniprot.org"}}, module)
-_replace_route("/genetics/ptm-signal-lite", _m_ptm)
+# mavedb
+async def _m_mavedb(symbol: str = Query(...)):
+    module = "genetics-mavedb"
+    s,c,j = await _fetch_json("https://api.mavedb.org/api/experiments", params={"gene": symbol, "page[size]": 25})
+    if s != "OK": return _no_data(module, {"host":"api.mavedb.org"}, "MaveDB API unavailable")
+    items = (j or {}).get("data", []) or []
+    return _ok({"records": items, "provenance":{"host":"api.mavedb.org"}}, module) if items else _no_data(module, {"host":"api.mavedb.org"}, "No MAVE experiments for gene")
+_replace_route("/genetics/mavedb", _m_mavedb)
 
-# ------------------------- Domain 2 (one you flagged) --------------------------------
-# mech-pathways (Reactome AnalysisService)
-async def _m_mech_pathways(symbol: str = Query(...)):
-    module = "mech-pathways"
-    headers = {"Content-Type":"text/plain","Accept":"application/json"}
-    s,c,j = await _fetch_json("https://reactome.org/AnalysisService/identifiers/projection", method="POST", headers=headers, data=symbol)
-    if s != "OK": return _up_err(module, {"host":"reactome.org"}, c, json.dumps(j)[:500])
-    pathways = j.get("pathways") if isinstance(j, dict) else None
-    if not pathways: return _no_data(module, {"host":"reactome.org"}, "No pathways")
-    out = [{"stId":p.get("stId"),"name":p.get("name"),"entities":(p.get("entities",{}) or {}).get("found",0)} for p in pathways[:50]]
-    return _ok({"records": out, "provenance":{"host":"reactome.org"}}, module)
-_replace_route("/mech/pathways", _m_mech_pathways); _alias("/mech-pathways", _m_mech_pathways)
+# lncrna (RNAcentral best-effort; fallback to Europe PMC)
+async def _m_lncrna(symbol: str = Query(...)):
+    module = "genetics-lncrna"
+    # Try RNAcentral gene search (best-effort)
+    s1,c1,j1 = await _fetch_json("https://rnacentral.org/api/v1/rna/", params={"page_size": 20, "gene": symbol, "organism": "Homo sapiens"})
+    records = []
+    if s1 == "OK" and isinstance(j1, dict):
+        for r in j1.get("results", []) or []:
+            if "lncRNA" in str(r.get("rna_type","")):
+                records.append({"urs": r.get("urs"), "rna_type": r.get("rna_type"), "symbol": symbol})
+    if not records:
+        # Fallback: literature
+        q = f'"{symbol}" AND (lncRNA OR "long non-coding RNA") AND human'
+        s2,c2,j2 = await _fetch_json("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={"query": q, "format":"json", "pageSize": 25})
+        if s2 == "OK":
+            records = (((j2 or {}).get("resultList") or {}).get("result") or [])
+            if records:
+                return _ok({"hits": records, "provenance":{"host":"europepmc"}}, module)
+        return _no_data(module, {"hosts":["rnacentral.org","europepmc"]}, "No lncRNA mapping found")
+    return _ok({"records": records, "provenance":{"host":"rnacentral.org"}}, module)
+_replace_route("/genetics/lncrna", _m_lncrna); _alias("/genetics-lncrna", _m_lncrna)
 
+# mirna (RNAcentral miRNA search; fallback to Europe PMC)
+async def _m_mirna(symbol: str = Query(...)):
+    module = "genetics-mirna"
+    s1,c1,j1 = await _fetch_json("https://rnacentral.org/api/v1/rna/", params={"page_size": 25, "gene": symbol, "rna_type": "miRNA", "organism": "Homo sapiens"})
+    records = []
+    if s1 == "OK" and isinstance(j1, dict):
+        for r in j1.get("results", []) or []:
+            if "miRNA" in str(r.get("rna_type","")):
+                records.append({"urs": r.get("urs"), "rna_type": r.get("rna_type"), "symbol": symbol})
+    if not records:
+        q = f'"{symbol}" AND (miRNA OR "microRNA") AND human'
+        s2,c2,j2 = await _fetch_json("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={"query": q, "format":"json", "pageSize": 25})
+        if s2 == "OK":
+            records = (((j2 or {}).get("resultList") or {}).get("result") or [])
+            if records:
+                return _ok({"hits": records, "provenance":{"host":"europepmc"}}, module)
+        return _no_data(module, {"hosts":["rnacentral.org","europepmc"]}, "No miRNA mapping found")
+    return _ok({"records": records, "provenance":{"host":"rnacentral.org"}}, module)
+_replace_route("/genetics/mirna", _m_mirna); _alias("/genetics-mirna", _m_mirna)
+
+# caqtl-lite (composite loopback)
+async def _m_caqtl_lite(symbol: str = Query(...)):
+    module = "genetics-caqtl-lite"
+    try:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+            r1 = await client.get("http://127.0.0.1:8000/genetics/regulatory", params={"symbol": symbol})
+            r2 = await client.get("http://127.0.0.1:8000/genetics/chromatin-contacts", params={"symbol": symbol})
+            data = []
+            if r1.status_code == 200 and (r1.json() or {}).get("status") == "OK":
+                data.extend((r1.json() or {}).get("records", []))
+            if r2.status_code == 200 and (r2.json() or {}).get("status") == "OK":
+                data.extend((r2.json() or {}).get("records", []))
+            if not data: return _no_data(module, {"loopback":True}, "No regulatory/chromatin contacts available")
+            return _ok({"records": data[:50], "provenance":{"composed":["genetics/regulatory","genetics/chromatin-contacts"]}}, module)
+    except Exception as e:
+        return _no_data(module, {"loopback":True}, f"Composite call failed: {e}")
+_replace_route("/genetics/caqtl-lite", _m_caqtl_lite); _alias("/genetics-caqtl-lite", _m_caqtl_lite)
+
+# nmd-inference (context-only; honest OK with context or NO_DATA)
+async def _m_nmd(symbol: str = Query(...)):
+    module = "genetics-nmd-inference"
+    ensg = await _symbol_to_ensg(symbol)
+    if not ensg: return _no_data(module, {"resolver":"ensembl"}, f"Unknown symbol={symbol}")
+    # Pull sQTL context (best-effort)
+    s1,c1,j1 = await _fetch_json(f"https://www.ebi.ac.uk/eqtl/api/genes/{ensg}")
+    # Pull transcript biotypes to see if any are NMD-labeled
+    s2,c2,j2 = await _fetch_json(f"https://rest.ensembl.org/lookup/id/{ensg}", params={"expand":"1"})
+    nmd_flag = False
+    try:
+        for tx in (j2 or {}).get("Transcript", []) or []:
+            if "nonsense_mediated_decay" in str(tx.get("biotype","")).lower():
+                nmd_flag = True; break
+    except Exception:
+        pass
+    payload = {"target": ensg, "has_sqtl_payload": s1 == "OK", "ensembl_tx_checked": bool(j2), "nmd_labeled_transcript": nmd_flag}
+    return _ok({"context_only": payload, "provenance":{"hosts":["www.ebi.ac.uk","rest.ensembl.org"]}}, module)
+_replace_route("/genetics/nmd-inference", _m_nmd); _alias("/genetics-nmd-inference", _m_nmd)
+
+# ase-check, mqtl-coloc, ptm-signal-lite already present above; ensure aliases
+_alias("/genetics-annotation", _m_annotation)
+_alias("/genetics-functional", _m_functional)
+_alias("/genetics-mavedb", _m_mavedb)
+_alias("/genetics-pathogenicity-priors", _m_path_priors)
+_alias("/genetics-intolerance", _m_intolerance)
+_alias("/genetics-rare", _m_rare)
+_alias("/genetics-mendelian", _m_mendelian)
+_alias("/genetics-phewas-human-knockout", _m_phewas_hko)
 # Health for this router module
-def _router_health():
-    return {"ok": True, "version": "2025.10", "patch": True, "router_level": True, "domains":{"genetics":22}}
-
-_replace_route("/healthz", _router_health)
+def _router_health_v2():
+    return {"ok": True, "version": "2025.10", "patch": "genetics-v2", "router_level": True, "domains":{"genetics":22}}
+_replace_route("/healthz", _router_health_v2)
 # ============================================================================
