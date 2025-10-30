@@ -1,5 +1,4 @@
 
-"""
 Targetval Gateway — Router (Full, Extended) for 22 Questions
 Keyless, Live v2 — implements full module registry, HTTP discipline,
 directive literature seek, event-driven iteration hooks, and math synthesis
@@ -22,6 +21,15 @@ Directive Literature Seek and applies math synthesis (internal, scoreless).
 
 from __future__ import annotations
 
+# --- Pydantic-safe typing bootstrap (must be first) ---
+import typing as _typing, builtins as _builtins
+for _n in ("Any","Dict","List","Optional","Union","Tuple","Mapping","Sequence","Literal","Set","Type"):
+    try:
+        setattr(_builtins, _n, getattr(_typing, _n))
+    except Exception:
+        pass
+# ------------------------------------------------------
+
 import asyncio
 import datetime as dt
 import hashlib
@@ -33,7 +41,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 from enum import Enum
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
 # ============================================================================
@@ -51,9 +59,9 @@ HTTP_RETRY_BASE = 0.6
 GLOBAL_CONCURRENCY = 24
 
 # TTL classes (seconds)
-TTL_FAST = 0
-TTL_MODERATE = 0
-TTL_SLOW = 0
+TTL_FAST = 6 * 3600
+TTL_MODERATE = 24 * 3600
+TTL_SLOW = 7 * 24 * 3600
 
 # ----------------------------------------------------------------------------
 # Minimal in-memory TTL cache
@@ -621,7 +629,13 @@ async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[
                         continue
 
                     resp.raise_for_status()
-                    data = resp.json()
+                    # Try JSON; if not JSON but 200, treat as text payload
+                    data = None
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        txt = resp.text
+                        data = {"_text": txt}
                     cc = resp.headers.get("Cache-Control","").lower()
                     if "no-store" not in cc:
                         CACHE.set(ck, data, ttl_seconds=ttl)
@@ -806,9 +820,9 @@ HTTP_RETRY_BASE = 0.6
 GLOBAL_CONCURRENCY = 24
 
 # TTL classes (seconds)
-TTL_FAST = 0
-TTL_MODERATE = 0
-TTL_SLOW = 0
+TTL_FAST = 6 * 3600
+TTL_MODERATE = 24 * 3600
+TTL_SLOW = 7 * 24 * 3600
 
 # ----------------------------------------------------------------------------
 # Minimal in-memory TTL cache
@@ -1376,7 +1390,13 @@ async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[
                         continue
 
                     resp.raise_for_status()
-                    data = resp.json()
+                    # Try JSON; if not JSON but 200, treat as text payload
+                    data = None
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        txt = resp.text
+                        data = {"_text": txt}
                     cc = resp.headers.get("Cache-Control","").lower()
                     if "no-store" not in cc:
                         CACHE.set(ck, data, ttl_seconds=ttl)
@@ -1735,38 +1755,6 @@ async def run_gateway(req: RunRequest) -> RunResponse:
         answers.append(ans)
     final = _final_recommendation(answers)
     return RunResponse(context=ctx, questions=answers, final_recommendation=final)
-
-
-@router.get("/modules", response_model=List[str])
-async def list_modules() -> List[str]:
-    """List all module keys available in this router."""
-    return sorted(list(MODULES.keys()))
-
-@router.get("/module/{key}", response_model=EvidenceEnvelope)
-async def run_single_module(
-    key: str,
-    gene_symbol: str | None = Query(None),
-    ensembl_id: str | None = Query(None),
-    uniprot_id: str | None = Query(None),
-    trait_efo: str | None = Query(None),
-    trait_label: str | None = Query(None),
-    rsid: str | None = Query(None),
-    region: str | None = Query(None),
-    strict_human: bool = Query(True),
-) -> EvidenceEnvelope:
-    """Execute one module live with the provided context."""
-    ctx = {
-        "hgnc": gene_symbol or "",
-        "ensg": ensembl_id or "",
-        "uniprot": uniprot_id or "",
-        "efo": trait_efo or "",
-        "trait_label": trait_label or "",
-        "rsid": rsid or "",
-        "region": region or "",
-        "strict_human": bool(strict_human),
-    }
-    return await run_module(key, ctx)
-
 
 
 
