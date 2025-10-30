@@ -210,7 +210,6 @@ def _adaptive_retry_base(host: str) -> float:
     return base
 
 
-
 _host_semaphores: Dict[str, asyncio.Semaphore] = {}
 _global_semaphore = asyncio.Semaphore(GLOBAL_CONCURRENCY)
 
@@ -219,7 +218,7 @@ def _host_from_url(url: str) -> str:
 
 def _get_host_sem(url: str) -> asyncio.Semaphore:
     host = _host_from_url(url)
-    # Derive allowlist lazily from module registry to avoid drift
+    # Derive allowlist lazily from module registry to avoid duplication/drift
     global HOST_ALLOW
     if not HOST_ALLOW:
         try:
@@ -283,7 +282,13 @@ class EnvelopeContext(BaseModel):
     qtl_type: str | None = None  # cis-QTL / trans-QTL
     qtl_stage: str | None = None  # E0..E6
 
-\1
+class EvidenceEnvelope(BaseModel):
+    module: str
+    context: EnvelopeContext
+    records: List[Dict[str, Any]] = []
+    edges: List[Edge] = []
+    provenance: Provenance = Field(default_factory=Provenance)
+    notes: List[str] = []
     status: EvidenceStatus = EvidenceStatus.OK
     error: Optional[str] = None
 
@@ -542,6 +547,760 @@ def _cache_key(url: str, method: str, params: Dict[str, Any], body: Any) -> str:
             m.update(json.dumps(body, sort_keys=True).encode())
     return m.hexdigest()
 
+async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[str, Any] | None = None, json_body: Any | None = None, ttl: Optional[int]=None) -> Dict[str, Any]:
+    params = params or {}
+    ttl = ttl or module.ttl
+    ck = _cache_key(url, method, params, json_body)
+    cached = CACHE.get(ck)
+    if cached is not None:
+        return cached
+
+    host = _host_from_url(url)
+    if _cb_is_open(host):
+        raise HTTPException(status_code=503, detail=f"Circuit open for host: {host}")
+
+    limits = _get_host_limits(host)
+    sem = _get_host_sem(url)
+    retry_attempts = int(limits.get("retry_attempts", HTTP_RETRY_ATTEMPTS))
+    base = _adaptive_retry_base(host)
+
+    last_rate_limited = False
+    async with _global_semaphore, sem:
+        attempt = 0
+        while True:
+            try:
+                timeout = httpx.Timeout(
+                    connect=float(limits.get("connect_timeout", HTTP_CONNECT_TIMEOUT)),
+                    read=float(limits.get("read_timeout", HTTP_READ_TIMEOUT)),
+                    write=float(limits.get("write_timeout", HTTP_WRITE_TIMEOUT)),
+                )
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    wants_stream = bool(module.primary.get("stream", False)) or str(params.get("stream","")).lower() in {"1","true","yes"}
+                    if wants_stream and method.upper() == "GET":
+                        async with client.stream("GET", url, params=params) as resp:
+                            if resp.status_code == 429 and attempt < retry_attempts:
+                                last_rate_limited = True
+                                ra = resp.headers.get("Retry-After")
+                                if ra and str(ra).isdigit():
+                                    await asyncio.sleep(float(ra))
+                                else:
+                                    await asyncio.sleep(base * (2 ** attempt))
+                                attempt += 1
+                                continue
+                            resp.raise_for_status()
+                            items = []
+                            async for line in resp.aiter_lines():
+                                if not line:
+                                    continue
+                                try:
+                                    items.append(json.loads(line))
+                                except Exception:
+                                    continue
+                            data = {"ndjson": items}
+                            cc = resp.headers.get("Cache-Control","").lower()
+                            if "no-store" not in cc:
+                                CACHE.set(ck, data, ttl_seconds=ttl)
+                            _cb_on_success(host)
+                            return data
+                    else:
+                        if method.upper() == "GET":
+                            resp = await client.get(url, params=params)
+                        elif method.upper() == "POST":
+                            resp = await client.post(url, json=json_body, params=params)
+                        else:
+                            resp = await client.request(method, url, params=params, json=json_body)
+
+                    if resp.status_code == 429 and attempt < retry_attempts:
+                        last_rate_limited = True
+                        ra = resp.headers.get("Retry-After")
+                        if ra and str(ra).isdigit():
+                            await asyncio.sleep(float(ra))
+                        else:
+                            await asyncio.sleep(base * (2 ** attempt))
+                        attempt += 1
+                        continue
+
+                    resp.raise_for_status()
+                    data = resp.json()
+                    cc = resp.headers.get("Cache-Control","").lower()
+                    if "no-store" not in cc:
+                        CACHE.set(ck, data, ttl_seconds=ttl)
+                    _cb_on_success(host)
+                    return data
+            except Exception as e:
+                was_429 = isinstance(e, httpx.HTTPStatusError) and getattr(e, "response", None) is not None and getattr(e.response, "status_code", None) == 429
+                _cb_on_failure(host, was_429=was_429 or last_rate_limited)
+                if attempt < retry_attempts:
+                    await asyncio.sleep(base * (2 ** attempt))
+                    attempt += 1
+                    continue
+                for fb in module.fallbacks:
+                    try:
+                        data = await _fetch(module, fb["url"], fb.get("method","GET"), {}, None, ttl)
+                        return data
+                    except Exception:
+                        continue
+                detail = f"{module.key} fetch error from {url}: {e}"
+                if last_rate_limited:
+                    raise HTTPException(status_code=429, detail=detail)
+                raise HTTPException(status_code=502, detail=detail)
+
+
+
+def build_params(module_key: str, ctx: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+    """Return (params, json_body) shaped for the given module and context."""
+    params: Dict[str, Any] = {}
+    body: Any = None
+
+    if module_key in {"genetics-l2g","genetics-coloc","genetics-pqtl","genetics-mqtl-coloc"}:
+        # GraphQL handled elsewhere
+        pass
+    elif module_key == "genetics-mr":
+        params = {"exposure": ctx.get("efo") or ctx.get("ensg") or ctx.get("hgnc"), "outcome": ctx.get("efo")}
+    elif module_key in {"genetics-annotation","genetics-nmd-inference"}:
+        v = ctx.get("rsid") or ctx.get("region")
+        if v:
+            body = {"variants": [v]}
+    elif module_key == "genetics-sqtl":
+        params = {"gencodeId": ctx.get("ensg"), "tissueSiteDetailId": ctx.get("tissue")}
+    elif module_key in {"genetics-regulatory","genetics-chromatin-contacts","genetics-3d-maps"}:
+        # ENCODE/4DN search
+        params = {"searchTerm": ctx.get("hgnc") or ctx.get("ensg") or ctx.get("region"), "format":"json"}
+    elif module_key == "genetics-rare":
+        params = {"db":"clinvar","term": (ctx.get("hgnc") or ctx.get("ensg"))}
+    elif module_key == "genetics-consortia-summary":
+        params = {"q": ctx.get("efo") or ctx.get("trait_label"), "size": 20}
+    elif module_key == "genetics-ase-check":
+        q = f'("{ctx.get("hgnc") or ctx.get("ensg")}") AND (ASE OR allele-specific)'
+        params = {"query": q, "format": "json", "pageSize": 25}
+    elif module_key == "genetics-ptm-signal-lite":
+        params = {"query": f'accession:{ctx.get("uniprot")} AND (annotation:(type:PTM))'}
+    elif module_key in {"genetics-lncrna","genetics-mirna"}:
+        params = {"ids": ctx.get("hgnc") or ctx.get("ensg") or ctx.get("uniprot")}
+    elif module_key.startswith("mech-") and "omnipath" in MODULES[module_key].primary["url"]:
+        params = {"genesymbols": ctx.get("hgnc"), "fields": "is_directed,is_stimulation"}
+    elif module_key == "mech-ppi":
+        params = {"identifiers": ctx.get("hgnc"), "species": 9606}
+    elif module_key == "mech-pathways":
+        body = {"interactors":"true"}  # token step; downstream calls omitted
+    elif module_key in {"assoc-perturb","assoc-spatial","tract-immunogenicity"}:
+        q = f'("{ctx.get("hgnc") or ctx.get("ensg")}") AND ("{ctx.get("trait_label") or ctx.get("efo")}")'
+        params = {"query": q, "format": "json", "pageSize": 50}
+    elif module_key == "perturb-crispr-screens":
+        params = {"searchNames": ctx.get("hgnc"), "format":"json"}
+    elif module_key == "perturb-lincs-signatures":
+        params = {"q": ctx.get("hgnc")}
+    elif module_key == "perturb-signature-enrichment":
+        params = {"keyword": ctx.get("hgnc")}
+    elif module_key == "perturb-connectivity":
+        params = {"sig": ctx.get("hgnc")}
+    elif module_key == "perturb-perturbseq-encode":
+        params = {"searchTerm": ctx.get("hgnc") or ctx.get("ensg"), "type":"Annotation","format":"json"}
+    elif module_key == "expr-baseline":
+        params = {"geneId": ctx.get("ensg") or ctx.get("hgnc")}
+    elif module_key in {"assoc-sc","sc-hubmap"}:
+        params = {"q": ctx.get("hgnc") or ctx.get("ensg")}
+    elif module_key == "expr-localization":
+        params = {"query": ctx.get("uniprot") or ctx.get("hgnc"), "fields":"cc_subcellular_location"}
+    elif module_key == "assoc-bulk-prot":
+        params = {"accession": ctx.get("uniprot")}
+    elif module_key == "assoc-omics-phosphoproteomics":
+        params = {"q": ctx.get("uniprot") or ctx.get("hgnc"), "pageSize": 25}
+    elif module_key == "expr-inducibility":
+        params = {"geneQuery": ctx.get("ensg") or ctx.get("hgnc")}
+    elif module_key == "assoc-bulk-rna":
+        params = {"db":"gds","term": (ctx.get("hgnc") or ctx.get("ensg"))}
+    elif module_key == "assoc-metabolomics":
+        params = {"study_type":"DISEASE"}
+    elif module_key == "assoc-proteomics":
+        params = {"name": ctx.get("hgnc")}
+    elif module_key.startswith("tract-") and module_key != "tract-ligandability-oligo":
+        params = {"query": ctx.get("uniprot") or ctx.get("hgnc")}
+    elif module_key == "tract-ligandability-oligo":
+        v = ctx.get("rsid") or ctx.get("region")
+        if v:
+            body = {"variants": [v]}
+    elif module_key == "tract-drugs":
+        params = {"molecule_chembl_id__icontains": ctx.get("hgnc")}
+    elif module_key == "perturb-drug-response":
+        params = {"target": ctx.get("hgnc")}
+    elif module_key in {"clin-safety","clin-rwe"}:
+        params = {"search": ctx.get("hgnc") or ctx.get("trait_label"), "count":"10"}
+    elif module_key == "clin-on-target-ae-prior":
+        params = {"search": ctx.get("hgnc")}
+    elif module_key in {"clin-endpoints","clin-feasibility","clin-pipeline"}:
+        params = {"cond": ctx.get("trait_label") or ctx.get("efo"), "term": ctx.get("hgnc")}
+    elif module_key in {"clin-biomarker-fit"}:
+        params = {"q": ctx.get("trait_label") or ctx.get("efo")}
+    elif module_key.startswith("comp-"):
+        params = {"q": ctx.get("hgnc") or ctx.get("trait_label") or ctx.get("ensg")}
+    return params, body
+
+# ============================================================================
+# Module runner
+# ============================================================================
+
+async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
+    if module_key not in MODULES:
+        raise HTTPException(status_code=400, detail=f"Unknown module: {module_key}")
+    mod = MODULES[module_key]
+    prov = Provenance(sources=[], query=ctx, module_order=[module_key])
+    env = EvidenceEnvelope(module=module_key, context=EnvelopeContext(
+        gene_id=ctx.get("ensg") or ctx.get("uniprot") or ctx.get("hgnc"),
+        target=ctx.get("hgnc"),
+        trait_id=ctx.get("efo") or ctx.get("trait_label"),
+        variant_id=ctx.get("rsid") or ctx.get("region"),
+        qtl_stage=mod.qtl_stage
+    ))
+    try:
+        if mod.family == "graphql":
+            template_key = mod.primary.get("template")
+            gql = GQL_TEMPLATES.get(template_key, "")
+            variables = {"ensg": ctx.get("ensg") or "", "efo": ctx.get("efo") or None}
+            data = await _fetch(mod, mod.primary["url"], method="POST", json_body={"query": gql, "variables": variables})
+        else:
+            params, body = build_params(module_key, ctx)
+            data = await _fetch(mod, mod.primary["url"], method=mod.primary.get("method","GET"), params=params, json_body=body)
+
+        env.records = [{"raw": data}]
+        env.edges = [Edge(kind="module_result", src=module_key, dst=env.context.gene_id, meta={"module": module_key, "stage": mod.qtl_stage})]
+        prov.sources.append(mod.primary["url"])
+        env.provenance = prov
+        env.status = EvidenceStatus.NO_DATA if _is_no_data(data) else EvidenceStatus.OK
+        return env
+    except HTTPException as e:
+        # Attempt fallbacks
+        for fb in mod.fallbacks:
+            try:
+                data = await _fetch(mod, fb["url"], method=fb.get("method","GET"), params={}, json_body=None)
+                env.records = [{"raw": data}]
+                env.edges = [Edge(kind="module_result", src=module_key, dst=env.context.gene_id, meta={"module": module_key, "fallback": True})]
+                prov.sources.append(fb["url"])
+                env.provenance = prov
+                env.status = EvidenceStatus.NO_DATA if _is_no_data(data) else EvidenceStatus.OK
+                return env
+            except Exception:
+                continue
+        if hasattr(prov, "warnings"):
+            prov.warnings.append(str(e))
+        env.provenance = prov
+        env.status = EvidenceStatus.RATE_LIMITED if getattr(e, "status_code", None) == 429 else EvidenceStatus.UPSTREAM_ERROR
+        env.error = str(e)
+        env.records = []
+        return env
+
+
+
+# ============================================================================
+# Router & Runtime Policy (per config)
+# ============================================================================
+
+router = APIRouter(prefix="/targetval", tags=["Targetval Gateway (Full 22Q)"])
+
+HTTP_CONNECT_TIMEOUT = 6.0
+HTTP_TOTAL_TIMEOUT = 12.0
+HTTP_READ_TIMEOUT = 12.0
+HTTP_WRITE_TIMEOUT = 12.0
+HTTP_RETRY_ATTEMPTS = 5
+HTTP_RETRY_BASE = 0.6
+GLOBAL_CONCURRENCY = 24
+
+# TTL classes (seconds)
+TTL_FAST = 6 * 3600
+TTL_MODERATE = 24 * 3600
+TTL_SLOW = 7 * 24 * 3600
+
+# ----------------------------------------------------------------------------
+# Minimal in-memory TTL cache
+# ----------------------------------------------------------------------------
+
+class _TTLCache:
+    def __init__(self):
+        self._store: Dict[str, Tuple[float, Any]] = {}
+
+    def get(self, key: str) -> Optional[Any]:
+        v = self._store.get(key)
+        if not v:
+            return None
+        exp, data = v
+        if dt.datetime.now().timestamp() > exp:
+            self._store.pop(key, None)
+            return None
+        return data
+
+    def set(self, key: str, data: Any, ttl_seconds: int) -> None:
+        self._store[key] = (dt.datetime.now().timestamp() + ttl_seconds, data)
+
+CACHE = _TTLCache()
+
+# ----------------------------------------------------------------------------
+# Allowlist (strict). Any non-listed host is denied at request time.
+# ----------------------------------------------------------------------------
+
+HOST_ALLOW = {
+    # OpenTargets / OpenGWAS / GWAS Catalog
+    "api.opentargets.io",
+    "gwas-api.mrcieu.ac.uk",
+    "www.ebi.ac.uk",
+    "www.ebi.ac.uk",
+    "rest.ensembl.org",
+    # ENCODE / 4DN / UCSC
+    "www.encodeproject.org",
+    "data.4dnucleome.org",
+    # STRING / Reactome / SIGNOR / OmniPath
+    "string-db.org",
+    "reactome.org",
+    "signor.uniroma2.it",
+    "www.omnipathdb.org",
+    # UniProt / PDBe / AlphaFold
+    "rest.uniprot.org",
+    "alphafold.ebi.ac.uk",
+    "www.ebi.ac.uk",
+    # PRIDE / ProteomicsDB / PDC
+    "www.ebi.ac.uk",
+    "www.proteomicsdb.org",
+    "pdc.cancer.gov",
+    # Europe PMC / PubMed / Crossref / Unpaywall / OpenAlex / SemanticScholar / PubTator3
+    "www.ebi.ac.uk",
+    "eutils.ncbi.nlm.nih.gov",
+    "api.crossref.org",
+    "api.unpaywall.org",
+    "api.openalex.org",
+    "api.semanticscholar.org",
+    "www.ncbi.nlm.nih.gov",
+    # LINCS / iLINCS
+    "lincsportal.ccs.miami.edu",
+    "www.ilincs.org",
+    # CellxGene / HCA / HuBMAP
+    "api.cellxgene.cziscience.com",
+    "azul.data.humancellatlas.org",
+    "data.humancellatlas.org",
+    "search.api.hubmapconsortium.org",
+    "hubmapconsortium.org",
+    # ArrayExpress / BioStudies / Expression Atlas
+    "www.ebi.ac.uk",
+    # IEDB / IPD-IMGT
+    "www.iedb.org",
+    "tools-api.iedb.org",
+    "www.ebi.ac.uk",
+    "www.ipd-imgt.org",
+    # DrugCentral / ChEMBL / BindingDB / PubChem / STITCH / Pharos
+    "drugcentral.org",
+    "www.ebi.ac.uk",
+    "www.bindingdb.org",
+    "pubchem.ncbi.nlm.nih.gov",
+    "stitch.embl.de",
+    "pharos.nih.gov",
+    # PharmacoDB / CellMiner
+    "api.pharmacodb.net",
+    "discover.nci.nih.gov",
+    # FAERS
+    "api.fda.gov",
+    # ClinicalTrials.gov / WHO ICTRP
+    "clinicaltrials.gov",
+    "www.who.int",
+    # HPO / Monarch
+    "hpo.jax.org",
+    "api.monarchinitiative.org",
+    # PatentsView
+    "api.patentsview.org",
+    # RNAcentral
+    "rnacentral.org",
+}
+
+# ----------------------------------------------------------------------------
+# Host-specific overrides & circuit breaker (simple)
+# ----------------------------------------------------------------------------
+HOST_OVERRIDES: Dict[str, Dict[str, Any]] = {}
+try:
+    _env_ho = os.getenv("HOST_OVERRIDES_JSON")
+    if _env_ho:
+        HOST_OVERRIDES.update(json.loads(_env_ho))
+except Exception:
+    pass
+
+_host_state: Dict[str, Dict[str, Any]] = {}
+CB_FAILURE_THRESHOLD = int(os.getenv("CB_FAILURE_THRESHOLD", "5"))
+CB_OPEN_SECONDS = float(os.getenv("CB_OPEN_SECONDS", "30"))
+
+def _get_host_limits(host: str) -> Dict[str, Any]:
+    limits = {
+        "semaphore": 4,
+        "connect_timeout": HTTP_CONNECT_TIMEOUT,
+        "read_timeout": HTTP_READ_TIMEOUT,
+        "write_timeout": HTTP_WRITE_TIMEOUT,
+        "retry_attempts": HTTP_RETRY_ATTEMPTS,
+    }
+    ov = HOST_OVERRIDES.get(host) or {}
+    limits.update({k: v for k, v in ov.items() if v is not None})
+    return limits
+
+def _now_ts() -> float:
+    return dt.datetime.now().timestamp()
+
+def _cb_is_open(host: str) -> bool:
+    st = _host_state.get(host) or {}
+    return st.get("open_until", 0) > _now_ts()
+
+def _cb_on_success(host: str) -> None:
+    st = _host_state.setdefault(host, {})
+    st["fails"] = 0
+    st["recent_429"] = max(0, int(st.get("recent_429", 0)) - 1)
+    st["open_until"] = 0
+
+def _cb_on_failure(host: str, was_429: bool=False) -> None:
+    st = _host_state.setdefault(host, {})
+    st["fails"] = int(st.get("fails", 0)) + 1
+    if was_429:
+        st["recent_429"] = int(st.get("recent_429", 0)) + 1
+    if st["fails"] >= CB_FAILURE_THRESHOLD:
+        st["open_until"] = _now_ts() + CB_OPEN_SECONDS
+
+def _adaptive_retry_base(host: str) -> float:
+    base = HTTP_RETRY_BASE
+    st = _host_state.get(host) or {}
+    r429 = int(st.get("recent_429", 0))
+    if r429 > 0:
+        base = base * min(3.0, 1.0 + 0.5 * r429)
+    return base
+
+
+_host_semaphores: Dict[str, asyncio.Semaphore] = {}
+_global_semaphore = asyncio.Semaphore(GLOBAL_CONCURRENCY)
+
+def _host_from_url(url: str) -> str:
+    return re.sub(r"^https?://", "", url).split("/")[0]
+
+def _get_host_sem(url: str) -> asyncio.Semaphore:
+    host = _host_from_url(url)
+    # Derive allowlist lazily from module registry to avoid duplication/drift
+    global HOST_ALLOW
+    if not HOST_ALLOW:
+        try:
+            derived = set()
+            for _m in MODULES.values():
+                try:
+                    if isinstance(_m.primary, dict):
+                        u = _m.primary.get("url","")
+                        if u:
+                            derived.add(_host_from_url(u))
+                    for fb in (_m.fallbacks or []):
+                        u2 = fb.get("url","")
+                        if u2:
+                            derived.add(_host_from_url(u2))
+                except Exception:
+                    continue
+            HOST_ALLOW = derived
+        except Exception:
+            pass
+    if host not in HOST_ALLOW:
+        raise HTTPException(status_code=400, detail=f"Host not allowlisted: {host}")
+    limits = _get_host_limits(host)
+    if host not in _host_semaphores:
+        _host_semaphores[host] = asyncio.Semaphore(int(limits.get("semaphore", 4)))
+    return _host_semaphores[host]
+
+# ============================================================================
+# Schemas (Pydantic v2 style)
+# ============================================================================
+
+
+class EvidenceStatus(str, Enum):
+    OK = "OK"
+    NO_DATA = "NO_DATA"
+    UPSTREAM_ERROR = "UPSTREAM_ERROR"
+    RATE_LIMITED = "RATE_LIMITED"
+
+class Edge(BaseModel):
+
+    kind: str
+    src: str | None = None
+    dst: str | None = None
+    meta: Dict[str, Any] = {}
+
+class Provenance(BaseModel):
+    sources: List[str] = []
+    query: Dict[str, Any] = {}
+    accessed_at: str = Field(default_factory=lambda: dt.datetime.utcnow().isoformat())
+    version: str = "v2"
+    module_order: List[str] = []
+    warnings: List[str] = []
+
+class EnvelopeContext(BaseModel):
+    gene_id: str | None = None
+    target: str | None = None
+    trait_id: str | None = None
+    variant_id: str | None = None
+    tissue: str | None = None
+    cell_type: str | None = None
+    assay: str | None = None
+    qtl_type: str | None = None  # cis-QTL / trans-QTL
+    qtl_stage: str | None = None  # E0..E6
+
+class EvidenceEnvelope(BaseModel):
+    module: str
+    context: EnvelopeContext
+    records: List[Dict[str, Any]] = []
+    edges: List[Edge] = []
+    provenance: Provenance = Field(default_factory=Provenance)
+    notes: List[str] = []
+    status: EvidenceStatus = EvidenceStatus.OK
+    error: Optional[str] = None
+
+class LitEvidence(BaseModel):
+    query: str
+    hits: List[Dict[str, Any]]
+    tags: Dict[str, List[str]]
+    errors: List[str] = []
+
+class QuestionAnswer(BaseModel):
+    question_id: int
+    title: str
+    envelopes: List[EvidenceEnvelope]
+    literature: LitEvidence | None = None
+    math_summary: Dict[str, Any] | None = None
+    skeptic_view: List[str] = []
+    killer_experiments: List[str] = []
+
+class RunRequest(BaseModel):
+    gene_symbol: str | None = None
+    ensembl_id: str | None = None
+    uniprot_id: str | None = None
+    trait_efo: str | None = None
+    trait_label: str | None = None
+    rsid: str | None = None
+    region: str | None = None
+    run_questions: List[int] | None = None  # default 1..22
+    strict_human: bool = True
+
+class FinalRecommendation(BaseModel):
+    decision: str
+    why: List[str]
+    modality_plan: Dict[str, Any]
+    pd_plan: Dict[str, Any]
+    risk_register: Dict[str, Any]
+    mos_plan: Dict[str, Any]
+    fastest_pom: Dict[str, Any]
+    next_experiments: List[str]
+    differentiation: Dict[str, Any] | None = None
+
+class RunResponse(BaseModel):
+    context: Dict[str, Any]
+    questions: List[QuestionAnswer]
+    final_recommendation: FinalRecommendation
+
+# ============================================================================
+# Identifier expansion & Query Planner
+# ============================================================================
+
+def _normalize_gene(req: RunRequest) -> Dict[str, str]:
+    return {"hgnc": req.gene_symbol or "", "ensg": req.ensembl_id or "", "uniprot": req.uniprot_id or ""}
+
+def _normalize_trait(req: RunRequest) -> Dict[str, str]:
+    return {"efo": req.trait_efo or "", "trait_label": req.trait_label or ""}
+
+def _normalize_variant(req: RunRequest) -> Dict[str, str]:
+    return {"rsid": req.rsid or "", "region": req.region or ""}
+
+# ============================================================================
+# Module registry (full set per config)
+# ============================================================================
+
+@dataclass
+class ModuleCfg:
+    key: str
+    family: str         # graphql | rest
+    primary: Dict[str, Any]
+    fallbacks: List[Dict[str, Any]]
+    ttl: int = TTL_MODERATE
+    qtl_stage: Optional[str] = None
+
+# Endpoint bases
+OPEN_TARGETS_GQL = "https://api.opentargets.io/v3/platform/graphql"
+OPENGWAS_BASE = "https://gwas-api.mrcieu.ac.uk"
+ENSEMBL_VEP = "https://rest.ensembl.org/vep/human/region"
+ENCODE_BASE = "https://www.encodeproject.org"
+FOURDN_BASE = "https://data.4dnucleome.org"
+GTEX_BASE = "https://gtexportal.org/rest/v1"
+STRING_BASE = "https://string-db.org/api"
+REACTOME = "https://reactome.org/AnalysisService"
+OMNIPATH = "https://www.omnipathdb.org/interactions"
+SIGNOR = "https://signor.uniroma2.it/ws"
+UNIPROT = "https://rest.uniprot.org"
+ALPHAFOLD = "https://alphafold.ebi.ac.uk/api"
+PDBe = "https://www.ebi.ac.uk/pdbe/api"
+PRIDE = "https://www.ebi.ac.uk/pride/ws/archive"
+PROTEOMICSDB = "https://www.proteomicsdb.org/proxy"
+PDC = "https://pdc.cancer.gov/graphql"
+ILINCS = "https://www.ilincs.org/api"
+LINCS_LDP3 = "https://lincsportal.ccs.miami.edu/api"
+EPMC_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+PUBMED_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+CROSSREF = "https://api.crossref.org/works"
+UNPAYWALL = "https://api.unpaywall.org/v2"
+OPENALEX = "https://api.openalex.org/works"
+SEM_SCH = "https://api.semanticscholar.org/graph/v1/paper"
+PUBTATOR3 = "https://www.ncbi.nlm.nih.gov/research/pubtator3/publications/export/biocjson"
+FAERS = "https://api.fda.gov/drug/event.json"
+DRUGCENTRAL = "https://drugcentral.org/api"
+CLINTRIALS = "https://clinicaltrials.gov/api/v2/studies"
+ICTRP = "https://www.who.int/clinical-trials-registry-platform"
+HPO = "https://hpo.jax.org/api/hpo"
+MONARCH = "https://api.monarchinitiative.org/api"
+PATENTSVIEW = "https://api.patentsview.org/patents"
+GLYGEN = "https://glygen.org/api"
+PHAROS = "https://pharos.nih.gov/api/graphql"
+BINDINGDB = "https://www.bindingdb.org"
+CHEMBL = "https://www.ebi.ac.uk/chembl/api/data"
+PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+STITCH = "https://stitch.embl.de"
+RNCENTRAL = "https://rnacentral.org/api"
+
+def _mod(key, family, primary, fallbacks, ttl=TTL_MODERATE, qtl_stage=None) -> ModuleCfg:
+    return ModuleCfg(key=key, family=family, primary=primary, fallbacks=fallbacks, ttl=ttl, qtl_stage=qtl_stage)
+
+# Selected GraphQL templates
+GQL_TEMPLATES = {
+    "genetics-l2g": """
+query L2G($ensg: String!, $efo: String) {
+  gene(ensemblId: $ensg) {
+    id
+    geneticAssociations(efos: [$efo]) {
+      rows { id, score, studyId, efoId }
+    }
+  }
+}""",
+    "genetics-coloc": """
+query Coloc($ensg: String!, $efo: String) {
+  gene(ensemblId: $ensg) {
+    id
+    colocalisations(efos: [$efo]) {
+      rows { locusId, efoId, pp4, tissue, qtlType }
+    }
+  }
+}""",
+    "genetics-pqtl": """
+query PQTL($ensg: String!) {
+  gene(ensemblId: $ensg) { id pqtl { rows { studyId, efoId, pp4 } } }
+}""",
+    "genetics-mqtl-coloc": """
+query MQTL($ensg: String!, $efo: String) {
+  gene(ensemblId: $ensg) {
+    id
+    metaboliteColoc(efos: [$efo]) { rows { metabolite, pp4, studyId } }
+  }
+}""",
+}
+
+MODULES: Dict[str, ModuleCfg] = {}
+
+def _register_modules():
+    M = MODULES
+    # --- Genetics & QTL ---
+    M["genetics-l2g"] = _mod("genetics-l2g","graphql",{"url":OPEN_TARGETS_GQL,"template":"genetics-l2g"},[{"url":"https://www.ebi.ac.uk/gwas/rest/api"}],TTL_FAST,"E6")
+    M["genetics-coloc"] = _mod("genetics-coloc","graphql",{"url":OPEN_TARGETS_GQL,"template":"genetics-coloc"},[{"url":OPENGWAS_BASE}],TTL_FAST,"E1/E6")
+    M["genetics-mr"] = _mod("genetics-mr","rest",{"url":f"{OPENGWAS_BASE}/mr","method":"GET"},[{"url":f"{OPENGWAS_BASE}/"}],TTL_FAST,"E1/E6")
+    M["genetics-chromatin-contacts"] = _mod("genetics-chromatin-contacts","rest",{"url":f"{ENCODE_BASE}/search/","method":"GET"},[{"url":FOURDN_BASE}],TTL_MODERATE,"E0")
+    M["genetics-3d-maps"] = _mod("genetics-3d-maps","rest",{"url":f"{FOURDN_BASE}/search/","method":"GET"},[{"url":f"{ENCODE_BASE}/search/"}],TTL_MODERATE,"E0")
+    M["genetics-regulatory"] = _mod("genetics-regulatory","rest",{"url":f"{ENCODE_BASE}/search/","method":"GET"},[{"url":"https://www.ebi.ac.uk/eqtl/api"}],TTL_MODERATE,"E0")
+    M["genetics-sqtl"] = _mod("genetics-sqtl","rest",{"url":f"{GTEX_BASE}/association/singleTissueEqtl","method":"GET"},[{"url":"https://www.ebi.ac.uk/eqtl/api"}],TTL_FAST,"E2")
+    M["genetics-pqtl"] = _mod("genetics-pqtl","graphql",{"url":OPEN_TARGETS_GQL,"template":"genetics-pqtl"},[{"url":OPENGWAS_BASE}],TTL_FAST,"E3")
+    M["genetics-annotation"] = _mod("genetics-annotation","rest",{"url":ENSEMBL_VEP,"method":"POST"},[{"url":"https://cadd.gs.washington.edu/api"}],TTL_MODERATE,"E0/E2")
+    M["genetics-pathogenicity-priors"] = _mod("genetics-pathogenicity-priors","rest",{"url":"https://gnomad.broadinstitute.org/api","method":"POST"},[{"url":"https://cadd.gs.washington.edu/api"}],TTL_SLOW,"E0")
+    M["genetics-intolerance"] = _mod("genetics-intolerance","rest",{"url":"https://gnomad.broadinstitute.org/api","method":"POST"},[],TTL_SLOW,"E0")
+    M["genetics-rare"] = _mod("genetics-rare","rest",{"url":f"{PUBMED_EUTILS}/esearch.fcgi","method":"GET"},[{"url":"https://myvariant.info/v1"}],TTL_SLOW,"E6")
+    M["genetics-mendelian"] = _mod("genetics-mendelian","rest",{"url":"https://clinicalgenome.org/graphql","method":"POST"},[],TTL_SLOW,"E6")
+    M["genetics-phewas-human-knockout"] = _mod("genetics-phewas-human-knockout","rest",{"url":f"{OPENGWAS_BASE}/phew","method":"GET"},[{"url":"https://www.ebi.ac.uk/gwas/rest/api"}],TTL_FAST,"E6")
+    M["genetics-functional"] = _mod("genetics-functional","rest",{"url":"https://webservice.thebiogrid.org/ORCS","method":"GET"},[{"url":EPMC_SEARCH}],TTL_MODERATE,"E4")
+    M["genetics-mavedb"] = _mod("genetics-mavedb","rest",{"url":"https://api.mavedb.org/graphql","method":"POST"},[],TTL_SLOW,"E4")
+    M["genetics-consortia-summary"] = _mod("genetics-consortia-summary","rest",{"url":f"{OPENGWAS_BASE}/studies","method":"GET"},[],TTL_MODERATE,"E6")
+    M["genetics-caqtl-lite"] = _mod("genetics-caqtl-lite","rest",{"url":f"{ENCODE_BASE}/search/","method":"GET"},[],TTL_MODERATE,"E0")
+    M["genetics-nmd-inference"] = _mod("genetics-nmd-inference","rest",{"url":ENSEMBL_VEP,"method":"POST"},[],TTL_MODERATE,"E2")
+    M["genetics-mqtl-coloc"] = _mod("genetics-mqtl-coloc","graphql",{"url":OPEN_TARGETS_GQL,"template":"genetics-mqtl-coloc"},[{"url":OPENGWAS_BASE}],TTL_FAST,"E5")
+    M["genetics-ase-check"] = _mod("genetics-ase-check","rest",{"url":EPMC_SEARCH,"method":"GET"},[],TTL_MODERATE,"E1")
+    M["genetics-ptm-signal-lite"] = _mod("genetics-ptm-signal-lite","rest",{"url":f"{UNIPROT}/uniprotkb/search","method":"GET"},[{"url":PRIDE}],TTL_MODERATE,"E3")
+    M["genetics-lncrna"] = _mod("genetics-lncrna","rest",{"url":f"{RNCENTRAL}/v1/rna","method":"GET"},[{"url":EPMC_SEARCH}],TTL_MODERATE,"E0/E1/E2")
+    M["genetics-mirna"] = _mod("genetics-mirna","rest",{"url":f"{RNCENTRAL}/v1/rna","method":"GET"},[{"url":EPMC_SEARCH}],TTL_MODERATE,"E2")
+
+    # --- Mechanism & Perturbation ---
+    M["mech-ppi"] = _mod("mech-ppi","rest",{"url":f"{STRING_BASE}/json/network","method":"GET"},[{"url":"https://www.ebi.ac.uk/Tools/webservices/psicquic"}],TTL_MODERATE,"E4")
+    M["mech-pathways"] = _mod("mech-pathways","rest",{"url":f"{REACTOME}/token","method":"POST"},[{"url":"https://www.pathwaycommons.org/pc2"}],TTL_MODERATE,"E4/E5")
+    M["mech-ligrec"] = _mod("mech-ligrec","rest",{"url":OMNIPATH,"method":"GET"},[{"url":"https://www.guidetopharmacology.org"}],TTL_MODERATE,"E4")
+    M["biology-causal-pathways"] = _mod("biology-causal-pathways","rest",{"url":f"{REACTOME}/token","method":"POST"},[{"url":SIGNOR}],TTL_MODERATE,"E4/E5")
+    M["mech-directed-signaling"] = _mod("mech-directed-signaling","rest",{"url":OMNIPATH,"method":"GET"},[],TTL_MODERATE,"E4")
+    M["mech-kinase-substrate"] = _mod("mech-kinase-substrate","rest",{"url":OMNIPATH,"method":"GET"},[],TTL_MODERATE,"E3/E4")
+    M["mech-tf-target"] = _mod("mech-tf-target","rest",{"url":OMNIPATH,"method":"GET"},[],TTL_MODERATE,"E1/E4")
+    M["mech-mirna-target"] = _mod("mech-mirna-target","rest",{"url":OMNIPATH,"method":"GET"},[],TTL_MODERATE,"E2/E4")
+    M["mech-complexes"] = _mod("mech-complexes","rest",{"url":"https://www.ebi.ac.uk/complexportal/api/complex","method":"GET"},[{"url":"https://www.omnipathdb.org/complexes"}],TTL_SLOW,"E4")
+
+    M["assoc-perturb"] = _mod("assoc-perturb","rest",{"url":EPMC_SEARCH,"method":"GET"},[{"url":f"{LINCS_LDP3}/signatures"}],TTL_MODERATE,"E4/E5")
+    M["perturb-crispr-screens"] = _mod("perturb-crispr-screens","rest",{"url":"https://webservice.thebiogrid.org/ORCS","method":"GET"},[{"url":"https://cellmodelpassports.sanger.ac.uk/api"}],TTL_MODERATE,"E4")
+    M["perturb-lincs-signatures"] = _mod("perturb-lincs-signatures","rest",{"url":f"{LINCS_LDP3}/signatures","method":"GET"},[{"url":ILINCS}],TTL_MODERATE,"E4/E5")
+    M["perturb-signature-enrichment"] = _mod("perturb-signature-enrichment","rest",{"url":f"{ILINCS}/SignatureMeta","method":"GET"},[{"url":f"{LINCS_LDP3}/signatures"}],TTL_MODERATE,"E4/E5")
+    M["perturb-connectivity"] = _mod("perturb-connectivity","rest",{"url":f"{ILINCS}/Connectivity","method":"GET"},[{"url":f"{LINCS_LDP3}/signatures"}],TTL_MODERATE,"E4/E5")
+    M["perturb-perturbseq-encode"] = _mod("perturb-perturbseq-encode","rest",{"url":f"{ENCODE_BASE}/search/","method":"GET"},[{"url":"https://www.ebi.ac.uk/ena/browser/api"}],TTL_MODERATE,"E4")
+
+    # --- Expression & Context ---
+    M["expr-baseline"] = _mod("expr-baseline","rest",{"url":f"{GTEX_BASE}/gene/expression","method":"GET"},[{"url":"https://www.ebi.ac.uk/gxa/api/genes"}],TTL_MODERATE,"E3")
+    M["assoc-sc"] = _mod("assoc-sc","rest",{"url":"https://azul.data.humancellatlas.org/index/projects","method":"GET"},[{"url":"https://api.cellxgene.cziscience.com/dp/v1/discover/datasets"}],TTL_MODERATE,"E3")
+    M["sc-hubmap"] = _mod("sc-hubmap","rest",{"url":"https://search.api.hubmapconsortium.org/portal/search","method":"GET"},[],TTL_MODERATE,"E3")
+    M["assoc-spatial"] = _mod("assoc-spatial","rest",{"url":EPMC_SEARCH,"method":"GET"},[],TTL_MODERATE,"E3/E4")
+    M["expr-localization"] = _mod("expr-localization","rest",{"url":f"{UNIPROT}/uniprotkb/search","method":"GET"},[],TTL_MODERATE,"E3")
+    M["assoc-bulk-prot"] = _mod("assoc-bulk-prot","rest",{"url":f"{PROTEOMICSDB}/v2/proteinexpression","method":"GET"},[{"url":PDC}],TTL_MODERATE,"E3")
+    M["assoc-omics-phosphoproteomics"] = _mod("assoc-omics-phosphoproteomics","rest",{"url":f"{PRIDE}/project/list","method":"GET"},[],TTL_MODERATE,"E3")
+    M["expr-inducibility"] = _mod("expr-inducibility","rest",{"url":"https://www.ebi.ac.uk/gxa/json/experiments","method":"GET"},[{"url":"https://www.ebi.ac.uk/biostudies/api/v1"}],TTL_MODERATE,"E3")
+    M["assoc-bulk-rna"] = _mod("assoc-bulk-rna","rest",{"url":f"{PUBMED_EUTILS}/esearch.fcgi","method":"GET"},[{"url":"https://www.ebi.ac.uk/biostudies/api/v1"}],TTL_MODERATE,None)
+    M["assoc-metabolomics"] = _mod("assoc-metabolomics","rest",{"url":"https://www.ebi.ac.uk/metabolights/ws/studies","method":"GET"},[{"url":"https://www.metabolomicsworkbench.org/rest"}],TTL_MODERATE,"E5")
+    M["assoc-proteomics"] = _mod("assoc-proteomics","rest",{"url":f"{PROTEOMICSDB}/v2/proteins","method":"GET"},[{"url":PRIDE},{"url":PDC}],TTL_MODERATE,"E3")
+    M["assoc-hpa-pathology"] = _mod("assoc-hpa-pathology","rest",{"url":EPMC_SEARCH,"method":"GET"},[],TTL_MODERATE,"E3")
+
+    # --- Tractability & Modality ---
+    M["mech-structure"] = _mod("mech-structure","rest",{"url":f"{UNIPROT}/uniprotkb/search","method":"GET"},[{"url":ALPHAFOLD},{"url":PDBe}],TTL_SLOW,"E4")
+    M["tract-ligandability-sm"] = _mod("tract-ligandability-sm","rest",{"url":f"{UNIPROT}/uniprotkb/search","method":"GET"},[{"url":PDBe},{"url":BINDINGDB}],TTL_SLOW,None)
+    M["tract-ligandability-ab"] = _mod("tract-ligandability-ab","rest",{"url":f"{UNIPROT}/uniprotkb/search","method":"GET"},[{"url":GLYGEN}],TTL_SLOW,None)
+    M["tract-surfaceome"] = _mod("tract-surfaceome","rest",{"url":f"{UNIPROT}/uniprotkb/search","method":"GET"},[{"url":GLYGEN}],TTL_SLOW,None)
+    M["tract-ligandability-oligo"] = _mod("tract-ligandability-oligo","rest",{"url":ENSEMBL_VEP,"method":"POST"},[{"url":"https://rnacentral.org/api"}],TTL_MODERATE,None)
+    M["tract-modality"] = _mod("tract-modality","rest",{"url":f"{UNIPROT}/uniprotkb/search","method":"GET"},[{"url":PHAROS}],TTL_SLOW,None)
+    M["tract-drugs"] = _mod("tract-drugs","rest",{"url":f"{CHEMBL}/mechanism","method":"GET"},[{"url":DRUGCENTRAL},{"url":BINDINGDB},{"url":f"{PUBCHEM}/"}],TTL_SLOW,None)
+    M["perturb-drug-response"] = _mod("perturb-drug-response","rest",{"url":"https://api.pharmacodb.net/v2/experiments","method":"GET"},[{"url":"https://discover.nci.nih.gov/cellminerapi"}],TTL_MODERATE,None)
+
+    # --- Safety & Clinical ---
+    M["tract-immunogenicity"] = _mod("tract-immunogenicity","rest",{"url":EPMC_SEARCH,"method":"GET"},[{"url":"https://tools-api.iedb.org/population"}],TTL_MODERATE,"E4")
+    M["tract-mhc-binding"] = _mod("tract-mhc-binding","rest",{"url":"https://tools-api.iedb.org/mhci/consensus","method":"POST"},[{"url":"https://tools-api.iedb.org/mhcii/consensus"}],TTL_FAST,"E4")
+    M["tract-iedb-epitopes"] = _mod("tract-iedb-epitopes","rest",{"url":"https://www.iedb.org/api","method":"GET"},[],TTL_SLOW,"E4")
+    M["immuno/hla-coverage"] = _mod("immuno/hla-coverage","rest",{"url":"https://www.ebi.ac.uk/ipd/api","method":"GET"},[{"url":"https://tools-api.iedb.org/population"}],TTL_SLOW,"E4")
+    M["function-dependency"] = _mod("function-dependency","rest",{"url":"https://webservice.thebiogrid.org/ORCS","method":"GET"},[{"url":"https://cellmodelpassports.sanger.ac.uk/api"}],TTL_MODERATE,"E4")
+    M["perturb-depmap-dependency"] = _mod("perturb-depmap-dependency","rest",{"url":"https://cellmodelpassports.sanger.ac.uk/api","method":"GET"},[{"url":"https://webservice.thebiogrid.org/ORCS"}],TTL_MODERATE,"E4")
+    M["clin-safety"] = _mod("clin-safety","rest",{"url":FAERS,"method":"GET"},[],TTL_FAST,"E6")
+    M["clin-rwe"] = _mod("clin-rwe","rest",{"url":FAERS,"method":"GET"},[],TTL_FAST,"E6")
+    M["clin-on-target-ae-prior"] = _mod("clin-on-target-ae-prior","rest",{"url":f"{DRUGCENTRAL}/adverseevents","method":"GET"},[{"url":FAERS}],TTL_SLOW,"E6")
+    M["clin-endpoints"] = _mod("clin-endpoints","rest",{"url":CLINTRIALS,"method":"GET"},[{"url":ICTRP}],TTL_FAST,"E6")
+    M["clin-biomarker-fit"] = _mod("clin-biomarker-fit","rest",{"url":HPO,"method":"GET"},[{"url":MONARCH}],TTL_MODERATE,"E6")
+    M["clin-feasibility"] = _mod("clin-feasibility","rest",{"url":CLINTRIALS,"method":"GET"},[{"url":ICTRP}],TTL_FAST,"E6")
+    M["clin-pipeline"] = _mod("clin-pipeline","rest",{"url":CLINTRIALS,"method":"GET"},[{"url":DRUGCENTRAL}],TTL_FAST,"E6")
+    M["comp-intensity"] = _mod("comp-intensity","rest",{"url":PATENTSVIEW,"method":"GET"},[],TTL_MODERATE,None)
+    M["comp-freedom"] = _mod("comp-freedom","rest",{"url":PATENTSVIEW,"method":"GET"},[],TTL_MODERATE,None)
+
+_register_modules()
+
+# ============================================================================
+# HTTP helpers (retries/failover/caching)
+# ============================================================================
+
+async def _retry_sleep(attempt: int) -> None:
+    await asyncio.sleep(HTTP_RETRY_BASE * (2 ** attempt))
+
+def _cache_key(url: str, method: str, params: Dict[str, Any], body: Any) -> str:
+    m = hashlib.sha256()
+    m.update(url.encode())
+    m.update(method.encode())
+    m.update(json.dumps(params or {}, sort_keys=True).encode())
+    if body is not None:
+        if isinstance(body, (str, bytes)):
+            m.update(body if isinstance(body, bytes) else body.encode())
+        else:
+            m.update(json.dumps(body, sort_keys=True).encode())
+    return m.hexdigest()
 
 async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[str, Any] | None = None, json_body: Any | None = None, ttl: Optional[int]=None) -> Dict[str, Any]:
     params = params or {}
@@ -641,9 +1400,7 @@ async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[
                     raise HTTPException(status_code=429, detail=detail)
                 raise HTTPException(status_code=502, detail=detail)
 
-# ============================================================================
-# Param builders (per-source probing)
-# ============================================================================
+
 
 def build_params(module_key: str, ctx: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
     """Return (params, json_body) shaped for the given module and context."""
@@ -738,7 +1495,6 @@ def build_params(module_key: str, ctx: Dict[str, Any]) -> Tuple[Dict[str, Any], 
 # Module runner
 # ============================================================================
 
-
 async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
     if module_key not in MODULES:
         raise HTTPException(status_code=400, detail=f"Unknown module: {module_key}")
@@ -751,6 +1507,7 @@ async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
         variant_id=ctx.get("rsid") or ctx.get("region"),
         qtl_stage=mod.qtl_stage
     ))
+
     try:
         if mod.family == "graphql":
             template_key = mod.primary.get("template")
@@ -765,9 +1522,9 @@ async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
         env.edges = [Edge(kind="module_result", src=module_key, dst=env.context.gene_id, meta={"module": module_key, "stage": mod.qtl_stage})]
         prov.sources.append(mod.primary["url"])
         env.provenance = prov
-        env.status = EvidenceStatus.NO_DATA if _is_no_data(data) else EvidenceStatus.OK
         return env
     except HTTPException as e:
+        # try fallbacks
         for fb in mod.fallbacks:
             try:
                 data = await _fetch(mod, fb["url"], method=fb.get("method","GET"), params={}, json_body=None)
@@ -775,16 +1532,10 @@ async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
                 env.edges = [Edge(kind="module_result", src=module_key, dst=env.context.gene_id, meta={"module": module_key, "fallback": True})]
                 prov.sources.append(fb["url"])
                 env.provenance = prov
-                env.status = EvidenceStatus.NO_DATA if _is_no_data(data) else EvidenceStatus.OK
                 return env
             except Exception:
                 continue
-        prov.warnings.append(str(e))
-        env.provenance = prov
-        env.status = EvidenceStatus.RATE_LIMITED if getattr(e, "status_code", None) == 429 else EvidenceStatus.UPSTREAM_ERROR
-        env.error = str(e)
-        env.records = []
-        return env
+        raise e
 
 # ============================================================================
 # Literature Seek Overlay (EPMC + Crossref + Unpaywall + PubTator3)
