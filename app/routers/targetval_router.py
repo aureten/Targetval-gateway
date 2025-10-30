@@ -51,9 +51,9 @@ HTTP_RETRY_BASE = 0.6
 GLOBAL_CONCURRENCY = 24
 
 # TTL classes (seconds)
-TTL_FAST = 6 * 3600
-TTL_MODERATE = 24 * 3600
-TTL_SLOW = 7 * 24 * 3600
+TTL_FAST = 0
+TTL_MODERATE = 0
+TTL_SLOW = 0
 
 # ----------------------------------------------------------------------------
 # Minimal in-memory TTL cache
@@ -806,9 +806,9 @@ HTTP_RETRY_BASE = 0.6
 GLOBAL_CONCURRENCY = 24
 
 # TTL classes (seconds)
-TTL_FAST = 6 * 3600
-TTL_MODERATE = 24 * 3600
-TTL_SLOW = 7 * 24 * 3600
+TTL_FAST = 0
+TTL_MODERATE = 0
+TTL_SLOW = 0
 
 # ----------------------------------------------------------------------------
 # Minimal in-memory TTL cache
@@ -1735,6 +1735,38 @@ async def run_gateway(req: RunRequest) -> RunResponse:
         answers.append(ans)
     final = _final_recommendation(answers)
     return RunResponse(context=ctx, questions=answers, final_recommendation=final)
+
+
+@router.get("/modules", response_model=List[str])
+async def list_modules() -> List[str]:
+    """List all module keys available in this router."""
+    return sorted(list(MODULES.keys()))
+
+@router.get("/module/{key}", response_model=EvidenceEnvelope)
+async def run_single_module(
+    key: str,
+    gene_symbol: str | None = Query(None),
+    ensembl_id: str | None = Query(None),
+    uniprot_id: str | None = Query(None),
+    trait_efo: str | None = Query(None),
+    trait_label: str | None = Query(None),
+    rsid: str | None = Query(None),
+    region: str | None = Query(None),
+    strict_human: bool = Query(True),
+) -> EvidenceEnvelope:
+    """Execute one module live with the provided context."""
+    ctx = {
+        "hgnc": gene_symbol or "",
+        "ensg": ensembl_id or "",
+        "uniprot": uniprot_id or "",
+        "efo": trait_efo or "",
+        "trait_label": trait_label or "",
+        "rsid": rsid or "",
+        "region": region or "",
+        "strict_human": bool(strict_human),
+    }
+    return await run_module(key, ctx)
+
 
 
 
