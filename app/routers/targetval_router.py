@@ -27,8 +27,10 @@ import datetime as dt
 import hashlib
 import json
 import re
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from enum import Enum
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -42,6 +44,8 @@ router = APIRouter(prefix="/targetval", tags=["Targetval Gateway (Full 22Q)"])
 
 HTTP_CONNECT_TIMEOUT = 6.0
 HTTP_TOTAL_TIMEOUT = 12.0
+HTTP_READ_TIMEOUT = 12.0
+HTTP_WRITE_TIMEOUT = 12.0
 HTTP_RETRY_ATTEMPTS = 5
 HTTP_RETRY_BASE = 0.6
 GLOBAL_CONCURRENCY = 24
@@ -149,6 +153,64 @@ HOST_ALLOW = {
     "rnacentral.org",
 }
 
+# ----------------------------------------------------------------------------
+# Host-specific overrides & circuit breaker (simple)
+# ----------------------------------------------------------------------------
+HOST_OVERRIDES: Dict[str, Dict[str, Any]] = {}
+try:
+    _env_ho = os.getenv("HOST_OVERRIDES_JSON")
+    if _env_ho:
+        HOST_OVERRIDES.update(json.loads(_env_ho))
+except Exception:
+    pass
+
+_host_state: Dict[str, Dict[str, Any]] = {}
+CB_FAILURE_THRESHOLD = int(os.getenv("CB_FAILURE_THRESHOLD", "5"))
+CB_OPEN_SECONDS = float(os.getenv("CB_OPEN_SECONDS", "30"))
+
+def _get_host_limits(host: str) -> Dict[str, Any]:
+    limits = {
+        "semaphore": 4,
+        "connect_timeout": HTTP_CONNECT_TIMEOUT,
+        "read_timeout": HTTP_READ_TIMEOUT,
+        "write_timeout": HTTP_WRITE_TIMEOUT,
+        "retry_attempts": HTTP_RETRY_ATTEMPTS,
+    }
+    ov = HOST_OVERRIDES.get(host) or {}
+    limits.update({k: v for k, v in ov.items() if v is not None})
+    return limits
+
+def _now_ts() -> float:
+    return dt.datetime.now().timestamp()
+
+def _cb_is_open(host: str) -> bool:
+    st = _host_state.get(host) or {}
+    return st.get("open_until", 0) > _now_ts()
+
+def _cb_on_success(host: str) -> None:
+    st = _host_state.setdefault(host, {})
+    st["fails"] = 0
+    st["recent_429"] = max(0, int(st.get("recent_429", 0)) - 1)
+    st["open_until"] = 0
+
+def _cb_on_failure(host: str, was_429: bool=False) -> None:
+    st = _host_state.setdefault(host, {})
+    st["fails"] = int(st.get("fails", 0)) + 1
+    if was_429:
+        st["recent_429"] = int(st.get("recent_429", 0)) + 1
+    if st["fails"] >= CB_FAILURE_THRESHOLD:
+        st["open_until"] = _now_ts() + CB_OPEN_SECONDS
+
+def _adaptive_retry_base(host: str) -> float:
+    base = HTTP_RETRY_BASE
+    st = _host_state.get(host) or {}
+    r429 = int(st.get("recent_429", 0))
+    if r429 > 0:
+        base = base * min(3.0, 1.0 + 0.5 * r429)
+    return base
+
+
+
 _host_semaphores: Dict[str, asyncio.Semaphore] = {}
 _global_semaphore = asyncio.Semaphore(GLOBAL_CONCURRENCY)
 
@@ -157,17 +219,46 @@ def _host_from_url(url: str) -> str:
 
 def _get_host_sem(url: str) -> asyncio.Semaphore:
     host = _host_from_url(url)
+    # Derive allowlist lazily from module registry to avoid drift
+    global HOST_ALLOW
+    if not HOST_ALLOW:
+        try:
+            derived = set()
+            for _m in MODULES.values():
+                try:
+                    if isinstance(_m.primary, dict):
+                        u = _m.primary.get("url","")
+                        if u:
+                            derived.add(_host_from_url(u))
+                    for fb in (_m.fallbacks or []):
+                        u2 = fb.get("url","")
+                        if u2:
+                            derived.add(_host_from_url(u2))
+                except Exception:
+                    continue
+            HOST_ALLOW = derived
+        except Exception:
+            pass
     if host not in HOST_ALLOW:
         raise HTTPException(status_code=400, detail=f"Host not allowlisted: {host}")
+    limits = _get_host_limits(host)
     if host not in _host_semaphores:
-        _host_semaphores[host] = asyncio.Semaphore(4)
+        _host_semaphores[host] = asyncio.Semaphore(int(limits.get("semaphore", 4)))
     return _host_semaphores[host]
 
 # ============================================================================
 # Schemas (Pydantic v2 style)
 # ============================================================================
 
+
+class EvidenceStatus(str, Enum):
+    OK = "OK"
+    NO_DATA = "NO_DATA"
+    UPSTREAM_ERROR = "UPSTREAM_ERROR"
+    RATE_LIMITED = "RATE_LIMITED"
+
 class Edge(BaseModel):
+
     kind: str
     src: str | None = None
     dst: str | None = None
@@ -192,13 +283,9 @@ class EnvelopeContext(BaseModel):
     qtl_type: str | None = None  # cis-QTL / trans-QTL
     qtl_stage: str | None = None  # E0..E6
 
-class EvidenceEnvelope(BaseModel):
-    module: str
-    context: EnvelopeContext
-    records: List[Dict[str, Any]] = []
-    edges: List[Edge] = []
-    provenance: Provenance = Field(default_factory=Provenance)
-    notes: List[str] = []
+\1
+    status: EvidenceStatus = EvidenceStatus.OK
+    error: Optional[str] = None
 
 class LitEvidence(BaseModel):
     query: str
@@ -455,6 +542,7 @@ def _cache_key(url: str, method: str, params: Dict[str, Any], body: Any) -> str:
             m.update(json.dumps(body, sort_keys=True).encode())
     return m.hexdigest()
 
+
 async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[str, Any] | None = None, json_body: Any | None = None, ttl: Optional[int]=None) -> Dict[str, Any]:
     params = params or {}
     ttl = ttl or module.ttl
@@ -463,43 +551,95 @@ async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[
     if cached is not None:
         return cached
 
+    host = _host_from_url(url)
+    if _cb_is_open(host):
+        raise HTTPException(status_code=503, detail=f"Circuit open for host: {host}")
+
+    limits = _get_host_limits(host)
     sem = _get_host_sem(url)
+    retry_attempts = int(limits.get("retry_attempts", HTTP_RETRY_ATTEMPTS))
+    base = _adaptive_retry_base(host)
+
+    last_rate_limited = False
     async with _global_semaphore, sem:
         attempt = 0
         while True:
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(HTTP_TOTAL_TIMEOUT)) as client:
-                    if method.upper() == "GET":
-                        resp = await client.get(url, params=params)
-                    elif method.upper() == "POST":
-                        resp = await client.post(url, json=json_body, params=params)
+                timeout = httpx.Timeout(
+                    connect=float(limits.get("connect_timeout", HTTP_CONNECT_TIMEOUT)),
+                    read=float(limits.get("read_timeout", HTTP_READ_TIMEOUT)),
+                    write=float(limits.get("write_timeout", HTTP_WRITE_TIMEOUT)),
+                )
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    wants_stream = bool(module.primary.get("stream", False)) or str(params.get("stream","")).lower() in {"1","true","yes"}
+                    if wants_stream and method.upper() == "GET":
+                        async with client.stream("GET", url, params=params) as resp:
+                            if resp.status_code == 429 and attempt < retry_attempts:
+                                last_rate_limited = True
+                                ra = resp.headers.get("Retry-After")
+                                if ra and str(ra).isdigit():
+                                    await asyncio.sleep(float(ra))
+                                else:
+                                    await asyncio.sleep(base * (2 ** attempt))
+                                attempt += 1
+                                continue
+                            resp.raise_for_status()
+                            items = []
+                            async for line in resp.aiter_lines():
+                                if not line:
+                                    continue
+                                try:
+                                    items.append(json.loads(line))
+                                except Exception:
+                                    continue
+                            data = {"ndjson": items}
+                            cc = resp.headers.get("Cache-Control","").lower()
+                            if "no-store" not in cc:
+                                CACHE.set(ck, data, ttl_seconds=ttl)
+                            _cb_on_success(host)
+                            return data
                     else:
-                        resp = await client.request(method, url, params=params, json=json_body)
-                if resp.status_code == 429 and attempt < HTTP_RETRY_ATTEMPTS:
-                    ra = resp.headers.get("Retry-After")
-                    if ra and ra.isdigit():
-                        await asyncio.sleep(float(ra))
-                    else:
-                        await _retry_sleep(attempt)
-                    attempt += 1
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                CACHE.set(ck, data, ttl_seconds=ttl)
-                return data
+                        if method.upper() == "GET":
+                            resp = await client.get(url, params=params)
+                        elif method.upper() == "POST":
+                            resp = await client.post(url, json=json_body, params=params)
+                        else:
+                            resp = await client.request(method, url, params=params, json=json_body)
+
+                    if resp.status_code == 429 and attempt < retry_attempts:
+                        last_rate_limited = True
+                        ra = resp.headers.get("Retry-After")
+                        if ra and str(ra).isdigit():
+                            await asyncio.sleep(float(ra))
+                        else:
+                            await asyncio.sleep(base * (2 ** attempt))
+                        attempt += 1
+                        continue
+
+                    resp.raise_for_status()
+                    data = resp.json()
+                    cc = resp.headers.get("Cache-Control","").lower()
+                    if "no-store" not in cc:
+                        CACHE.set(ck, data, ttl_seconds=ttl)
+                    _cb_on_success(host)
+                    return data
             except Exception as e:
-                if attempt < HTTP_RETRY_ATTEMPTS:
-                    await _retry_sleep(attempt)
+                was_429 = isinstance(e, httpx.HTTPStatusError) and getattr(e, "response", None) is not None and getattr(e.response, "status_code", None) == 429
+                _cb_on_failure(host, was_429=was_429 or last_rate_limited)
+                if attempt < retry_attempts:
+                    await asyncio.sleep(base * (2 ** attempt))
                     attempt += 1
                     continue
-                # try fallbacks
                 for fb in module.fallbacks:
                     try:
                         data = await _fetch(module, fb["url"], fb.get("method","GET"), {}, None, ttl)
                         return data
                     except Exception:
                         continue
-                raise HTTPException(status_code=502, detail=f"{module.key} fetch error from {url}: {e}")
+                detail = f"{module.key} fetch error from {url}: {e}"
+                if last_rate_limited:
+                    raise HTTPException(status_code=429, detail=detail)
+                raise HTTPException(status_code=502, detail=detail)
 
 # ============================================================================
 # Param builders (per-source probing)
@@ -598,6 +738,7 @@ def build_params(module_key: str, ctx: Dict[str, Any]) -> Tuple[Dict[str, Any], 
 # Module runner
 # ============================================================================
 
+
 async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
     if module_key not in MODULES:
         raise HTTPException(status_code=400, detail=f"Unknown module: {module_key}")
@@ -610,7 +751,6 @@ async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
         variant_id=ctx.get("rsid") or ctx.get("region"),
         qtl_stage=mod.qtl_stage
     ))
-
     try:
         if mod.family == "graphql":
             template_key = mod.primary.get("template")
@@ -625,9 +765,9 @@ async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
         env.edges = [Edge(kind="module_result", src=module_key, dst=env.context.gene_id, meta={"module": module_key, "stage": mod.qtl_stage})]
         prov.sources.append(mod.primary["url"])
         env.provenance = prov
+        env.status = EvidenceStatus.NO_DATA if _is_no_data(data) else EvidenceStatus.OK
         return env
     except HTTPException as e:
-        # try fallbacks
         for fb in mod.fallbacks:
             try:
                 data = await _fetch(mod, fb["url"], method=fb.get("method","GET"), params={}, json_body=None)
@@ -635,10 +775,16 @@ async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
                 env.edges = [Edge(kind="module_result", src=module_key, dst=env.context.gene_id, meta={"module": module_key, "fallback": True})]
                 prov.sources.append(fb["url"])
                 env.provenance = prov
+                env.status = EvidenceStatus.NO_DATA if _is_no_data(data) else EvidenceStatus.OK
                 return env
             except Exception:
                 continue
-        raise e
+        prov.warnings.append(str(e))
+        env.provenance = prov
+        env.status = EvidenceStatus.RATE_LIMITED if getattr(e, "status_code", None) == 429 else EvidenceStatus.UPSTREAM_ERROR
+        env.error = str(e)
+        env.records = []
+        return env
 
 # ============================================================================
 # Literature Seek Overlay (EPMC + Crossref + Unpaywall + PubTator3)
@@ -838,3 +984,26 @@ async def run_gateway(req: RunRequest) -> RunResponse:
         answers.append(ans)
     final = _final_recommendation(answers)
     return RunResponse(context=ctx, questions=answers, final_recommendation=final)
+
+
+
+# ----------------------------------------------------------------------------
+# Zero-data detection (generic heuristics)
+# ----------------------------------------------------------------------------
+def _is_no_data(payload):
+    try:
+        if payload is None:
+            return True
+        if isinstance(payload, (list, tuple, set)) and len(payload) == 0:
+            return True
+        if isinstance(payload, dict):
+            if not payload:
+                return True
+            if "rows" in payload and isinstance(payload["rows"], list) and len(payload["rows"]) == 0:
+                return True
+            rl = payload.get("resultList")
+            if isinstance(rl, dict) and len(rl.get("result", []) or []) == 0:
+                return True
+    except Exception:
+        pass
+    return False
