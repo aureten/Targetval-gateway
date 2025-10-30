@@ -2,7 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "TargetVal Gateway (Actions Surface) \u2014 Full",
-    "version": "2025.10"
+    "version": "2025.10",
+    "x-revision": "2025-10-30T09:51:07Z"
   },
   "servers": [
     {
@@ -289,6 +290,413 @@
             "additionalProperties": true
           }
         }
+      },
+      "EvidenceStatus": {
+        "type": "string",
+        "enum": [
+          "OK",
+          "NO_DATA",
+          "UPSTREAM_ERROR",
+          "RATE_LIMITED"
+        ]
+      },
+      "Edge": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "src": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dst": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "kind",
+          "meta"
+        ]
+      },
+      "Provenance": {
+        "type": "object",
+        "properties": {
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "query": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "accessed_at": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "module_order": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "sources",
+          "query",
+          "accessed_at",
+          "version",
+          "module_order",
+          "warnings"
+        ]
+      },
+      "EnvelopeContext": {
+        "type": "object",
+        "properties": {
+          "gene_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trait_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tissue": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cell_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "assay": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qtl_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qtl_stage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "EvidenceEnvelope": {
+        "type": "object",
+        "properties": {
+          "module": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/components/schemas/EnvelopeContext"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            }
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/EvidenceStatus"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "module",
+          "context",
+          "records",
+          "edges",
+          "provenance",
+          "status"
+        ]
+      },
+      "LitEvidence": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "hits": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "tags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "query",
+          "hits",
+          "tags",
+          "errors"
+        ]
+      },
+      "QuestionAnswer": {
+        "type": "object",
+        "properties": {
+          "question_id": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "envelopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvidenceEnvelope"
+            }
+          },
+          "literature": {
+            "$ref": "#/components/schemas/LitEvidence"
+          },
+          "math_summary": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "skeptic_view": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "killer_experiments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "question_id",
+          "title",
+          "envelopes",
+          "skeptic_view",
+          "killer_experiments"
+        ]
+      },
+      "FinalRecommendation": {
+        "type": "object",
+        "properties": {
+          "decision": {
+            "type": "string"
+          },
+          "why": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "modality_plan": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "pd_plan": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "risk_register": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "mos_plan": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "fastest_pom": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "next_experiments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "differentiation": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "decision",
+          "why",
+          "modality_plan",
+          "pd_plan",
+          "risk_register",
+          "mos_plan",
+          "fastest_pom",
+          "next_experiments"
+        ]
+      },
+      "RunRequest": {
+        "type": "object",
+        "properties": {
+          "gene_symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ensembl_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uniprot_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trait_efo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trait_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rsid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_questions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer"
+            }
+          },
+          "strict_human": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "RunResponse": {
+        "type": "object",
+        "properties": {
+          "context": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuestionAnswer"
+            }
+          },
+          "final_recommendation": {
+            "$ref": "#/components/schemas/FinalRecommendation"
+          }
+        },
+        "required": [
+          "context",
+          "questions",
+          "final_recommendation"
+        ]
       }
     }
   },
@@ -977,6 +1385,34 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/targetval/run": {
+      "post": {
+        "summary": "Run the 22-question TargetVal workflow",
+        "operationId": "runTargetVal22Q",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Workflow output",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
                 }
               }
             }
