@@ -1,4 +1,5 @@
 
+"""
 Targetval Gateway — Router (Full, Extended) for 22 Questions
 Keyless, Live v2 — implements full module registry, HTTP discipline,
 directive literature seek, event-driven iteration hooks, and math synthesis
