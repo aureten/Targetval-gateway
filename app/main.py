@@ -1,4 +1,5 @@
 
+# app/main.py (revised, resilient)
 from __future__ import annotations
 
 import asyncio
@@ -48,6 +49,21 @@ ROOT_PATH = os.getenv("ROOT_PATH", "")
 DOCS_URL = os.getenv("DOCS_URL", "/docs")
 OPENAPI_URL = os.getenv("OPENAPI_URL", "/openapi.json")
 
+
+# Public base for OpenAPI servers (used by ChatGPT Actions).
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
+# Optional: allow multiple servers from JSON if provided.
+SERVERS = []
+if os.getenv("SERVERS_JSON"):
+    try:
+        import json as _json
+        _sj = _json.loads(os.getenv("SERVERS_JSON"))
+        if isinstance(_sj, list):
+            SERVERS = _sj
+    except Exception as _e:
+        print(f"Invalid SERVERS_JSON ignored: {_e}", file=sys.stderr, flush=True)
+if not SERVERS and PUBLIC_BASE_URL:
+    SERVERS = [{"url": PUBLIC_BASE_URL}]
 # "compat" wrappers mirror the classic /modules,/module,/aggregate,/domain endpoints at app-level
 # They internally call the mounted router and exist to preserve long-lived clients.
 WRAPPERS_ENABLED = os.getenv("WRAPPERS_ENABLED", "1").strip() not in ("0", "false", "False")
@@ -150,6 +166,7 @@ app = FastAPI(
     docs_url=DOCS_URL,
     openapi_url=OPENAPI_URL,
     root_path=ROOT_PATH,
+    servers=SERVERS,
 )
 
 # CORS (default permissive; tighten in prod with CORS_ALLOW_ORIGINS)
