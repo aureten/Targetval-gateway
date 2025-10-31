@@ -1,4 +1,5 @@
-# app/main.py (revised)
+
+# app/main.py
 from __future__ import annotations
 
 import asyncio
@@ -42,7 +43,7 @@ ROUTER_DOMAIN_MODULES = getattr(_router_mod, "DOMAIN_MODULES", None)
 # ------------------------------------------------------------------------------
 # App metadata / env
 # ------------------------------------------------------------------------------
-APP_TITLE = os.getenv("APP_TITLE", "TargetVal Gateway (Actions Surface) — Full")
+APP_TITLE = os.getenv("APP_TITLE", "TargetVal Gateway (Actions Surface) â Full")
 APP_VERSION = os.getenv("APP_VERSION", "2025.10")
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 DOCS_URL = os.getenv("DOCS_URL", "/docs")
@@ -80,23 +81,24 @@ def _env_to_legacy_evidence(module_key: str, env: Any) -> EvidenceLegacy:
         status = "OK"
     prov = getattr(env, "provenance", None)
     sources = getattr(prov, "sources", None) or []
-    # "records" is a List[Dict], default to empty list
     records = getattr(env, "records", None) or []
-    # default source: first provenance source or module primary url
     src = sources[0] if sources else (MODULES.get(module_key).primary.get("url") if isinstance(MODULES, dict) and module_key in MODULES else module_key)
     out = EvidenceLegacy(
         status=status,
         source=str(src),
         fetched_n=len(records) if isinstance(records, list) else (1 if records else 0),
-        data={"records": records, "context": getattr(env, "context", None).model_dump() if hasattr(getattr(env, "context", None), "model_dump") else getattr(env, "context", None)},
+        data={
+            "records": records,
+            "context": getattr(env, "context", None).model_dump() if hasattr(getattr(env, "context", None), "model_dump") else getattr(env, "context", None),
+        },
         citations=[str(s) for s in sources],
         fetched_at=time.time(),
         debug={
             "module": module_key,
             "edge_count": len(getattr(env, "edges", []) or []),
             "warnings": getattr(prov, "warnings", []) if prov is not None else [],
-            "error": getattr(env, "error", None)
-        }
+            "error": getattr(env, "error", None),
+        },
     )
     return out
 
@@ -164,9 +166,7 @@ app.add_middleware(
 app.include_router(tv_router, prefix="/v1")
 
 # ------------------------------------------------------------------------------
-# Internal ASGI self-call helper
-# Tries '/v1' + path first (because we mounted the router under /v1),
-# then falls back to bare 'path' if a 404 is returned (local/dev without prefix).
+# Internal ASGI self-call helpers
 # ------------------------------------------------------------------------------
 async def _self_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     if not path.startswith("/"):
@@ -179,8 +179,19 @@ async def _self_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         r.raise_for_status()
         return r.json()
 
+async def _self_post(path: str, json_body: Dict[str, Any]) -> Dict[str, Any]:
+    if not path.startswith("/"):
+        path = "/" + path
+    async with httpx.AsyncClient(app=app, base_url="http://internal") as client:
+        candidate = path if path.startswith("/v1/") else ("/v1" + path)
+        r = await client.post(candidate, json=json_body)
+        if r.status_code == 404 and not path.startswith("/v1/"):
+            r = await client.post(path, json=json_body)
+        r.raise_for_status()
+        return r.json()
+
 # ------------------------------------------------------------------------------
-# Minimal health — everything else is served by the router under /v1
+# Health
 # ------------------------------------------------------------------------------
 @app.get("/healthz")
 @app.get("/v1/healthz")
@@ -267,7 +278,7 @@ if WRAPPERS_ENABLED:
         cell_type: Optional[str] = None
         species: Optional[str] = None
         cutoff: Optional[float] = None
-        extra: Dict[str, Any] = {}
+        extra: Optional[Dict[str, Any]] = None
 
     # -------- helpers (wrappers) --------
     def _module_map() -> Dict[str, str]:
@@ -461,6 +472,66 @@ if WRAPPERS_ENABLED:
             extra=req.extra,
         )
         return await aggregate_modules(agg)
+
+# ------------------------------------------------------------------------------
+# Safety shims for /targetval/run to avoid misconfiguration
+# ------------------------------------------------------------------------------
+class RunRequestShim(BaseModel):
+    gene_symbol: Optional[str] = None
+    ensembl_id: Optional[str] = None
+    uniprot_id: Optional[str] = None
+    trait_efo: Optional[str] = None
+    trait_label: Optional[str] = None
+    rsid: Optional[str] = None
+    region: Optional[str] = None
+    run_questions: Optional[List[int]] = None
+    strict_human: bool = True
+
+@app.post("/targetval/run", include_in_schema=False)
+async def proxy_targetval_run_post(body: RunRequestShim):
+    return await _self_post("/targetval/run", body.model_dict() if hasattr(body, "model_dict") else body.dict())
+
+@app.get("/targetval/run", include_in_schema=False)
+async def proxy_targetval_run_get(
+    gene_symbol: Optional[str] = None,
+    trait_label: Optional[str] = None,
+    trait_efo: Optional[str] = None,
+    ensembl_id: Optional[str] = None,
+    uniprot_id: Optional[str] = None,
+    rsid: Optional[str] = None,
+    region: Optional[str] = None,
+):
+    body = {
+        "gene_symbol": gene_symbol,
+        "trait_label": trait_label,
+        "trait_efo": trait_efo,
+        "ensembl_id": ensembl_id,
+        "uniprot_id": uniprot_id,
+        "rsid": rsid,
+        "region": region,
+    }
+    return await _self_post("/targetval/run", body)
+
+@app.get("/v1/targetval/run", include_in_schema=False)
+async def proxy_targetval_run_get_v1(
+    gene_symbol: Optional[str] = None,
+    trait_label: Optional[str] = None,
+    trait_efo: Optional[str] = None,
+    ensembl_id: Optional[str] = None,
+    uniprot_id: Optional[str] = None,
+    rsid: Optional[str] = None,
+    region: Optional[str] = None,
+):
+    body = {
+        "gene_symbol": gene_symbol,
+        "trait_label": trait_label,
+        "trait_efo": trait_efo,
+        "ensembl_id": ensembl_id,
+        "uniprot_id": uniprot_id,
+        "rsid": rsid,
+        "region": region,
+    }
+    return await _self_post("/v1/targetval/run", body)
 
 # ------------------------------------------------------------------------------
 # Root
