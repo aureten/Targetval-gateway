@@ -1,777 +1,107 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "TargetVal Gateway (Actions Surface) \u2014 Full",
+    "title": "TargetVal Gateway (Actions Surface) — Full",
     "version": "2025.10",
-    "x-revision": "2025-10-30T12:49:50Z"
+    "description": "OpenAPI for the TargetVal Gateway.\nNotes:\n- Endpoints under /v1/targetval/* are the primary surface.\n- Wrapper/compat endpoints (/v1/run, /run, /v1/module, /module, etc.) mirror the same functionality.\n- This file includes a concrete HTTPS server URL so ChatGPT Actions can call the API directly.\n"
   },
   "servers": [
     {
-      "url": "https://targetval-gateway.onrender.com/v1"
+      "url": "https://targetval.onrender.com",
+      "description": "prod (Render or custom domain)"
     }
   ],
-  "components": {
-    "schemas": {
-      "GenericObject": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": true
-      },
-      "Evidence": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "enum": [
-              "OK",
-              "ERROR",
-              "NO_DATA"
-            ]
-          },
-          "source": {
-            "type": "string"
-          },
-          "fetched_n": {
-            "type": "integer"
-          },
-          "data": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "citations": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "fetched_at": {
-            "type": "number"
-          },
-          "debug": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        },
-        "required": [
-          "status",
-          "source",
-          "fetched_n",
-          "data",
-          "citations",
-          "fetched_at"
-        ]
-      },
-      "ModuleRunRequest": {
-        "type": "object",
-        "properties": {
-          "module_key": {
-            "type": "string",
-            "description": "One of the 64 keys from /v1/modules"
-          },
-          "gene": {
-            "type": "string",
-            "description": "Alias of 'symbol'."
-          },
-          "symbol": {
-            "type": "string"
-          },
-          "ensembl_id": {
-            "type": "string"
-          },
-          "uniprot_id": {
-            "type": "string"
-          },
-          "efo": {
-            "type": "string"
-          },
-          "condition": {
-            "type": "string"
-          },
-          "tissue": {
-            "type": "string"
-          },
-          "cell_type": {
-            "type": "string"
-          },
-          "species": {
-            "type": "string"
-          },
-          "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 500,
-            "default": 100
-          },
-          "offset": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 0
-          },
-          "strict": {
-            "type": "boolean",
-            "default": false
-          },
-          "extra": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        },
-        "required": [
-          "module_key"
-        ]
-      },
-      "AggregateRequest": {
-        "type": "object",
-        "properties": {
-          "modules": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "domain": {
-            "type": "string",
-            "description": "Accepts 'D1'..'D6' or '1'..'6'."
-          },
-          "primary_only": {
-            "type": "boolean",
-            "default": true
-          },
-          "order": {
-            "type": "string",
-            "enum": [
-              "sequential",
-              "parallel"
-            ],
-            "default": "sequential"
-          },
-          "continue_on_error": {
-            "type": "boolean",
-            "default": true
-          },
-          "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 1000,
-            "default": 100
-          },
-          "offset": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 0
-          },
-          "gene": {
-            "type": "string",
-            "description": "Alias of 'symbol'."
-          },
-          "symbol": {
-            "type": "string"
-          },
-          "ensembl_id": {
-            "type": "string"
-          },
-          "uniprot_id": {
-            "type": "string"
-          },
-          "efo": {
-            "type": "string"
-          },
-          "condition": {
-            "type": "string"
-          },
-          "tissue": {
-            "type": "string"
-          },
-          "cell_type": {
-            "type": "string"
-          },
-          "species": {
-            "type": "string"
-          },
-          "cutoff": {
-            "type": "number"
-          },
-          "extra": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        }
-      },
-      "DomainRunRequest": {
-        "type": "object",
-        "properties": {
-          "primary_only": {
-            "type": "boolean",
-            "default": true
-          },
-          "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 1000,
-            "default": 100
-          },
-          "offset": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 0
-          },
-          "gene": {
-            "type": "string",
-            "description": "Alias of 'symbol'."
-          },
-          "symbol": {
-            "type": "string"
-          },
-          "ensembl_id": {
-            "type": "string"
-          },
-          "uniprot_id": {
-            "type": "string"
-          },
-          "efo": {
-            "type": "string"
-          },
-          "condition": {
-            "type": "string"
-          },
-          "tissue": {
-            "type": "string"
-          },
-          "cell_type": {
-            "type": "string"
-          },
-          "species": {
-            "type": "string"
-          },
-          "cutoff": {
-            "type": "number"
-          },
-          "extra": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        }
-      },
-      "SynthIntegrateRequest": {
-        "type": "object",
-        "properties": {
-          "gene": {
-            "type": "string",
-            "description": "Alias of 'symbol'."
-          },
-          "symbol": {
-            "type": "string"
-          },
-          "efo": {
-            "type": "string"
-          },
-          "condition": {
-            "type": "string"
-          },
-          "modules": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "method": {
-            "type": "string",
-            "enum": [
-              "math",
-              "vote",
-              "rank",
-              "bayes",
-              "hybrid"
-            ],
-            "default": "math"
-          },
-          "extra": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        }
-      },
-      "EvidenceStatus": {
-        "type": "string",
-        "enum": [
-          "OK",
-          "NO_DATA",
-          "UPSTREAM_ERROR",
-          "RATE_LIMITED"
-        ]
-      },
-      "Edge": {
-        "type": "object",
-        "properties": {
-          "kind": {
-            "type": "string"
-          },
-          "src": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "dst": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "meta": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        },
-        "required": [
-          "kind",
-          "meta"
-        ]
-      },
-      "Provenance": {
-        "type": "object",
-        "properties": {
-          "sources": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "query": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "accessed_at": {
-            "type": "string"
-          },
-          "version": {
-            "type": "string"
-          },
-          "module_order": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "warnings": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "sources",
-          "query",
-          "accessed_at",
-          "version",
-          "module_order",
-          "warnings"
-        ]
-      },
-      "EnvelopeContext": {
-        "type": "object",
-        "properties": {
-          "gene_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "target": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "trait_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "variant_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "tissue": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "cell_type": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "assay": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "qtl_type": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "qtl_stage": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      },
-      "EvidenceEnvelope": {
-        "type": "object",
-        "properties": {
-          "module": {
-            "type": "string"
-          },
-          "context": {
-            "$ref": "#/components/schemas/EnvelopeContext"
-          },
-          "records": {
-            "type": "array",
-            "items": {
-              "type": "object"
-            }
-          },
-          "edges": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Edge"
-            }
-          },
-          "provenance": {
-            "$ref": "#/components/schemas/Provenance"
-          },
-          "notes": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "status": {
-            "$ref": "#/components/schemas/EvidenceStatus"
-          },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "module",
-          "context",
-          "records",
-          "edges",
-          "provenance",
-          "status"
-        ]
-      },
-      "LitEvidence": {
-        "type": "object",
-        "properties": {
-          "query": {
-            "type": "string"
-          },
-          "hits": {
-            "type": "array",
-            "items": {
-              "type": "object"
-            }
-          },
-          "tags": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          },
-          "errors": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "query",
-          "hits",
-          "tags",
-          "errors"
-        ]
-      },
-      "QuestionAnswer": {
-        "type": "object",
-        "properties": {
-          "question_id": {
-            "type": "integer"
-          },
-          "title": {
-            "type": "string"
-          },
-          "envelopes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EvidenceEnvelope"
-            }
-          },
-          "literature": {
-            "$ref": "#/components/schemas/LitEvidence"
-          },
-          "math_summary": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "additionalProperties": true
-          },
-          "skeptic_view": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "killer_experiments": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "question_id",
-          "title",
-          "envelopes",
-          "skeptic_view",
-          "killer_experiments"
-        ]
-      },
-      "FinalRecommendation": {
-        "type": "object",
-        "properties": {
-          "decision": {
-            "type": "string"
-          },
-          "why": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "modality_plan": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "pd_plan": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "risk_register": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "mos_plan": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "fastest_pom": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "next_experiments": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "differentiation": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "additionalProperties": true
-          }
-        },
-        "required": [
-          "decision",
-          "why",
-          "modality_plan",
-          "pd_plan",
-          "risk_register",
-          "mos_plan",
-          "fastest_pom",
-          "next_experiments"
-        ]
-      },
-      "RunRequest": {
-        "type": "object",
-        "properties": {
-          "gene_symbol": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "ensembl_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "uniprot_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "trait_efo": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "trait_label": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "rsid": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "region": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "run_questions": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "integer"
-            }
-          },
-          "strict_human": {
-            "type": "boolean",
-            "default": true
-          }
-        }
-      },
-      "RunResponse": {
-        "type": "object",
-        "properties": {
-          "context": {
-            "type": "object",
-            "additionalProperties": true
-          },
-          "questions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/QuestionAnswer"
-            }
-          },
-          "final_recommendation": {
-            "$ref": "#/components/schemas/FinalRecommendation"
-          }
-        },
-        "required": [
-          "context",
-          "questions",
-          "final_recommendation"
-        ]
-      }
+  "tags": [
+    {
+      "name": "Targetval Gateway (Full 22Q)"
     }
-  },
+  ],
   "paths": {
-    "/healthz": {
-      "get": {
-        "operationId": "healthzV1",
-        "summary": "Health check",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/modules": {
-      "get": {
-        "operationId": "listModulesV1",
-        "summary": "List canonical module keys (64) from registry",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/module": {
+    "/v1/targetval/run": {
       "post": {
-        "operationId": "runModuleV1",
-        "summary": "Run a single module by key",
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
+        ],
+        "summary": "Run Gateway",
+        "operationId": "run_gateway_v1_targetval_run_post",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ModuleRunRequest"
+                "$ref": "#/components/schemas/RunRequest"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Module output",
+            "description": "Run completed",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "$ref": "#/components/schemas/RunResponse"
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
           }
         }
       }
     },
-    "/module/{name}": {
+    "/v1/targetval/modules": {
       "get": {
-        "operationId": "runModuleByNameV1",
-        "summary": "Run a single module by key (GET)",
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
+        ],
+        "summary": "List module keys",
+        "operationId": "list_modules_v1_targetval_modules_get",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "modules": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "modules"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/v1/targetval/module/{name}": {
+      "get": {
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
+        ],
+        "summary": "Run a single module (GET)",
+        "operationId": "run_module_v1_targetval_module_name_get",
         "parameters": [
           {
             "in": "path",
@@ -779,19 +109,19 @@
             "required": true,
             "schema": {
               "type": "string"
+            },
+            "description": "Module key (e.g., genetics-l2g)"
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "schema": {
+              "type": "string"
             }
           },
           {
             "in": "query",
             "name": "gene",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Alias of 'symbol'."
-          },
-          {
-            "in": "query",
-            "name": "symbol",
             "schema": {
               "type": "string"
             }
@@ -850,9 +180,7 @@
             "name": "limit",
             "schema": {
               "type": "integer",
-              "minimum": 1,
-              "maximum": 500,
-              "default": 100
+              "minimum": 1
             }
           },
           {
@@ -860,16 +188,14 @@
             "name": "offset",
             "schema": {
               "type": "integer",
-              "minimum": 0,
-              "default": 0
+              "minimum": 0
             }
           },
           {
             "in": "query",
             "name": "strict",
             "schema": {
-              "type": "boolean",
-              "default": false
+              "type": "boolean"
             }
           }
         ],
@@ -879,262 +205,36 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "$ref": "#/components/schemas/ModuleResponse"
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
           }
         }
       }
     },
-    "/aggregate": {
+    "/v1/module": {
       "post": {
-        "operationId": "aggregateModulesV1",
-        "summary": "Run many modules; sequential or parallel; optional domain filter",
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
+        ],
+        "summary": "Run a single module (POST; compat wrapper)",
+        "operationId": "run_module_v1_module_post",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AggregateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Aggregate output",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/domain/{domain_id}/run": {
-      "post": {
-        "operationId": "runDomainV1",
-        "summary": "Run all modules of a domain sequentially",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "domain_id",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 6
-            }
-          }
-        ],
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DomainRunRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Domain aggregate output",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/lit/meta": {
-      "get": {
-        "operationId": "litMetaV1",
-        "summary": "Literature meta/search",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "gene",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "symbol",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "efo",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
-              "default": 50
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/lit/search": {
-      "get": {
-        "operationId": "litSearchV1",
-        "summary": "Europe PMC search (5y default window)",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "symbol",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "window_days",
-            "schema": {
-              "type": "integer",
-              "default": 1825
-            }
-          },
-          {
-            "in": "query",
-            "name": "page_size",
-            "schema": {
-              "type": "integer",
-              "default": 50
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/lit/claims": {
-      "get": {
-        "operationId": "litClaimsV1",
-        "summary": "PubTator3 relations proxy",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "symbol",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "type": "integer",
-              "default": 50
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/lit/score": {
-      "post": {
-        "operationId": "litScoreV1",
-        "summary": "Score literature items (objective rubric)",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "items": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
-                  }
-                },
-                "required": [
-                  "items"
-                ]
+                "$ref": "#/components/schemas/ModuleRequest"
               }
             }
           }
@@ -1145,257 +245,30 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Evidence"
+                  "$ref": "#/components/schemas/ModuleResponse"
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
           }
         }
       }
     },
-    "/synth/targetcard": {
+    "/v1/run": {
       "post": {
-        "operationId": "synthTargetcardV1",
-        "summary": "Assemble a target card (modules + literature)",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SynthIntegrateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Evidence"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/synth/integrate": {
-      "post": {
-        "operationId": "synthIntegrateV1",
-        "summary": "Synthesis/integration across modules",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SynthIntegrateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/synth/bucket": {
-      "get": {
-        "operationId": "synthBucketV1",
-        "summary": "Mathematical synthesis per bucket",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "gene",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Alias of 'symbol'."
-          },
-          {
-            "in": "query",
-            "name": "symbol",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "efo",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1000,
-              "default": 50
-            }
-          },
-          {
-            "in": "query",
-            "name": "mode",
-            "schema": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "live",
-                "snapshot"
-              ]
-            }
-          }
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
         ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/domains": {
-      "get": {
-        "operationId": "listDomainsV1",
-        "summary": "List domain IDs, names, and module keys",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    },
-                    "domains": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "id": {
-                            "type": "integer"
-                          },
-                          "name": {
-                            "type": "string"
-                          },
-                          "modules": {
-                            "type": "array",
-                            "items": {
-                              "type": "string"
-                            }
-                          }
-                        },
-                        "required": [
-                          "id",
-                          "name",
-                          "modules"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "domains"
-                  ]
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/synth/therapeutic-index": {
-      "get": {
-        "operationId": "synthTherapeuticIndexV1",
-        "summary": "Assemble Domain 5 (Therapeutic index & safety translation) + literature overlay",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "gene",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Alias of 'symbol'."
-          },
-          {
-            "in": "query",
-            "name": "symbol",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "condition",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 500,
-              "default": 100
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/targetval/run": {
-      "post": {
-        "summary": "Run the 22-question TargetVal workflow",
-        "operationId": "runTargetVal22Q",
+        "summary": "Run Gateway (compat wrapper)",
+        "operationId": "run_gateway_v1_run_post",
         "requestBody": {
           "required": true,
           "content": {
@@ -1408,11 +281,628 @@
         },
         "responses": {
           "200": {
-            "description": "Workflow output",
+            "description": "Run completed",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/v1/modules": {
+      "get": {
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
+        ],
+        "summary": "List module keys (compat wrapper)",
+        "operationId": "list_modules_v1_modules_get",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "modules": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "modules"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/v1/module/{name}": {
+      "get": {
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
+        ],
+        "summary": "Run a single module (compat wrapper)",
+        "operationId": "run_module_v1_module_name_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "uniprot_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tissue",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cell_type",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "species",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "strict",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/run": {
+      "post": {
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
+        ],
+        "summary": "Run Gateway (root compat)",
+        "operationId": "run_gateway_root_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/modules": {
+      "get": {
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
+        ],
+        "summary": "List module keys (root compat)",
+        "operationId": "list_modules_root_get",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "modules": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "modules"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/module/{name}": {
+      "get": {
+        "tags": [
+          "Targetval Gateway (Full 22Q)"
+        ],
+        "summary": "Run a single module (root compat)",
+        "operationId": "run_module_root_name_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ensembl_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "uniprot_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "efo",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tissue",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cell_type",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "species",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "strict",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/v1/readyz": {
+      "get": {
+        "summary": "Readiness probe",
+        "operationId": "readyz_v1_get",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "summary": "Readiness probe (root compat)",
+        "operationId": "readyz_root_get",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "RunRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "gene_symbol": {
+            "type": "string",
+            "description": "HGNC symbol, e.g. IL23R"
+          },
+          "ensembl_id": {
+            "type": "string",
+            "description": "ENSG identifier"
+          },
+          "uniprot_id": {
+            "type": "string",
+            "description": "UniProt accession"
+          },
+          "trait_efo": {
+            "type": "string",
+            "description": "EFO ID for trait/condition"
+          },
+          "trait_label": {
+            "type": "string",
+            "description": "Human-readable trait label"
+          },
+          "rsid": {
+            "type": "string",
+            "description": "Lead variant rsID"
+          },
+          "region": {
+            "type": "string",
+            "description": "Genomic region (e.g. chr:pos-window)"
+          },
+          "run_questions": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 22
+            }
+          },
+          "strict_human": {
+            "type": "boolean",
+            "default": true
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional limit for heavy modules"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RunResponse": {
+        "type": "object",
+        "description": "Gateway run response containing per-question evidence and final recommendation.",
+        "additionalProperties": true,
+        "properties": {
+          "context": {
+            "type": "object"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "final_recommendation": {
+            "type": "object"
+          }
+        }
+      },
+      "ModuleRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Module key to run"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "symbol": {
+                "type": "string"
+              },
+              "gene": {
+                "type": "string"
+              },
+              "ensembl_id": {
+                "type": "string"
+              },
+              "uniprot_id": {
+                "type": "string"
+              },
+              "efo": {
+                "type": "string"
+              },
+              "condition": {
+                "type": "string"
+              },
+              "tissue": {
+                "type": "string"
+              },
+              "cell_type": {
+                "type": "string"
+              },
+              "species": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "integer"
+              },
+              "offset": {
+                "type": "integer"
+              },
+              "strict": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "ModuleResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "module": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "provenance": {
+            "type": "object"
+          }
+        }
+      },
+      "HTTPValidationError": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationErrorItem"
+            }
+          }
+        },
+        "title": "HTTPValidationError"
+      },
+      "ValidationErrorItem": {
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "properties": {
+          "loc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "title": "ValidationError"
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Bad Request",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ModuleResponse"
+            }
+          }
+        }
+      },
+      "ValidationError": {
+        "description": "Validation error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "Server error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "detail": {
+                  "type": "string"
                 }
               }
             }
