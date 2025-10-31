@@ -1,4 +1,3 @@
-
 # app/main.py (revised)
 from __future__ import annotations
 
@@ -43,7 +42,7 @@ ROUTER_DOMAIN_MODULES = getattr(_router_mod, "DOMAIN_MODULES", None)
 # ------------------------------------------------------------------------------
 # App metadata / env
 # ------------------------------------------------------------------------------
-APP_TITLE = os.getenv("APP_TITLE", "TargetVal Gateway (Actions Surface) â Full")
+APP_TITLE = os.getenv("APP_TITLE", "TargetVal Gateway (Actions Surface) — Full")
 APP_VERSION = os.getenv("APP_VERSION", "2025.10")
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 DOCS_URL = os.getenv("DOCS_URL", "/docs")
@@ -181,7 +180,7 @@ async def _self_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         return r.json()
 
 # ------------------------------------------------------------------------------
-# Minimal health â everything else is served by the router under /v1
+# Minimal health — everything else is served by the router under /v1
 # ------------------------------------------------------------------------------
 @app.get("/healthz")
 @app.get("/v1/healthz")
