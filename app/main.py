@@ -1,10 +1,12 @@
-# app/main.py
+
+# app/main.py (revised)
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
 import sys
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -27,10 +29,10 @@ log = logging.getLogger("targetval.main")
 # Import router (prefer monolithic full router; fallback to legacy router)
 # ------------------------------------------------------------------------------
 try:
-    from app.routers import targetval_router_full as _router_mod  # monolithic router you approved
+    from app.routers import targetval_router_full as _router_mod  # monolithic router
     log.info("Loaded router: app.routers.targetval_router_full")
 except Exception:
-    from app.routers import targetval_router as _router_mod          # legacy router (still supported)
+    from app.routers import targetval_router as _router_mod        # legacy router (supported)
     log.info("Loaded router: app.routers.targetval_router")
 
 tv_router = _router_mod.router
@@ -48,8 +50,96 @@ DOCS_URL = os.getenv("DOCS_URL", "/docs")
 OPENAPI_URL = os.getenv("OPENAPI_URL", "/openapi.json")
 
 # "compat" wrappers mirror the classic /modules,/module,/aggregate,/domain endpoints at app-level
-# They internally call the mounted router under /v1 and exist to preserve long-lived clients.
+# They internally call the mounted router and exist to preserve long-lived clients.
 WRAPPERS_ENABLED = os.getenv("WRAPPERS_ENABLED", "1").strip() not in ("0", "false", "False")
+
+# ------------------------------------------------------------------------------
+# Add missing endpoints **onto the router itself** so they appear under /v1/*
+# The router has prefix="/targetval", so these become:
+#   GET  /v1/targetval/modules
+#   GET  /v1/targetval/module/{name}
+# These are used by the compat wrappers via internal self-calls.
+# ------------------------------------------------------------------------------
+
+class EvidenceLegacy(BaseModel):
+    status: str                # "OK" | "ERROR" | "NO_DATA"
+    source: str
+    fetched_n: int
+    data: Dict[str, Any]
+    citations: List[str] = []
+    fetched_at: float
+    debug: Optional[Dict[str, Any]] = None
+
+def _env_to_legacy_evidence(module_key: str, env: Any) -> EvidenceLegacy:
+    # Map router's EvidenceEnvelope -> legacy Evidence
+    try:
+        status_enum = getattr(env, "status", None)
+        status = str(status_enum.value if hasattr(status_enum, "value") else status_enum or "OK")
+        if status not in {"OK", "NO_DATA"}:
+            status = "ERROR" if status not in {"OK", "NO_DATA"} else status
+    except Exception:
+        status = "OK"
+    prov = getattr(env, "provenance", None)
+    sources = getattr(prov, "sources", None) or []
+    # "records" is a List[Dict], default to empty list
+    records = getattr(env, "records", None) or []
+    # default source: first provenance source or module primary url
+    src = sources[0] if sources else (MODULES.get(module_key).primary.get("url") if isinstance(MODULES, dict) and module_key in MODULES else module_key)
+    out = EvidenceLegacy(
+        status=status,
+        source=str(src),
+        fetched_n=len(records) if isinstance(records, list) else (1 if records else 0),
+        data={"records": records, "context": getattr(env, "context", None).model_dump() if hasattr(getattr(env, "context", None), "model_dump") else getattr(env, "context", None)},
+        citations=[str(s) for s in sources],
+        fetched_at=time.time(),
+        debug={
+            "module": module_key,
+            "edge_count": len(getattr(env, "edges", []) or []),
+            "warnings": getattr(prov, "warnings", []) if prov is not None else [],
+            "error": getattr(env, "error", None)
+        }
+    )
+    return out
+
+@tv_router.get("/modules", tags=["Modules"])
+async def _router_list_modules() -> List[str]:
+    if isinstance(MODULES, dict) and MODULES:
+        return sorted(list(MODULES.keys()))
+    return []
+
+@tv_router.get("/module/{name}", response_model=EvidenceLegacy, tags=["Modules"])
+async def _router_run_module_get(
+    name: str,
+    gene: Optional[str] = None,
+    symbol: Optional[str] = None,
+    ensembl_id: Optional[str] = None,
+    uniprot_id: Optional[str] = None,
+    efo: Optional[str] = None,
+    condition: Optional[str] = None,
+    tissue: Optional[str] = None,
+    cell_type: Optional[str] = None,
+    species: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    strict: bool = False,  # accepted for parity; passed through in ctx
+) -> EvidenceLegacy:
+    if not (isinstance(MODULES, dict) and name in MODULES):
+        raise HTTPException(status_code=404, detail=f"Unknown module: {name}")
+    ctx = {
+        "hgnc": symbol or gene,
+        "ensg": ensembl_id,
+        "uniprot": uniprot_id,
+        "efo": efo,
+        "trait_label": condition,
+        "tissue": tissue,
+        "cell_type": cell_type,
+        "species": species,
+        "limit": limit,
+        "offset": offset,
+        "strict": strict,
+    }
+    env = await _router_mod.run_module(name, ctx)  # returns EvidenceEnvelope
+    return _env_to_legacy_evidence(name, env)
 
 # ------------------------------------------------------------------------------
 # FastAPI app
@@ -71,7 +161,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount full router under /v1 (matches OpenAPI servers and keeps public surface stable)
+# Mount router under /v1 (matches OpenAPI servers and keeps public surface stable)
 app.include_router(tv_router, prefix="/v1")
 
 # ------------------------------------------------------------------------------
@@ -94,14 +184,17 @@ async def _self_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
 # Minimal health â everything else is served by the router under /v1
 # ------------------------------------------------------------------------------
 @app.get("/healthz")
+@app.get("/v1/healthz")
 async def healthz():
     return {"ok": True, "version": APP_VERSION}
 
 @app.get("/livez")
+@app.get("/v1/livez")
 async def livez():
     return {"ok": True, "router": _router_mod.__name__, "import_ok": True}
 
 @app.get("/readyz")
+@app.get("/v1/readyz")
 async def readyz():
     return {
         "ok": True,
@@ -126,7 +219,7 @@ if WRAPPERS_ENABLED:
         debug: Optional[Dict[str, Any]] = None
 
     class ModuleRunRequest(BaseModel):
-        module_key: str = Field(..., description="One of the 64 keys from /modules")
+        module_key: str
         gene: Optional[str] = Field(None, description="Alias of 'symbol'.")
         symbol: Optional[str] = None
         ensembl_id: Optional[str] = None
@@ -136,10 +229,10 @@ if WRAPPERS_ENABLED:
         tissue: Optional[str] = None
         cell_type: Optional[str] = None
         species: Optional[str] = None
-        limit: Optional[int] = Field(100, ge=1, le=500)
-        offset: Optional[int] = Field(0, ge=0)
-        strict: Optional[bool] = False
-        extra: Optional[Dict[str, Any]] = None
+        limit: int = Field(100, ge=1, le=500)
+        offset: int = Field(0, ge=0)
+        strict: bool = False
+        extra: Dict[str, Any] = {}
 
     class AggregateRequest(BaseModel):
         modules: Optional[List[str]] = None
@@ -159,7 +252,7 @@ if WRAPPERS_ENABLED:
         cell_type: Optional[str] = None
         species: Optional[str] = None
         cutoff: Optional[float] = None
-        extra: Optional[Dict[str, Any]] = None
+        extra: Dict[str, Any] = {}
 
     class DomainRunRequest(BaseModel):
         primary_only: bool = True
@@ -175,16 +268,16 @@ if WRAPPERS_ENABLED:
         cell_type: Optional[str] = None
         species: Optional[str] = None
         cutoff: Optional[float] = None
-        extra: Optional[Dict[str, Any]] = None
+        extra: Dict[str, Any] = {}
 
+    # -------- helpers (wrappers) --------
     def _module_map() -> Dict[str, str]:
+        # Map module key -> router path we just added above
         mapping: Dict[str, str] = {}
         try:
-            for m in (MODULES or []):
-                name = getattr(m, "name", None) or getattr(m, "key", None)
-                route = getattr(m, "route", None)
-                if name and route:
-                    mapping[str(name)] = str(route)
+            if isinstance(MODULES, dict):
+                for key in MODULES.keys():
+                    mapping[str(key)] = f"/targetval/module/{key}"
         except Exception:
             pass
         return mapping
@@ -196,7 +289,9 @@ if WRAPPERS_ENABLED:
             return D
         return {str(i): [] for i in range(1, 7)} | {f"D{i}": [] for i in range(1, 7)}
 
+    # -------- discovery --------
     @app.get("/modules")
+    @app.get("/v1/modules")
     async def list_modules() -> List[str]:
         mm = _module_map()
         if mm:
@@ -209,10 +304,11 @@ if WRAPPERS_ENABLED:
         return sorted(seen.keys())
 
     @app.get("/domains")
+    @app.get("/v1/domains")
     async def list_domains():
         dmap = _domain_modules()
         out = []
-        for i in range(1, 7):
+        for i in range(1, 6 + 1):
             out.append({
                 "id": i,
                 "name": (ROUTER_DOMAINS_META or {}).get(i, {}).get("name", f"Domain {i}"),
@@ -220,7 +316,9 @@ if WRAPPERS_ENABLED:
             })
         return {"ok": True, "domains": out}
 
+    # -------- single module --------
     @app.get("/module/{name}", response_model=Evidence)
+    @app.get("/v1/module/{name}", response_model=Evidence)
     async def run_module_get(
         name: str,
         gene: Optional[str] = None,
@@ -235,7 +333,7 @@ if WRAPPERS_ENABLED:
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
         strict: bool = False,
-    ):
+    ) -> Any:
         mm = _module_map()
         if name not in mm:
             raise HTTPException(status_code=404, detail=f"Unknown module: {name}")
@@ -255,6 +353,7 @@ if WRAPPERS_ENABLED:
         return await _self_get(mm[name], params)  # type: ignore[return-value]
 
     @app.post("/module", response_model=Evidence)
+    @app.post("/v1/module", response_model=Evidence)
     async def run_module_post(body: ModuleRunRequest) -> Any:
         mm = _module_map()
         key = body.module_key
@@ -275,7 +374,9 @@ if WRAPPERS_ENABLED:
         )
         return await _self_get(mm[key], params)  # type: ignore[return-value]
 
+    # -------- aggregate --------
     @app.post("/aggregate")
+    @app.post("/v1/aggregate")
     async def aggregate_modules(req: AggregateRequest):
         mm = _module_map()
         dmap = _domain_modules()
@@ -330,9 +431,11 @@ if WRAPPERS_ENABLED:
 
         return {"ok": True, "requested": {"modules": modules, "domain": req.domain}, "results": results, "errors": errors}
 
+    # -------- domain run --------
     @app.post("/domain/{domain_id}/run")
+    @app.post("/v1/domain/{domain_id}/run")
     async def run_domain(
-        domain_id: int = PathParam(..., ge=1, le=6, description="Domain id 1..6"),  # MUST be Path, not Query
+        domain_id: int = PathParam(ge=1, le=6, description="Domain id 1..6"),  # MUST be Path, not Query
         body: Optional[DomainRunRequest] = Body(None),
     ):
         req = body or DomainRunRequest()
