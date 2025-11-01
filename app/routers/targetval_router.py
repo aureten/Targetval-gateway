@@ -211,18 +211,11 @@ def _cb_on_failure(host: str, was_429: bool=False) -> None:
         st["open_until"] = _now_ts() + CB_OPEN_SECONDS
 
 def _adaptive_retry_base(host: str) -> float:
-    # allow per-host override of base backoff; otherwise adapt to recent 429s
-    ov = HOST_OVERRIDES.get(host) or {}
-    try:
-        base = float(ov.get("retry_base", HTTP_RETRY_BASE))
-    except Exception:
-        base = HTTP_RETRY_BASE
+    base = HTTP_RETRY_BASE
     st = _host_state.get(host) or {}
     r429 = int(st.get("recent_429", 0))
     if r429 > 0:
         base = base * min(3.0, 1.0 + 0.5 * r429)
-    return base
-0 + 0.5 * r429)
     return base
 
 
@@ -980,18 +973,11 @@ def _cb_on_failure(host: str, was_429: bool=False) -> None:
         st["open_until"] = _now_ts() + CB_OPEN_SECONDS
 
 def _adaptive_retry_base(host: str) -> float:
-    # allow per-host override of base backoff; otherwise adapt to recent 429s
-    ov = HOST_OVERRIDES.get(host) or {}
-    try:
-        base = float(ov.get("retry_base", HTTP_RETRY_BASE))
-    except Exception:
-        base = HTTP_RETRY_BASE
+    base = HTTP_RETRY_BASE
     st = _host_state.get(host) or {}
     r429 = int(st.get("recent_429", 0))
     if r429 > 0:
         base = base * min(3.0, 1.0 + 0.5 * r429)
-    return base
-0 + 0.5 * r429)
     return base
 
 
@@ -1040,6 +1026,7 @@ class EvidenceStatus(str, Enum):
     NO_DATA = "NO_DATA"
     UPSTREAM_ERROR = "UPSTREAM_ERROR"
     RATE_LIMITED = "RATE_LIMITED"
+    CIRCUIT_OPEN = "CIRCUIT_OPEN"
 
 class Edge(BaseModel):
 
@@ -1794,43 +1781,3 @@ def _is_no_data(payload):
     except Exception:
         pass
     return False
-
-
-
-@router.get("/status")
-async def status():
-    # report circuit + semaphore + overrides
-    try:
-        hosts = {}
-        for host in sorted(list(HOST_ALLOW or set())):
-            st = _host_state.get(host, {})
-            sem = _host_semaphores.get(host)
-            ov = HOST_OVERRIDES.get(host, {})
-            hosts[host] = {
-                "circuit": {
-                    "open": bool(st.get("open_until", 0) > _now_ts()),
-                    "open_until": st.get("open_until", 0),
-                    "fails": st.get("fails", 0),
-                    "threshold": CB_FAILURE_THRESHOLD,
-                    "open_seconds": CB_OPEN_SECONDS,
-                },
-                "semaphore": getattr(sem, "_value", None) if sem else None,
-                "overrides": ov,
-            }
-        return {
-            "hosts": hosts,
-            "global_concurrency": GLOBAL_CONCURRENCY,
-            "defaults": {
-                "retry_attempts": HTTP_RETRY_ATTEMPTS,
-                "retry_base": HTTP_RETRY_BASE,
-                "timeouts": {
-                    "connect": HTTP_CONNECT_TIMEOUT,
-                    "read": HTTP_READ_TIMEOUT,
-                    "write": HTTP_WRITE_TIMEOUT
-                },
-                "cb": {"threshold": CB_FAILURE_THRESHOLD, "open_seconds": CB_OPEN_SECONDS},
-                "ttl": {"FAST": TTL_FAST, "MODERATE": TTL_MODERATE, "SLOW": TTL_SLOW},
-            },
-        }
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=f"status endpoint error: {ex}")
