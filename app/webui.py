@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 # Per-module budget so one slow/dead upstream never stalls the whole page.
 ASK_MODULE_TIMEOUT_S = float(os.getenv("ASK_MODULE_TIMEOUT_S", "22"))
-ASK_CONCURRENCY = int(os.getenv("ASK_CONCURRENCY", "16"))
+ASK_CONCURRENCY = int(os.getenv("ASK_CONCURRENCY", "24"))
 
 # Common nicknames -> official HGNC gene symbols. mygene also resolves many
 # aliases, but seeding the obvious immuno-oncology ones keeps it snappy/reliable.
@@ -132,12 +132,22 @@ async def _resolve_efo(condition: Optional[str]) -> Optional[str]:
     return None
 
 
-def register_webui(app, self_get: Callable, modules: Optional[Dict[str, Any]]) -> None:
+def register_webui(app, self_get: Callable, modules: Optional[Dict[str, Any]],
+                   domain_modules: Optional[Dict[int, List[str]]] = None,
+                   domains_meta: Optional[Dict[int, Dict[str, str]]] = None) -> None:
     available = set(modules.keys()) if isinstance(modules, dict) else set()
+    dmods: Dict[int, List[str]] = {int(k): list(v) for k, v in (domain_modules or {}).items()}
+    dmeta: Dict[int, Dict[str, str]] = {int(k): v for k, v in (domains_meta or {}).items()}
+    # module -> (domain_id, domain_name)
+    mod_domain: Dict[str, Tuple[int, str]] = {}
+    for did, mlist in dmods.items():
+        name = (dmeta.get(did) or {}).get("name", f"Domain {did}")
+        for m in mlist:
+            mod_domain[m] = (did, name)
 
     @app.get("/ask", include_in_schema=False)
     async def ask(q: str = Query(..., description="Free-text inquiry, e.g. 'B7H7 for oncology'"),
-                  deep: bool = False):
+                  quick: bool = False):
         gene_tok, condition = _parse_query(q)
         gene = await _resolve_gene(gene_tok or "")
         efo = await _resolve_efo(condition)
@@ -150,38 +160,76 @@ def register_webui(app, self_get: Callable, modules: Optional[Dict[str, Any]]) -
             "uniprot_id": resolved["uniprot_id"], "efo": resolved["efo"],
             "condition": resolved["condition"], "limit": 25,
         }
-        mods = [m for m in (sorted(available) if deep else CURATED_MODULES) if m in available]
+        # Default: every module, grouped by domain. quick=true -> fast curated set.
+        mods = [m for m in (CURATED_MODULES if quick else sorted(available)) if m in available]
         sem = asyncio.Semaphore(ASK_CONCURRENCY)
 
         async def _one(key: str) -> Dict[str, Any]:
+            did, dname = mod_domain.get(key, (0, "Other"))
+            base = {"module": key, "domain_id": did, "domain": dname}
             async with sem:
                 try:
                     env = await asyncio.wait_for(
                         self_get(f"/targetval/module/{key}", params),
                         timeout=ASK_MODULE_TIMEOUT_S,
                     )
-                    return {
-                        "module": key,
-                        "status": env.get("status", "?"),
-                        "source": env.get("source", ""),
-                        "fetched_n": env.get("fetched_n", 0),
-                        "raw": env.get("data"),
-                    }
+                    base.update(status=env.get("status", "?"), source=env.get("source", ""),
+                                fetched_n=env.get("fetched_n", 0), raw=env.get("data"))
                 except asyncio.TimeoutError:
-                    return {"module": key, "status": "TIMEOUT", "source": "(slow upstream)",
-                            "fetched_n": 0, "raw": {"error": f"exceeded {ASK_MODULE_TIMEOUT_S}s"}}
+                    base.update(status="TIMEOUT", source="(slow upstream)", fetched_n=0,
+                                raw={"error": f"exceeded {ASK_MODULE_TIMEOUT_S}s"})
                 except Exception as e:
-                    return {"module": key, "status": "ERROR", "source": "(gateway)",
-                            "fetched_n": 0, "raw": {"error": str(e)}}
+                    base.update(status="ERROR", source="(gateway)", fetched_n=0,
+                                raw={"error": str(e)})
+            return base
 
-        # Run modules concurrently so the page returns in ~one module's time.
         results: List[Dict[str, Any]] = await asyncio.gather(*[_one(k) for k in mods])
-        ok = sum(1 for r in results if r["status"] == "OK")
+        results.sort(key=lambda r: (r["domain_id"], r["module"]))
+
+        def _is_ok(r): return r["status"] == "OK"
+        def _is_nd(r): return r["status"] == "NO_DATA"
+        ok = sum(1 for r in results if _is_ok(r))
+        nd = sum(1 for r in results if _is_nd(r))
+        err = len(results) - ok - nd
+
+        # Per-domain rollup for the report
+        domains_report = []
+        seen_ids = sorted({r["domain_id"] for r in results})
+        for did in seen_ids:
+            drs = [r for r in results if r["domain_id"] == did]
+            with_data = [{"module": r["module"], "source": r["source"], "n": r["fetched_n"]}
+                         for r in drs if _is_ok(r)]
+            domains_report.append({
+                "id": did, "name": drs[0]["domain"],
+                "ok": sum(1 for r in drs if _is_ok(r)),
+                "no_data": sum(1 for r in drs if _is_nd(r)),
+                "error": sum(1 for r in drs if not _is_ok(r) and not _is_nd(r)),
+                "with_data": with_data,
+            })
+
+        # Honest plain-English readout (coverage, not fabricated biology)
+        strong = sorted([d for d in domains_report if d["ok"] > 0],
+                        key=lambda d: -d["ok"])
+        empty = [d["name"] for d in domains_report if d["ok"] == 0]
+        verdict_bits = [
+            f"Live data returned from {ok} of {len(results)} modules across "
+            f"{len(seen_ids)} evidence domains for {resolved['symbol']}"
+            + (f" in {resolved['condition']}" if resolved['condition'] else "") + "."
+        ]
+        if strong:
+            top = ", ".join(f"{d['name']} ({d['ok']})" for d in strong[:3])
+            verdict_bits.append(f"Strongest coverage: {top}.")
+        if empty:
+            verdict_bits.append("No data: " + ", ".join(empty) + ".")
+        if err:
+            verdict_bits.append(f"{err} module(s) errored or timed out (often slow/cold "
+                                "upstreams — re-run to retry).")
+
         return JSONResponse({
             "query": q, "resolved": resolved,
-            "summary": {"modules": len(results), "ok": ok,
-                        "no_data": sum(1 for r in results if r["status"] == "NO_DATA"),
-                        "error": sum(1 for r in results if r["status"] not in ("OK", "NO_DATA"))},
+            "summary": {"modules": len(results), "ok": ok, "no_data": nd,
+                        "error": err, "mode": "quick" if quick else "full"},
+            "report": {"verdict": " ".join(verdict_bits), "domains": domains_report},
             "results": results,
         })
 
@@ -222,6 +270,13 @@ _CHAT_HTML = """<!doctype html>
  pre { overflow:auto; background:#010409; padding:10px; border-radius:8px; font-size:12px; max-height:320px; }
  .status { color:#8b949e; font-size:14px; margin-bottom:12px; }
  .spin { display:inline-block; animation: s 1s linear infinite; } @keyframes s { to { transform: rotate(360deg);} }
+ .report { background:#0d1117; border:1px solid #1f6feb; border-radius:10px; padding:14px; margin-bottom:16px; }
+ .report h2 { font-size:15px; margin:0 0 8px; color:#58a6ff; }
+ .report .verdict { font-size:14px; margin-bottom:10px; }
+ .drow { display:flex; justify-content:space-between; gap:8px; padding:6px 0; border-top:1px solid #21262d; font-size:13px; }
+ .drow .dn { font-weight:600; } .drow .dc { color:#8b949e; white-space:nowrap; }
+ .pill { font-size:11px; padding:1px 7px; border-radius:999px; margin-left:6px; }
+ .dhead { margin:18px 0 8px; font-size:14px; font-weight:700; color:#8b949e; text-transform:uppercase; letter-spacing:.04em; }
 </style></head>
 <body>
 <header><h1>TargetVal — Ask</h1><p>Type a target and indication in plain English. No code.</p></header>
@@ -231,34 +286,48 @@ _CHAT_HTML = """<!doctype html>
    <a onclick="ex('B7H7 for oncology')">B7H7 for oncology</a> ·
    <a onclick="ex('PCSK9 for hypercholesterolemia')">PCSK9 for hypercholesterolemia</a> ·
    <a onclick="ex('TIGIT for lung cancer')">TIGIT for lung cancer</a>
-   &nbsp;|&nbsp; <label><input type="checkbox" id="deep"> deep (all modules, slower)</label>
+   &nbsp;|&nbsp; <label><input type="checkbox" id="quick"> quick (14 fast modules only)</label>
  </div>
  <div id="out"></div>
 </main>
 <script>
 const $ = s => document.querySelector(s);
 function ex(t){ $('#q').value = t; $('#f').dispatchEvent(new Event('submit')); }
+function cls(st){ return st==='OK'?'OK':(st==='NO_DATA'?'NO_DATA':'ERR'); }
 $('#f').addEventListener('submit', async (e) => {
   e.preventDefault();
   const q = $('#q').value.trim(); if(!q) return;
-  const deep = $('#deep').checked;
+  const quick = $('#quick').checked;
   $('#go').disabled = true;
-  $('#out').innerHTML = '<div class="status"><span class="spin">⏳</span> Resolving & querying data sources… (first call may take ~30s if the service was asleep)</div>';
+  $('#out').innerHTML = '<div class="status"><span class="spin">⏳</span> Resolving & querying all data sources… (first call may take ~30–60s if the service was asleep; full run covers every module)</div>';
   try {
-    const r = await fetch(`/ask?q=${encodeURIComponent(q)}${deep?'&deep=true':''}`);
+    const r = await fetch(`/ask?q=${encodeURIComponent(q)}${quick?'&quick=true':''}`);
     const d = await r.json();
     const rz = d.resolved || {};
     const s = d.summary || {};
+    const rep = d.report || {};
+    // 1) Resolved line
     let html = `<div class="resolved">Understood as → gene <b>${rz.symbol||'?'}</b>`
       + (rz.ensembl_id?` (<b>${rz.ensembl_id}</b>)`:'')
       + (rz.uniprot_id?` · UniProt <b>${rz.uniprot_id}</b>`:'')
       + (rz.condition?` · indication <b>${rz.condition}</b>`:'')
       + (rz.efo?` (<b>${rz.efo}</b>)`:'')
-      + `<br><span class="src">${s.ok} OK · ${s.no_data} no-data · ${s.error} error across ${s.modules} modules</span></div>`;
+      + `<br><span class="src">${s.ok} OK · ${s.no_data} no-data · ${s.error} error across ${s.modules} modules (${s.mode} mode)</span></div>`;
+    // 2) Summary report (verdict + per-domain rollup)
+    html += `<div class="report"><h2>Summary report</h2><div class="verdict">${escapeHtml(rep.verdict||'')}</div>`;
+    for (const dm of (rep.domains||[])) {
+      html += `<div class="drow"><span class="dn">${dm.name}</span>`
+        + `<span class="dc"><span class="badge OK">${dm.ok} OK</span>`
+        + `<span class="badge NO_DATA">${dm.no_data}</span>`
+        + `<span class="badge ERR">${dm.error}</span></span></div>`;
+    }
+    html += `</div>`;
+    // 3) Cards grouped by domain
+    let lastDom = null;
     for (const it of (d.results||[])) {
-      const cls = it.status==='OK'?'OK':(it.status==='NO_DATA'?'NO_DATA':'ERR');
+      if (it.domain !== lastDom) { html += `<div class="dhead">${escapeHtml(it.domain||'Other')}</div>`; lastDom = it.domain; }
       html += `<div class="card"><div class="top"><span class="mod">${it.module}</span>`
-        + `<span class="badge ${cls}">${it.status}${it.fetched_n?(' · '+it.fetched_n):''}</span></div>`
+        + `<span class="badge ${cls(it.status)}">${it.status}${it.fetched_n?(' · '+it.fetched_n):''}</span></div>`
         + `<div class="src">${it.source||''}</div>`
         + `<details><summary>raw</summary><pre>${escapeHtml(JSON.stringify(it.raw,null,2)).slice(0,8000)}</pre></details></div>`;
     }

@@ -607,7 +607,8 @@ async def proxy_targetval_run_get_v1(
 # ------------------------------------------------------------------------------
 try:
     from app.webui import register_webui
-    register_webui(app, _self_get, MODULES)
+    register_webui(app, _self_get, MODULES,
+                   domain_modules=ROUTER_DOMAIN_MODULES, domains_meta=ROUTER_DOMAINS_META)
     log.info("Registered no-code web UI at /chat")
 except Exception as _e:  # never let the UI break the API
     log.warning("web UI not registered: %s", _e)
