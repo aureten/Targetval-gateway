@@ -530,7 +530,7 @@ def _register_modules():
     M["tract-immunogenicity"] = _mod("tract-immunogenicity","rest",{"url":EPMC_SEARCH,"method":"GET"},[{"url":"https://tools-api.iedb.org/population"}],TTL_MODERATE,"E4")
     M["tract-mhc-binding"] = _mod("tract-mhc-binding","rest",{"url":"https://tools-api.iedb.org/mhci/consensus","method":"POST"},[{"url":"https://tools-api.iedb.org/mhcii/consensus"}],TTL_FAST,"E4")
     M["tract-iedb-epitopes"] = _mod("tract-iedb-epitopes","rest",{"url":"https://www.iedb.org/api","method":"GET"},[],TTL_SLOW,"E4")
-    M["immuno/hla-coverage"] = _mod("immuno/hla-coverage","rest",{"url":"https://www.ebi.ac.uk/ipd/api","method":"GET"},[{"url":"https://tools-api.iedb.org/population"}],TTL_SLOW,"E4")
+    M["immuno-hla-coverage"] = _mod("immuno-hla-coverage","rest",{"url":"https://www.ebi.ac.uk/ipd/api","method":"GET"},[{"url":"https://tools-api.iedb.org/population"}],TTL_SLOW,"E4")
     M["function-dependency"] = _mod("function-dependency","rest",{"url":"https://webservice.thebiogrid.org/ORCS","method":"GET"},[{"url":"https://cellmodelpassports.sanger.ac.uk/api"}],TTL_MODERATE,"E4")
     M["perturb-depmap-dependency"] = _mod("perturb-depmap-dependency","rest",{"url":"https://cellmodelpassports.sanger.ac.uk/api","method":"GET"},[{"url":"https://webservice.thebiogrid.org/ORCS"}],TTL_MODERATE,"E4")
     M["clin-safety"] = _mod("clin-safety","rest",{"url":FAERS,"method":"GET"},[],TTL_FAST,"E6")
@@ -927,7 +927,7 @@ QUESTION_PLAN: Dict[int, Tuple[str, List[str], Callable[[], Dict[str, Any]]]] = 
     10: ("Where active; off-tissue exposure risk?", ["expr-baseline","assoc-sc","sc-hubmap","assoc-spatial","expr-localization","assoc-bulk-prot","assoc-bulk-rna"], math_selectivity_jsd),
     11: ("Partial modulation tolerability?", ["genetics-intolerance","genetics-pathogenicity-priors","genetics-rare","genetics-phewas-human-knockout"], lambda: math_noisy_or("Tolerability from genetics + phenotypes", ["constraint","rare","knockout"])),
     12: ("Essentiality/dependency red flags?", ["function-dependency","perturb-depmap-dependency"], lambda: {"method": "Multi-objective filter", "summary": "Dependency × selectivity"}),
-    13: ("Immunogenicity/HLA risks?", ["tract-iedb-epitopes","tract-mhc-binding","immuno/hla-coverage","tract-immunogenicity"], lambda: {"method": "Bayesian aggregation", "summary": "Observed + predicted epitopes × HLA frequencies"}),
+    13: ("Immunogenicity/HLA risks?", ["tract-iedb-epitopes","tract-mhc-binding","immuno-hla-coverage","tract-immunogenicity"], lambda: {"method": "Bayesian aggregation", "summary": "Observed + predicted epitopes × HLA frequencies"}),
     14: ("Which modality is most viable?", ["mech-structure","tract-ligandability-sm","tract-ligandability-ab","tract-surfaceome","tract-ligandability-oligo","tract-modality","tract-drugs"], lambda: {"method": "Rule-based + Pareto", "summary": "Feasible/fast/risk trade-offs"}),
     15: ("Starting points & polypharmacology stance?", ["tract-drugs","perturb-drug-response","mech-ppi","mech-pathways"], lambda: {"method": "Chemotype clusters + network proximity", "summary": "Interpret series vs biology"}),
     16: ("Reach site-of-action (systemic/local/BBB)?", ["expr-baseline","assoc-sc","expr-localization"], lambda: {"method": "Constraint satisfaction", "summary": "Tissue × modality × route"}),
