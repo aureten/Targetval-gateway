@@ -385,7 +385,7 @@ OPENGWAS_BASE = "https://gwas-api.mrcieu.ac.uk"
 ENSEMBL_VEP = "https://rest.ensembl.org/vep/human/region"
 ENCODE_BASE = "https://www.encodeproject.org"
 FOURDN_BASE = "https://data.4dnucleome.org"
-GTEX_BASE = "https://gtexportal.org/rest/v1"
+GTEX_BASE = "https://gtexportal.org/api/v2"
 STRING_BASE = "https://string-db.org/api"
 REACTOME = "https://reactome.org/AnalysisService"
 OMNIPATH = "https://www.omnipathdb.org/interactions"
@@ -503,7 +503,7 @@ def _register_modules():
     M["perturb-perturbseq-encode"] = _mod("perturb-perturbseq-encode","rest",{"url":f"{ENCODE_BASE}/search/","method":"GET"},[{"url":"https://www.ebi.ac.uk/ena/browser/api"}],TTL_MODERATE,"E4")
 
     # --- Expression & Context ---
-    M["expr-baseline"] = _mod("expr-baseline","rest",{"url":f"{GTEX_BASE}/gene/expression","method":"GET"},[{"url":"https://www.ebi.ac.uk/gxa/api/genes"}],TTL_MODERATE,"E3")
+    M["expr-baseline"] = _mod("expr-baseline","rest",{"url":f"{GTEX_BASE}/expression/geneExpression","method":"GET"},[{"url":"https://www.ebi.ac.uk/gxa/api/genes"}],TTL_MODERATE,"E3")
     M["assoc-sc"] = _mod("assoc-sc","rest",{"url":"https://azul.data.humancellatlas.org/index/projects","method":"GET"},[{"url":"https://api.cellxgene.cziscience.com/dp/v1/discover/datasets"}],TTL_MODERATE,"E3")
     M["sc-hubmap"] = _mod("sc-hubmap","rest",{"url":"https://search.api.hubmapconsortium.org/portal/search","method":"GET"},[],TTL_MODERATE,"E3")
     M["assoc-spatial"] = _mod("assoc-spatial","rest",{"url":EPMC_SEARCH,"method":"GET"},[],TTL_MODERATE,"E3/E4")
@@ -671,6 +671,11 @@ async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[
                         attempt += 1
                         continue
 
+                    # openFDA returns 404 to mean "no matching records" — treat as
+                    # an empty result (NO_DATA) rather than a hard error.
+                    if resp.status_code == 404 and host.endswith("api.fda.gov"):
+                        _cb_on_success(host)
+                        return {}
                     resp.raise_for_status()
                     # Try JSON; if not JSON but 200, treat as text payload
                     data = None
@@ -730,8 +735,20 @@ def build_params(module_key: str, ctx: Dict[str, Any]) -> Tuple[Dict[str, Any], 
     elif module_key == "genetics-ase-check":
         q = f'("{ctx.get("hgnc") or ctx.get("ensg")}") AND (ASE OR allele-specific)'
         params = {"query": q, "format": "json", "pageSize": 25}
+    elif module_key in {"genetics-intolerance","genetics-pathogenicity-priors"}:
+        # gnomAD is a GraphQL API; post a constraint query for the gene.
+        gql = ("query ($s: String!) { gene(gene_symbol: $s, reference_genome: GRCh38) "
+               "{ gene_id symbol gnomad_constraint { pli oe_lof oe_lof_lower oe_lof_upper "
+               "lof_z mis_z syn_z } } }")
+        body = {"query": gql, "variables": {"s": ctx.get("hgnc")}}
     elif module_key == "genetics-ptm-signal-lite":
-        params = {"query": f'accession:{ctx.get("uniprot")} AND (annotation:(type:PTM))'}
+        # New UniProt API: query by accession, request PTM feature fields.
+        params = {"query": f'accession:{ctx.get("uniprot")}',
+                  "fields": "ft_mod_res,ft_carbohyd,ft_lipid,cc_ptm", "format": "json"}
+    elif module_key == "mech-structure":
+        # UniProt structure cross-references (had no param case -> empty query -> 400).
+        params = {"query": f'accession:{ctx.get("uniprot")}',
+                  "fields": "xref_pdb,xref_alphafolddb,structure_3d", "format": "json"}
     elif module_key in {"genetics-lncrna","genetics-mirna"}:
         params = {"ids": ctx.get("hgnc") or ctx.get("ensg") or ctx.get("uniprot")}
     elif module_key.startswith("mech-") and "omnipath" in MODULES[module_key].primary["url"]:
@@ -754,7 +771,8 @@ def build_params(module_key: str, ctx: Dict[str, Any]) -> Tuple[Dict[str, Any], 
     elif module_key == "perturb-perturbseq-encode":
         params = {"searchTerm": ctx.get("hgnc") or ctx.get("ensg"), "type":"Annotation","format":"json"}
     elif module_key == "expr-baseline":
-        params = {"geneId": ctx.get("ensg") or ctx.get("hgnc")}
+        # GTEx v2 geneExpression keys on gencodeId.
+        params = {"gencodeId": ctx.get("ensg") or ctx.get("hgnc")}
     elif module_key in {"assoc-sc","sc-hubmap"}:
         params = {"q": ctx.get("hgnc") or ctx.get("ensg")}
     elif module_key == "expr-localization":
@@ -782,10 +800,17 @@ def build_params(module_key: str, ctx: Dict[str, Any]) -> Tuple[Dict[str, Any], 
     elif module_key == "perturb-drug-response":
         params = {"target": ctx.get("hgnc")}
     elif module_key in {"clin-safety","clin-rwe"}:
-        params = {"search": ctx.get("hgnc") or ctx.get("trait_label"), "count":"10"}
+        # openFDA: 'count' must be a field, not a number; use a valid field-qualified
+        # substance search. No marketed substance -> 404 -> mapped to NO_DATA in _fetch.
+        term = ctx.get("hgnc") or ctx.get("trait_label") or ""
+        params = {"search": f'patient.drug.openfda.substance_name:"{term}"', "limit": 5}
     elif module_key == "clin-on-target-ae-prior":
         params = {"search": ctx.get("hgnc")}
-    elif module_key in {"clin-endpoints","clin-feasibility","clin-pipeline"}:
+    elif module_key == "clin-pipeline":
+        # ClinicalTrials.gov v2 uses query.cond / query.term (not cond / term).
+        params = {"query.cond": ctx.get("trait_label") or ctx.get("efo"),
+                  "query.term": ctx.get("hgnc"), "pageSize": 25}
+    elif module_key in {"clin-endpoints","clin-feasibility"}:
         params = {"cond": ctx.get("trait_label") or ctx.get("efo"), "term": ctx.get("hgnc")}
     elif module_key in {"clin-biomarker-fit"}:
         params = {"q": ctx.get("trait_label") or ctx.get("efo")}
@@ -820,6 +845,15 @@ async def run_module(module_key: str, ctx: Dict[str, Any]) -> EvidenceEnvelope:
         )]
         prov.sources.append(source)
         env.status = EvidenceStatus.NO_DATA if _is_no_data(data) else EvidenceStatus.OK
+        env.provenance = prov
+        return env
+
+    # Variant-level modules (Ensembl VEP) need an rsid/region. A gene-only query
+    # has none, so report NO_DATA rather than firing an empty request that 400s.
+    if module_key in {"genetics-annotation", "genetics-nmd-inference", "tract-ligandability-oligo"} \
+            and not (ctx.get("rsid") or ctx.get("region")):
+        env.status = EvidenceStatus.NO_DATA
+        prov.warnings.append("no variant (rsid/region) supplied; variant-level module skipped")
         env.provenance = prov
         return env
 
