@@ -609,6 +609,17 @@ async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[
     if _cb_is_open(host):
         raise HTTPException(status_code=503, detail=f"Circuit open for host: {host}")
 
+    # Optional per-host auth from environment (no-op unless the key is configured).
+    req_headers = dict(DEFAULT_HEADERS)
+    if host.endswith("thebiogrid.org"):
+        _bg = os.getenv("BIOGRID_API_KEY")
+        if _bg:
+            params = {**params, "accesskey": _bg}
+    elif host.endswith("gwas-api.mrcieu.ac.uk"):
+        _jwt = os.getenv("OPENGWAS_JWT")
+        if _jwt:
+            req_headers["Authorization"] = f"Bearer {_jwt}"
+
     limits = _get_host_limits(host)
     sem = _get_host_sem(url)
     retry_attempts = int(limits.get("retry_attempts", HTTP_RETRY_ATTEMPTS))
@@ -625,7 +636,7 @@ async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[
                     write=float(limits.get("write_timeout", HTTP_WRITE_TIMEOUT)),
                     pool=float(limits.get("pool_timeout", HTTP_READ_TIMEOUT)),
                 )
-                async with httpx.AsyncClient(timeout=timeout, headers=DEFAULT_HEADERS, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=timeout, headers=req_headers, follow_redirects=True) as client:
                     wants_stream = bool(module.primary.get("stream", False)) or str(params.get("stream","")).lower() in {"1","true","yes"}
                     if wants_stream and method.upper() == "GET":
                         async with client.stream("GET", url, params=params) as resp:
