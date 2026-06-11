@@ -16,7 +16,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import Query
+from fastapi import Body, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # Per-module budget so one slow/dead upstream never stalls the whole page.
@@ -116,6 +116,44 @@ async def _resolve_gene(token: str) -> Dict[str, Optional[str]]:
     return out
 
 
+async def _resolve_drug_target(token: str) -> Optional[str]:
+    """If the token is a drug/biologic name, return the gene symbol it targets.
+    Uses the Open Targets Platform search + mechanisms of action. Best-effort."""
+    if not token:
+        return None
+    gql = """
+query ($q: String!) {
+  search(queryString: $q, entityNames: ["drug"]) {
+    hits {
+      id
+      object {
+        __typename
+        ... on Drug {
+          mechanismsOfAction { rows { targets { approvedSymbol } } }
+        }
+      }
+    }
+  }
+}"""
+    try:
+        async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_S,
+                                     headers={"User-Agent": "TargetvalGateway-webui"}) as c:
+            r = await c.post("https://api.platform.opentargets.org/api/v4/graphql",
+                             json={"query": gql, "variables": {"q": token}})
+            r.raise_for_status()
+            hits = (((r.json() or {}).get("data") or {}).get("search") or {}).get("hits") or []
+            for h in hits:
+                obj = h.get("object") or {}
+                for row in ((obj.get("mechanismsOfAction") or {}).get("rows") or []):
+                    for t in (row.get("targets") or []):
+                        sym = t.get("approvedSymbol")
+                        if sym:
+                            return sym
+    except Exception:
+        pass
+    return None
+
+
 async def _resolve_efo(condition: Optional[str]) -> Optional[str]:
     if not condition:
         return None
@@ -154,10 +192,19 @@ def register_webui(app, self_get: Callable, modules: Optional[Dict[str, Any]],
                   quick: bool = False):
         gene_tok, condition = _parse_query(q)
         gene = await _resolve_gene(gene_tok or "")
+        drug_hint = None
+        # If it didn't resolve to a real gene, the token may be a drug/biologic
+        # name (e.g. "sActRIIb-Fc") — look up the gene it targets, then re-resolve.
+        if not gene.get("ensembl_id") and gene_tok:
+            tgt = await _resolve_drug_target(gene_tok)
+            if tgt and tgt.upper() != (gene.get("symbol") or "").upper():
+                drug_hint = gene_tok
+                gene = await _resolve_gene(tgt)
         efo = await _resolve_efo(condition)
         resolved = {
             "symbol": gene["symbol"], "ensembl_id": gene["ensembl_id"],
             "uniprot_id": gene["uniprot_id"], "condition": condition, "efo": efo,
+            "drug": drug_hint,
         }
         params = {
             "symbol": resolved["symbol"], "ensembl_id": resolved["ensembl_id"],
@@ -252,6 +299,16 @@ def register_webui(app, self_get: Callable, modules: Optional[Dict[str, Any]],
             "results": results,
         })
 
+    @app.post("/synthesize", include_in_schema=False)
+    async def synthesize_endpoint(payload: Dict[str, Any] = Body(...)):
+        from app.synthesis import synthesize
+        out = await synthesize(
+            payload.get("query", ""),
+            payload.get("resolved", {}) or {},
+            payload.get("results", []) or [],
+        )
+        return JSONResponse(out)
+
     @app.get("/chat", include_in_schema=False, response_class=HTMLResponse)
     async def chat():
         return HTMLResponse(_CHAT_HTML)
@@ -296,6 +353,13 @@ _CHAT_HTML = """<!doctype html>
  .drow .dn { font-weight:600; } .drow .dc { color:#8b949e; white-space:nowrap; }
  .pill { font-size:11px; padding:1px 7px; border-radius:999px; margin-left:6px; }
  .dhead { margin:18px 0 8px; font-size:14px; font-weight:700; color:#8b949e; text-transform:uppercase; letter-spacing:.04em; }
+ .synthbtn { width:100%; margin:4px 0 16px; padding:12px; border-radius:10px; border:1px solid #8957e5; background:#6e40c9; color:#fff; font-weight:600; font-size:15px; }
+ .synthbtn:disabled { opacity:.5; }
+ .synth { background:#0d1117; border:1px solid #8957e5; border-radius:10px; padding:14px 16px; margin-bottom:16px; font-size:14.5px; line-height:1.55; }
+ .synth h1,.synth h2,.synth h3 { color:#b392f0; font-size:15px; margin:14px 0 6px; }
+ .synth strong { color:#e6edf3; }
+ .synth ul { margin:6px 0 6px 18px; } .synth li { margin:3px 0; }
+ .synth p { margin:8px 0; }
 </style></head>
 <body>
 <header><h1>TargetVal — Ask</h1><p>Type a target and indication in plain English. No code.</p></header>
@@ -311,6 +375,7 @@ _CHAT_HTML = """<!doctype html>
 </main>
 <script>
 const $ = s => document.querySelector(s);
+let lastData = null;
 function ex(t){ $('#q').value = t; $('#f').dispatchEvent(new Event('submit')); }
 function cls(st){ return st==='OK'?'OK':(st==='NO_DATA'?'NO_DATA':'ERR'); }
 $('#f').addEventListener('submit', async (e) => {
@@ -336,18 +401,23 @@ $('#f').addEventListener('submit', async (e) => {
         + `<details><summary>details</summary><pre>${escapeHtml(text).slice(0,1200)}</pre></details></div>`;
       return;
     }
+    lastData = d;
     const rz = d.resolved || {};
     const s = d.summary || {};
     const rep = d.report || {};
     // 1) Resolved line
-    let html = `<div class="resolved">Understood as → gene <b>${rz.symbol||'?'}</b>`
+    let html = `<div class="resolved">Understood as → `
+      + (rz.drug?`drug <b>${escapeHtml(rz.drug)}</b> → `:'')
+      + `gene <b>${rz.symbol||'?'}</b>`
       + (rz.ensembl_id?` (<b>${rz.ensembl_id}</b>)`:'')
       + (rz.uniprot_id?` · UniProt <b>${rz.uniprot_id}</b>`:'')
-      + (rz.condition?` · indication <b>${rz.condition}</b>`:'')
+      + (rz.condition?` · indication <b>${escapeHtml(rz.condition)}</b>`:'')
       + (rz.efo?` (<b>${rz.efo}</b>)`:'')
       + `<br><span class="src">${s.ok} OK · ${s.no_data} no-data · ${s.error} error across ${s.modules} modules (${s.mode} mode)</span></div>`;
-    // 2) Summary report (verdict + per-domain rollup)
-    html += `<div class="report"><h2>Summary report</h2><div class="verdict">${escapeHtml(rep.verdict||'')}</div>`;
+    // 2) AI synthesis button + container
+    html += `<button class="synthbtn" id="synth">✨ Generate AI feasibility synthesis</button><div id="synthout"></div>`;
+    // 3) Summary report (verdict + per-domain rollup)
+    html += `<div class="report"><h2>Coverage report</h2><div class="verdict">${escapeHtml(rep.verdict||'')}</div>`;
     for (const dm of (rep.domains||[])) {
       html += `<div class="drow"><span class="dn">${dm.name}</span>`
         + `<span class="dc"><span class="badge OK">${dm.ok} OK</span>`
@@ -365,6 +435,8 @@ $('#f').addEventListener('submit', async (e) => {
         + `<details><summary>raw</summary><pre>${escapeHtml(JSON.stringify(it.raw,null,2)).slice(0,8000)}</pre></details></div>`;
     }
     $('#out').innerHTML = html;
+    const sb = $('#synth');
+    if (sb) sb.addEventListener('click', runSynthesis);
   } catch(err) {
     const msg = (err && err.name === 'AbortError')
       ? 'The full run took too long this time (the service may have been cold). Wait ~30s and try again, or tick <b>quick</b> for a fast 14-source run.'
@@ -372,6 +444,37 @@ $('#f').addEventListener('submit', async (e) => {
     $('#out').innerHTML = `<div class="status">${msg}</div>`;
   } finally { $('#go').disabled = false; }
 });
+
+async function runSynthesis(){
+  if(!lastData) return;
+  const sb = $('#synth'); sb.disabled = true;
+  $('#synthout').innerHTML = '<div class="status"><span class="spin">✨</span> Claude is reading the evidence and writing the assessment… (~20–40s)</div>';
+  try {
+    const r = await fetch('/synthesize', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({query:lastData.query, resolved:lastData.resolved, results:lastData.results})});
+    const d = await r.json();
+    if(d.ok){ $('#synthout').innerHTML = `<div class="synth">${mdToHtml(d.report_markdown||'')}</div>`; }
+    else { $('#synthout').innerHTML = `<div class="status">Synthesis unavailable: ${escapeHtml(d.error||'unknown')}`
+      + (/(ANTHROPIC_API_KEY)/.test(d.error||'') ? ' — set <b>ANTHROPIC_API_KEY</b> in the Render environment to enable AI synthesis.' : '') + `</div>`; }
+  } catch(err){ $('#synthout').innerHTML = `<div class="status">Synthesis error: ${escapeHtml(String(err))}</div>`; }
+  finally { sb.disabled = false; }
+}
+
+function mdToHtml(md){
+  const esc = escapeHtml(md);
+  const lines = esc.split('\\n'); let out=''; let inList=false;
+  const inline = t => t.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/\\*(.+?)\\*/g,'<em>$1</em>');
+  for(let line of lines){
+    const h = line.match(/^(#{1,3})\\s+(.*)/);
+    const li = line.match(/^\\s*[-*]\\s+(.*)/);
+    if(h){ if(inList){out+='</ul>';inList=false;} out+=`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`; }
+    else if(li){ if(!inList){out+='<ul>';inList=true;} out+=`<li>${inline(li[1])}</li>`; }
+    else if(line.trim()===''){ if(inList){out+='</ul>';inList=false;} }
+    else { if(inList){out+='</ul>';inList=false;} out+=`<p>${inline(line)}</p>`; }
+  }
+  if(inList) out+='</ul>';
+  return out;
+}
 function escapeHtml(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 </script>
 </body></html>"""
