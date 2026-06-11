@@ -410,7 +410,10 @@ if WRAPPERS_ENABLED:
         # Resolve modules
         modules: List[str] = []
         if req.modules:
-            modules = [m for m in req.modules if m in mm]
+            # Accept underscore module keys (e.g. "mech_ppi") as aliases for the
+            # canonical hyphenated keys ("mech-ppi") used by the TargetVal MCP server.
+            requested = [m.replace("_", "-") for m in req.modules]
+            modules = [m for m in requested if m in mm]
         elif req.domain:
             key = req.domain.strip().upper()
             modules = [m for m in dmap.get(key, []) if m in mm]
@@ -456,6 +459,56 @@ if WRAPPERS_ENABLED:
                 await _run_one(k)
 
         return {"ok": True, "requested": {"modules": modules, "domain": req.domain}, "results": results, "errors": errors}
+
+    # -------- flat compat routes for the TargetVal MCP server --------
+    # targetval-mcp-server calls flat /{family}/{name} paths (e.g. /mech/ppi)
+    # that map onto canonical module keys ("family-name"). Register them as
+    # thin aliases so the MCP front-end works without changes.
+    _MCP_FLAT_ALIASES = {
+        "/mech/ppi": "mech-ppi",
+        "/mech/pathways": "mech-pathways",
+        "/tract/drugs": "tract-drugs",
+        "/clin/endpoints": "clin-endpoints",
+    }
+
+    def _make_flat_alias(module_key: str):
+        async def _flat_alias(
+            symbol: Optional[str] = None,
+            gene: Optional[str] = None,
+            ensembl_id: Optional[str] = None,
+            uniprot_id: Optional[str] = None,
+            efo: Optional[str] = None,
+            condition: Optional[str] = None,
+            tissue: Optional[str] = None,
+            cell_type: Optional[str] = None,
+            species: Optional[str] = None,
+            limit: int = Query(100, ge=1, le=500),
+            offset: int = Query(0, ge=0),
+            cutoff: Optional[float] = None,  # accepted for parity; modules self-filter
+        ) -> Any:
+            mm = _module_map()
+            if module_key not in mm:
+                raise HTTPException(status_code=404, detail=f"Unknown module: {module_key}")
+            params = dict(
+                symbol=symbol or gene,
+                ensembl_id=ensembl_id,
+                uniprot_id=uniprot_id,
+                efo=efo,
+                condition=condition,
+                tissue=tissue,
+                cell_type=cell_type,
+                species=species,
+                limit=limit,
+                offset=offset,
+            )
+            return await _self_get(mm[module_key], params)
+        return _flat_alias
+
+    for _path, _mod_key in _MCP_FLAT_ALIASES.items():
+        if isinstance(MODULES, dict) and _mod_key in MODULES:
+            _handler = _make_flat_alias(_mod_key)
+            app.add_api_route(_path, _handler, methods=["GET"], include_in_schema=False)
+            app.add_api_route("/v1" + _path, _handler, methods=["GET"], include_in_schema=False)
 
     # -------- domain run --------
     @app.post("/domain/{domain_id}/run")
