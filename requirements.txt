@@ -6,3 +6,4 @@ httpx==0.27.2
 h11==0.14.0
 networkx==3.2.1
 orjson==3.10.7
+anthropic>=0.69.0
