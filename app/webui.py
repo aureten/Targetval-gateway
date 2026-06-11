@@ -20,8 +20,12 @@ from fastapi import Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # Per-module budget so one slow/dead upstream never stalls the whole page.
-ASK_MODULE_TIMEOUT_S = float(os.getenv("ASK_MODULE_TIMEOUT_S", "22"))
+ASK_MODULE_TIMEOUT_S = float(os.getenv("ASK_MODULE_TIMEOUT_S", "15"))
 ASK_CONCURRENCY = int(os.getenv("ASK_CONCURRENCY", "24"))
+# Hard wall-clock cap on the whole /ask run so it ALWAYS returns valid JSON well
+# within the gunicorn request timeout (any module not done by then -> TIMEOUT).
+ASK_TOTAL_BUDGET_S = float(os.getenv("ASK_TOTAL_BUDGET_S", "75"))
+RESOLVE_TIMEOUT_S = float(os.getenv("RESOLVE_TIMEOUT_S", "8"))
 
 # Common nicknames -> official HGNC gene symbols. mygene also resolves many
 # aliases, but seeding the obvious immuno-oncology ones keeps it snappy/reliable.
@@ -86,7 +90,7 @@ async def _resolve_gene(token: str) -> Dict[str, Optional[str]]:
     symbol = ALIASES.get(token.upper(), token.upper())
     out["symbol"] = symbol
     try:
-        async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": "TargetvalGateway-webui"}) as c:
+        async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_S, headers={"User-Agent": "TargetvalGateway-webui"}) as c:
             r = await c.get(
                 "https://mygene.info/v3/query",
                 params={"q": f"{symbol}", "species": "human",
@@ -116,7 +120,7 @@ async def _resolve_efo(condition: Optional[str]) -> Optional[str]:
     if not condition:
         return None
     try:
-        async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": "TargetvalGateway-webui"}) as c:
+        async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_S, headers={"User-Agent": "TargetvalGateway-webui"}) as c:
             r = await c.get(
                 "https://www.ebi.ac.uk/ols4/api/search",
                 params={"q": condition, "ontology": "efo", "rows": 1, "exact": "false"},
@@ -183,7 +187,22 @@ def register_webui(app, self_get: Callable, modules: Optional[Dict[str, Any]],
                                 raw={"error": str(e)})
             return base
 
-        results: List[Dict[str, Any]] = await asyncio.gather(*[_one(k) for k in mods])
+        # Run with a hard wall-clock cap: whatever isn't done by the budget is
+        # marked TIMEOUT, so /ask always returns valid JSON within the request
+        # timeout (avoids the worker being killed and Render returning HTML).
+        task_key = {asyncio.ensure_future(_one(k)): k for k in mods}
+        done, pending = await asyncio.wait(list(task_key), timeout=ASK_TOTAL_BUDGET_S)
+        results: List[Dict[str, Any]] = []
+        for task, key in task_key.items():
+            if task in done and not task.cancelled() and task.exception() is None:
+                results.append(task.result())
+            else:
+                task.cancel()
+                did, dname = mod_domain.get(key, (0, "Other"))
+                results.append({"module": key, "domain_id": did, "domain": dname,
+                                "status": "TIMEOUT", "source": "(overall budget reached)",
+                                "fetched_n": 0,
+                                "raw": {"error": f"not finished within {ASK_TOTAL_BUDGET_S}s budget"}})
         results.sort(key=lambda r: (r["domain_id"], r["module"]))
 
         def _is_ok(r): return r["status"] == "OK"
@@ -299,10 +318,24 @@ $('#f').addEventListener('submit', async (e) => {
   const q = $('#q').value.trim(); if(!q) return;
   const quick = $('#quick').checked;
   $('#go').disabled = true;
-  $('#out').innerHTML = '<div class="status"><span class="spin">⏳</span> Resolving & querying all data sources… (first call may take ~30–60s if the service was asleep; full run covers every module)</div>';
+  $('#out').innerHTML = '<div class="status"><span class="spin">⏳</span> Waking the service & querying all data sources… (first call can take ~30–60s if it was asleep; full run covers every module)</div>';
   try {
-    const r = await fetch(`/ask?q=${encodeURIComponent(q)}${quick?'&quick=true':''}`);
-    const d = await r.json();
+    // Pre-warm: wake a sleeping (free-tier) instance before the heavy call so
+    // the cold-start delay doesn't eat into the /ask request budget.
+    try { await fetch('/healthz', {cache:'no-store'}); } catch(_) {}
+    const ctrl = new AbortController();
+    const tmo = setTimeout(() => ctrl.abort(), 110000);
+    const r = await fetch(`/ask?q=${encodeURIComponent(q)}${quick?'&quick=true':''}`, {signal: ctrl.signal});
+    clearTimeout(tmo);
+    const text = await r.text();
+    let d;
+    try { d = JSON.parse(text); }
+    catch(_) {
+      $('#out').innerHTML = `<div class="status">The server returned an unexpected response (HTTP ${r.status}). `
+        + `It may be redeploying or briefly overloaded — wait ~30s and try again, or tick <b>quick</b> for a lighter run.<br><br>`
+        + `<details><summary>details</summary><pre>${escapeHtml(text).slice(0,1200)}</pre></details></div>`;
+      return;
+    }
     const rz = d.resolved || {};
     const s = d.summary || {};
     const rep = d.report || {};
@@ -333,7 +366,10 @@ $('#f').addEventListener('submit', async (e) => {
     }
     $('#out').innerHTML = html;
   } catch(err) {
-    $('#out').innerHTML = `<div class="status">Error: ${escapeHtml(String(err))}</div>`;
+    const msg = (err && err.name === 'AbortError')
+      ? 'The full run took too long this time (the service may have been cold). Wait ~30s and try again, or tick <b>quick</b> for a fast 14-source run.'
+      : ('Network error: ' + escapeHtml(String(err)) + ' — wait a moment and retry.');
+    $('#out').innerHTML = `<div class="status">${msg}</div>`;
   } finally { $('#go').disabled = false; }
 });
 function escapeHtml(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
