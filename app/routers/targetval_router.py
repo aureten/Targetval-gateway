@@ -583,6 +583,7 @@ async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[
                     connect=float(limits.get("connect_timeout", HTTP_CONNECT_TIMEOUT)),
                     read=float(limits.get("read_timeout", HTTP_READ_TIMEOUT)),
                     write=float(limits.get("write_timeout", HTTP_WRITE_TIMEOUT)),
+                    pool=float(limits.get("pool_timeout", HTTP_READ_TIMEOUT)),
                 )
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     wants_stream = bool(module.primary.get("stream", False)) or str(params.get("stream","")).lower() in {"1","true","yes"}
@@ -1345,6 +1346,7 @@ async def _fetch(module: ModuleCfg, url: str, method: str = "GET", params: Dict[
                     connect=float(limits.get("connect_timeout", HTTP_CONNECT_TIMEOUT)),
                     read=float(limits.get("read_timeout", HTTP_READ_TIMEOUT)),
                     write=float(limits.get("write_timeout", HTTP_WRITE_TIMEOUT)),
+                    pool=float(limits.get("pool_timeout", HTTP_READ_TIMEOUT)),
                 )
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     wants_stream = bool(module.primary.get("stream", False)) or str(params.get("stream","")).lower() in {"1","true","yes"}

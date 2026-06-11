@@ -505,7 +505,7 @@ class RunRequestShim(BaseModel):
 
 @app.post("/targetval/run", include_in_schema=False)
 async def proxy_targetval_run_post(body: RunRequestShim):
-    return await _self_post("/targetval/run", body.model_dict() if hasattr(body, "model_dict") else body.dict())
+    return await _self_post("/targetval/run", body.model_dump() if hasattr(body, "model_dump") else body.dict())
 
 @app.get("/targetval/run", include_in_schema=False)
 async def proxy_targetval_run_get(
