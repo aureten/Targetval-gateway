@@ -415,7 +415,7 @@ $('#f').addEventListener('submit', async (e) => {
       + (rz.efo?` (<b>${rz.efo}</b>)`:'')
       + `<br><span class="src">${s.ok} OK · ${s.no_data} no-data · ${s.error} error across ${s.modules} modules (${s.mode} mode)</span></div>`;
     // 2) AI synthesis button + container
-    html += `<button class="synthbtn" id="synth">✨ Generate AI feasibility synthesis</button><div id="synthout"></div>`;
+    html += `<button class="synthbtn" id="synth">✨ Generate feasibility synthesis</button><div id="synthout"></div>`;
     // 3) Summary report (verdict + per-domain rollup)
     html += `<div class="report"><h2>Coverage report</h2><div class="verdict">${escapeHtml(rep.verdict||'')}</div>`;
     for (const dm of (rep.domains||[])) {
@@ -448,7 +448,7 @@ $('#f').addEventListener('submit', async (e) => {
 async function runSynthesis(){
   if(!lastData) return;
   const sb = $('#synth'); sb.disabled = true;
-  $('#synthout').innerHTML = '<div class="status"><span class="spin">✨</span> Claude is reading the evidence and writing the assessment… (~20–40s)</div>';
+  $('#synthout').innerHTML = '<div class="status"><span class="spin">✨</span> Synthesizing the evidence…</div>';
   try {
     const r = await fetch('/synthesize', {method:'POST', headers:{'content-type':'application/json'},
       body: JSON.stringify({query:lastData.query, resolved:lastData.resolved, results:lastData.results})});
