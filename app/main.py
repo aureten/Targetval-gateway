@@ -603,11 +603,21 @@ async def proxy_targetval_run_get_v1(
     return await _self_post("/v1/targetval/run", body)
 
 # ------------------------------------------------------------------------------
+# No-code free-text "ask" UI (/chat + /ask)
+# ------------------------------------------------------------------------------
+try:
+    from app.webui import register_webui
+    register_webui(app, _self_get, MODULES)
+    log.info("Registered no-code web UI at /chat")
+except Exception as _e:  # never let the UI break the API
+    log.warning("web UI not registered: %s", _e)
+
+# ------------------------------------------------------------------------------
 # Root
 # ------------------------------------------------------------------------------
 @app.get("/", include_in_schema=False)
 async def root():
-    return {"ok": True, "service": APP_TITLE, "docs": "/docs", "api": "/v1"}
+    return {"ok": True, "service": APP_TITLE, "docs": "/docs", "chat": "/chat", "api": "/v1"}
 
 if __name__ == "__main__":
     import uvicorn
