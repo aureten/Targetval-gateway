@@ -176,4 +176,5 @@ faithful drafts, not gospel — reconcile against the SPECFREEZE before freezing
   with the live-validated endpoints + auth + dependency tags from §5 already filled in)
 - `docs/v3_prebuilt/SPRINT1_TASKS.md` → the concrete Sprint-1 task checklist + the two gold-fixture
   acceptance assertions. **Start here.**
+- `docs/v3_prebuilt/INTERFACE_DESIGN.md` -> the Insight-Card web UI design (the v3 successor to the gateway's /chat page): two-pass convergence strip, causal-path visualization, EDG independence, typed gap cards, SEARCH/SETTLE modes, scoreless visual language.
 
