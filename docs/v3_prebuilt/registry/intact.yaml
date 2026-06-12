@@ -1,0 +1,14 @@
+source_name: intact
+display_name: IntAct (PSICQUIC)
+api_type: psicquic
+base_url: https://www.ebi.ac.uk/intact/ws/interaction
+auth: none
+auth_env_var: null
+rate_limit: { requests_per_second: 2.0, burst: 4 }
+retry: { max_attempts: 4, backoff_base: 0.6, backoff_max: 12.0 }
+timeout_seconds: 25.0
+health_check_url: https://www.ebi.ac.uk/intact/ws/interaction
+evidence_families: [pathway]
+modules_served: [mech-ppi, ppi-experimental]
+dependency_tags:
+  - { type: shared_dataset, coupled_source: string, detail: "partial PPI overlap with STRING", discount: 0.6 }

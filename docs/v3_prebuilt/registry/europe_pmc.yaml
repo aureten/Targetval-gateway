@@ -1,0 +1,14 @@
+source_name: europe_pmc
+display_name: Europe PMC
+api_type: rest
+base_url: https://www.ebi.ac.uk/europepmc/webservices/rest
+auth: none
+auth_env_var: null
+rate_limit: { requests_per_second: 4.0, burst: 8 }
+retry: { max_attempts: 4, backoff_base: 0.5, backoff_max: 12.0 }
+timeout_seconds: 20.0
+health_check_url: https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=test&format=json
+evidence_families: [literature]
+modules_served: [literature-overlay]
+dependency_tags:
+  - { type: shared_dataset, coupled_source: pubmed, detail: "Europe PMC mirrors PubMed", discount: 0.9 }

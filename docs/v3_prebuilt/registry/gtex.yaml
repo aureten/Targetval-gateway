@@ -1,0 +1,17 @@
+# Wave-1 source — GTEx Portal (rest). LIVE-VALIDATED: v1 REST is DECOMMISSIONED; use api/v2.
+source_name: gtex
+display_name: GTEx Portal
+api_type: rest
+base_url: https://gtexportal.org/api/v2          # NOT /rest/v1 (dead)
+auth: none
+auth_env_var: null
+rate_limit: { requests_per_second: 3.0, burst: 5 }
+retry: { max_attempts: 4, backoff_base: 0.5, backoff_max: 12.0 }
+timeout_seconds: 20.0
+health_check_url: https://gtexportal.org/api/v2
+evidence_families: [expression, genetics]
+modules_served: [expr-baseline, genetics-sqtl]
+dependency_tags:
+  - { type: shared_dataset, coupled_source: eqtl_catalogue, detail: "GTEx tissues feed eQTL Catalogue", discount: 0.8 }
+# expr-baseline: /api/v2/expression/geneExpression?gencodeId=<VERSIONED ensembl id e.g. ENSG..N>
+# sqtl:          /api/v2/association/singleTissueEqtl

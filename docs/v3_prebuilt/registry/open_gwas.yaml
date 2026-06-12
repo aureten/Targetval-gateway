@@ -1,0 +1,15 @@
+# Wave-1 source — OpenGWAS / MRC-IEU (rest). NOTE: now requires a JWT token.
+source_name: open_gwas
+display_name: OpenGWAS (MRC-IEU)
+api_type: rest
+base_url: https://gwas-api.mrcieu.ac.uk
+auth: token                       # REQUIRED now — unauthenticated requests hang/time out
+auth_env_var: OPENGWAS_JWT        # Authorization: Bearer $OPENGWAS_JWT  (free at api.opengwas.io)
+rate_limit: { requests_per_second: 2.0, burst: 4 }
+retry: { max_attempts: 4, backoff_base: 0.6, backoff_max: 16.0 }
+timeout_seconds: 20.0
+health_check_url: https://gwas-api.mrcieu.ac.uk/status
+evidence_families: [genetics]
+modules_served: [genetics-mr, genetics-consortia-summary]
+dependency_tags:
+  - { type: shared_dataset, coupled_source: gwas_catalog, detail: "shared GWAS summary stats", discount: 0.6 }

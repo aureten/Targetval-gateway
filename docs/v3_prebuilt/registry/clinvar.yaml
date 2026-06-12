@@ -1,0 +1,15 @@
+# Wave-1 source — ClinVar via NCBI E-utilities (rest). Send a descriptive User-Agent.
+source_name: clinvar
+display_name: ClinVar (NCBI E-utilities)
+api_type: rest
+base_url: https://eutils.ncbi.nlm.nih.gov/entrez/eutils
+auth: key                          # optional NCBI api_key raises rate limit; works without for low volume
+auth_env_var: NCBI_API_KEY
+rate_limit: { requests_per_second: 3.0, burst: 3 }   # 10/s with key
+retry: { max_attempts: 4, backoff_base: 0.5, backoff_max: 12.0 }
+timeout_seconds: 15.0
+health_check_url: https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi
+evidence_families: [genetics]
+modules_served: [genetics-rare]
+dependency_tags: []
+# Always send User-Agent with a contact email or NCBI may throttle/403.

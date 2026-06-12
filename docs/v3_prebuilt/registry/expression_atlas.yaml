@@ -1,0 +1,13 @@
+source_name: expression_atlas
+display_name: EBI Expression Atlas
+api_type: rest
+base_url: https://www.ebi.ac.uk/gxa/json/experiments
+auth: none
+auth_env_var: null
+rate_limit: { requests_per_second: 3.0, burst: 5 }
+retry: { max_attempts: 4, backoff_base: 0.5, backoff_max: 12.0 }
+timeout_seconds: 20.0
+health_check_url: https://www.ebi.ac.uk/gxa/json/experiments
+evidence_families: [expression]
+modules_served: [expr-baseline, expr-inducibility]
+dependency_tags: []

@@ -165,3 +165,15 @@ intact↔string(0.6); europe_pmc↔pubmed(0.9); openfda↔drugcentral(0.6).
 3. Write the Wave-1 `sources/registry/*.yaml` using §5 above.
 4. Implement the Sprint-1 genetics vertical and make Fixtures 1 and 5 pass (`tests/fixtures/`).
 5. Keep this file updated with a running "where we are" status as the build progresses.
+
+## 8. PRE-BUILT DRAFTS (in `docs/v3_prebuilt/` — drop straight in, then verify vs spec)
+These were drafted in the gateway session with full context, to save the new session time. Treat as
+faithful drafts, not gospel — reconcile against the SPECFREEZE before freezing.
+- `docs/v3_prebuilt/src/entities.py`  → `src/targetval/canonical/entities.py` (11 entities + all enums)
+- `docs/v3_prebuilt/src/models.py`    → `src/targetval/evidence/models.py` (TypedClaim, CausalPath,
+  InsightCard, CrossVectorAssessment, etc.)
+- `docs/v3_prebuilt/registry/*.yaml`  → `src/targetval/sources/registry/` (all 12 Wave-1 sources,
+  with the live-validated endpoints + auth + dependency tags from §5 already filled in)
+- `docs/v3_prebuilt/SPRINT1_TASKS.md` → the concrete Sprint-1 task checklist + the two gold-fixture
+  acceptance assertions. **Start here.**
+
