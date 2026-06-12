@@ -1,0 +1,15 @@
+source_name: reactome
+display_name: Reactome ContentService
+api_type: rest
+base_url: https://reactome.org/ContentService
+auth: none
+auth_env_var: null
+rate_limit: { requests_per_second: 3.0, burst: 5 }
+retry: { max_attempts: 4, backoff_base: 0.5, backoff_max: 12.0 }
+timeout_seconds: 20.0
+health_check_url: https://reactome.org/ContentService/data/database/version
+evidence_families: [pathway]
+modules_served: [mech-pathways]
+dependency_tags:
+  - { type: shared_dataset, coupled_source: pathway_commons, detail: "Pathway Commons aggregates Reactome", discount: 0.9 }
+# NOTE: AnalysisService/identifiers (POST text/plain id list) for over-representation; ContentService for curated pathways.

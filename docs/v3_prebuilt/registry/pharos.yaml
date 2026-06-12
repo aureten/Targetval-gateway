@@ -1,0 +1,14 @@
+source_name: pharos
+display_name: Pharos (NCATS)
+api_type: graphql
+base_url: https://pharos-api.ncats.io/graphql
+auth: none
+auth_env_var: null
+rate_limit: { requests_per_second: 3.0, burst: 5 }
+retry: { max_attempts: 4, backoff_base: 0.5, backoff_max: 12.0 }
+timeout_seconds: 20.0
+health_check_url: https://pharos-api.ncats.io/graphql
+evidence_families: [druggability]
+modules_served: [tract-modality, tract-ligandability-sm]
+dependency_tags:
+  - { type: shared_dataset, coupled_source: chembl, detail: "Pharos ingests ChEMBL bioactivity", discount: 0.4 }

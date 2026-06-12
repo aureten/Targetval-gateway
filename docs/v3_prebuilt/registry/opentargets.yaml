@@ -1,0 +1,18 @@
+# Wave-1 source — Open Targets Platform (graphql). LIVE-VALIDATED endpoint.
+source_name: opentargets
+display_name: Open Targets Platform
+api_type: graphql
+base_url: https://api.platform.opentargets.org/api/v4/graphql   # v3/api.opentargets.io is RETIRED
+auth: none
+auth_env_var: null
+rate_limit: { requests_per_second: 5.0, burst: 10 }
+retry: { max_attempts: 4, backoff_base: 0.5, backoff_max: 16.0 }
+timeout_seconds: 20.0
+health_check_url: https://api.platform.opentargets.org/api/v4/graphql
+evidence_families: [genetics, druggability, clinical]
+modules_served: [genetics-l2g, genetics-coloc, genetics-pqtl, clin-biomarker-fit]
+dependency_tags:
+  - { type: shared_dataset, coupled_source: gwas_catalog, detail: "OT genetic associations draw on GWAS Catalog", discount: 0.8 }
+  - { type: shared_ontology, coupled_source: efo, detail: "EFO disease ontology", discount: 0.2 }
+# Query contract: target(ensemblId:$ensg){ approvedSymbol associatedDiseases(page:{index:0,size:N}){ rows{ disease{id name} score datatypeScores{id score} } } }
+# Genetic-association evidence = datatypeScores where id == 'genetic_association'.

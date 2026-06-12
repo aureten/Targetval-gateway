@@ -1,0 +1,14 @@
+source_name: chembl
+display_name: ChEMBL
+api_type: rest
+base_url: https://www.ebi.ac.uk/chembl/api/data
+auth: none
+auth_env_var: null
+rate_limit: { requests_per_second: 3.0, burst: 5 }
+retry: { max_attempts: 4, backoff_base: 0.5, backoff_max: 12.0 }
+timeout_seconds: 20.0
+health_check_url: https://www.ebi.ac.uk/chembl/api/data/status
+evidence_families: [druggability]
+modules_served: [tract-drugs]
+dependency_tags:
+  - { type: shared_dataset, coupled_source: drugbank, detail: "overlapping drug-target curation", discount: 0.6 }

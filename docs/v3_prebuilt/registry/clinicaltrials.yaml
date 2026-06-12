@@ -1,0 +1,15 @@
+# Wave-1 source — ClinicalTrials.gov v2 (rest). LIVE-VALIDATED: use query.cond / query.term.
+source_name: clinicaltrials
+display_name: ClinicalTrials.gov (API v2)
+api_type: rest
+base_url: https://clinicaltrials.gov/api/v2/studies
+auth: none
+auth_env_var: null
+rate_limit: { requests_per_second: 3.0, burst: 5 }
+retry: { max_attempts: 4, backoff_base: 0.5, backoff_max: 12.0 }
+timeout_seconds: 20.0
+health_check_url: https://clinicaltrials.gov/api/v2/studies?pageSize=1
+evidence_families: [clinical]
+modules_served: [clin-endpoints, clin-feasibility, clin-pipeline]
+dependency_tags: []
+# Param contract: query.cond=<disease>, query.term=<gene>  (NOT cond / term).
