@@ -1,0 +1,39 @@
+name: targetval-mechanistic-cache-replay
+
+on:
+  push:
+    branches:
+      - audit/mechanistic-biologist-20260717
+    paths:
+      - scripts/targetval_mechanistic_audit_cache_replay.py
+      - .github/workflows/targetval-mechanistic-cache-replay.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - scripts/targetval_mechanistic_audit_cache_replay.py
+      - .github/workflows/targetval-mechanistic-cache-replay.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Replay six mechanistic cases
+        env:
+          TARGETVAL_BASE_URL: https://targetval-api.onrender.com
+          AUDIT_OUT: audit_results/mechanistic_replay
+        run: python scripts/targetval_mechanistic_audit_cache_replay.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: targetval-mechanistic-cache-replay
+          path: audit_results/mechanistic_replay
+          retention-days: 7
