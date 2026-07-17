@@ -7,6 +7,12 @@ on:
     paths:
       - scripts/targetval_mechanistic_audit.py
       - .github/workflows/targetval-mechanistic-audit.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - scripts/targetval_mechanistic_audit.py
+      - .github/workflows/targetval-mechanistic-audit.yml
   workflow_dispatch: {}
 
 permissions:
