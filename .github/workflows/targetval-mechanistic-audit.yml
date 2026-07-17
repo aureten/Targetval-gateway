@@ -1,0 +1,34 @@
+name: targetval-mechanistic-audit
+
+on:
+  push:
+    branches:
+      - audit/mechanistic-biologist-20260717
+    paths:
+      - scripts/targetval_mechanistic_audit.py
+      - .github/workflows/targetval-mechanistic-audit.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  live-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run ten-case live mechanistic audit
+        env:
+          TARGETVAL_BASE_URL: https://targetval-api.onrender.com
+          AUDIT_OUT: audit_results/mechanistic
+        run: python scripts/targetval_mechanistic_audit.py
+      - name: Upload complete audit responses
+        uses: actions/upload-artifact@v4
+        with:
+          name: targetval-mechanistic-audit
+          path: audit_results/mechanistic
+          retention-days: 7
